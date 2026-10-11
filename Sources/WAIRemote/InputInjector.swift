@@ -18,6 +18,7 @@ final class InputInjector {
         guard allowed else { releaseAll(); return }
         if m.type == "pointer", let x = m.x, let y = m.y, let action = m.action {
             let p = CGPoint(x: bounds.minX + x * max(1, bounds.width - 1), y: bounds.minY + y * max(1, bounds.height - 1))
+            let previousPoint = lastPoint
             lastPoint = p
             let b = m.button ?? buttons.sorted().first ?? 0
             let button: CGMouseButton = b == 2 ? .right : b == 1 ? .center : .left
@@ -39,6 +40,10 @@ final class InputInjector {
                 let type: CGEventType = action == "down" ? down : action == "up" ? up : buttons.isEmpty ? .mouseMoved : drag
                 let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: p, mouseButton: button)
                 event?.setIntegerValueField(.mouseEventClickState, value: Int64(clickCounts[b] ?? 0))
+                if action == "move" {
+                    event?.setIntegerValueField(.mouseEventDeltaX, value: Int64((p.x - previousPoint.x).rounded()))
+                    event?.setIntegerValueField(.mouseEventDeltaY, value: Int64((p.y - previousPoint.y).rounded()))
+                }
                 post(event)
                 if action == "up" { buttons.remove(b); clickCounts[b] = nil }
                 if action == "move" && !buttons.isEmpty { clickSequence.reset() }

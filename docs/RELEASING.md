@@ -34,3 +34,15 @@ The public relay uses coturn 4.18.0, TCP 3478 and a bounded UDP relay range. Pee
 After changing nginx, validate its configuration and reload it. If an edge proxy mirrors the origin configuration, wait for or trigger that sync before checking the public URL. Confirm `/remote/connect/healthz`, real device authentication, the remote session, download responses and update feed through the public hostname.
 
 The host must remain awake, unlocked and explicitly sharing. This release does not provide login-screen access, audio, file transfer or a service availability guarantee.
+
+## Native input regression
+
+On the receiving Mac, open the app's mouse and keyboard test window. Connect from a second Mac on a different network.
+
+- Click the test button once: the counter must increase by exactly one.
+- Paste `WAI Remote 11 — Привет!`: the field must contain the complete string.
+- Drag the test window by its title bar horizontally and vertically. It must remain under the pointer, moving by the same distance as the pointer, including on a Retina display.
+- Open and dismiss the viewer's local menu, then repeat the click. Losing local focus must release pressed input; returning must allow a fresh interaction.
+- Disconnect, reconnect using the saved computer and repeat the click and paste.
+
+The pre-fix drag regression moved the window farther than the pointer. Check the window's final position as well as the cursor: a moving cursor alone does not prove correct drag events.
