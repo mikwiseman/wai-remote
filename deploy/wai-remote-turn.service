@@ -1,0 +1,23 @@
+[Unit]
+Description=WAI Remote bounded TURN relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=wai-remote
+Group=wai-remote
+ExecStart=/opt/wai-remote/coturn/bin/turnserver -c /etc/wai-remote/turnserver.conf
+Restart=on-failure
+RestartSec=3
+RuntimeDirectory=wai-remote-turn
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryMax=192M
+TasksMax=64
+LimitNOFILE=2048
+
+[Install]
+WantedBy=multi-user.target

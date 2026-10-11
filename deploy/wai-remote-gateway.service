@@ -1,0 +1,22 @@
+[Unit]
+Description=WAI Remote authenticated signaling
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=wai-remote
+Group=wai-remote
+ExecStart=/opt/wai-remote/bin/gateway -listen 127.0.0.1:8790 -web /opt/wai-remote/web -relay-secret /etc/wai-remote/relay-secret -relay-ip 65.108.215.2 -releases /opt/wai-remote/releases
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryMax=128M
+TasksMax=64
+LimitNOFILE=2048
+
+[Install]
+WantedBy=multi-user.target

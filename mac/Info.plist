@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDisplayName</key>
+	<string>WAI Remote</string>
+	<key>CFBundleExecutable</key>
+	<string>WAIRemote</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIconName</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>is.wai.remote.dev</string>
+	<key>CFBundleName</key>
+	<string>WAI Remote</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.2.0</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>WAI Remote invitation</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>wai-remote</string>
+			</array>
+		</dict>
+	</array>
+	<key>CFBundleVersion</key>
+	<string>2</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>15.0</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Подключение к другим устройствам в вашей локальной сети.</string>
+	<key>SUAllowsAutomaticUpdates</key>
+	<false/>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUFeedURL</key>
+	<string>https://waiwai.is/remote/updates/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>GndWRikzQviRjfkdO0CHl99wRI1tHaBpzAJ47EeP15U=</string>
+	<key>SURequireSignedFeed</key>
+	<true/>
+	<key>SUSendProfileInfo</key>
+	<false/>
+	<key>SUVerifyUpdateBeforeExtraction</key>
+	<true/>
+</dict>
+</plist>

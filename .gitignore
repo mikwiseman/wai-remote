@@ -1,0 +1,21 @@
+.DS_Store
+.build/
+build/
+node_modules/
+web/dist/
+gateway/wai-gateway
+*.log
+.env
+.runtime/
+.release/
+ios/*.xcodeproj/
+
+# Local implementation history and device-specific test evidence.
+.reviews/
+PLAN.md
+REVIEW.md
+IMPLEMENTATION.md
+docs/CROSS-NETWORK-TEST.md
+docs/RELEASE-PLAN.md
+docs/TESTFLIGHT.md
+docs/keychain-and-onboarding.md

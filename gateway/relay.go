@@ -1,0 +1,98 @@
+package main
+
+import (
+	"crypto/hmac"
+	"crypto/sha1"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"errors"
+	"net"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+)
+
+type relayIssuer struct {
+	secret []byte
+	url    string
+}
+
+func loadRelay(path, address, publicIP string) (*relayIssuer, error) {
+	if path == "" {
+		return nil, nil
+	}
+	host, _, err := net.SplitHostPort(address)
+	if err != nil || !net.ParseIP(host).IsLoopback() {
+		return nil, errors.New("relay issuer must listen behind the trusted loopback proxy")
+	}
+	ip := net.ParseIP(publicIP)
+	if ip == nil || ip.To4() == nil || ip.IsPrivate() || ip.IsLoopback() || ip.IsUnspecified() {
+		return nil, errors.New("relay needs a public IPv4 address")
+	}
+	secret, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	secret = []byte(strings.TrimSpace(string(secret)))
+	if len(secret) < 32 || len(secret) > 256 {
+		return nil, errors.New("relay secret must contain 32 to 256 bytes")
+	}
+	return &relayIssuer{secret: secret, url: "turn:" + ip.String() + ":3478?transport=tcp"}, nil
+}
+
+func (r *relayIssuer) issue(peer string, now time.Time) *iceConfiguration {
+	expiry := now.Add(time.Hour).Unix()
+	id := sha256.Sum256([]byte(peer))
+	username := strconv.FormatInt(expiry, 10) + ":" + hex.EncodeToString(id[:16])
+	mac := hmac.New(sha1.New, r.secret)
+	mac.Write([]byte(username))
+	return &iceConfiguration{Servers: []iceServer{{URLs: []string{r.url}, Username: username, Credential: base64.StdEncoding.EncodeToString(mac.Sum(nil))}}, Policy: "relay", ExpiresAt: expiry}
+}
+
+type admissionEntry struct {
+	active, attempts int
+	since            time.Time
+}
+type admission struct {
+	mu      sync.Mutex
+	clients map[string]*admissionEntry
+}
+
+func newAdmission() *admission { return &admission{clients: map[string]*admissionEntry{}} }
+func (a *admission) enter(ip string, now time.Time) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for key, entry := range a.clients {
+		if entry.active == 0 && now.Sub(entry.since) > time.Minute {
+			delete(a.clients, key)
+		}
+	}
+	entry := a.clients[ip]
+	if entry == nil {
+		if len(a.clients) >= 2048 {
+			return false
+		}
+		entry = &admissionEntry{since: now}
+		a.clients[ip] = entry
+	}
+	if now.Sub(entry.since) >= time.Minute {
+		entry.attempts = 0
+		entry.since = now
+	}
+	entry.attempts++
+	if entry.active >= 8 || entry.attempts > 30 {
+		return false
+	}
+	entry.active++
+	return true
+}
+func (a *admission) leave(ip string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if entry := a.clients[ip]; entry != nil && entry.active > 0 {
+		entry.active--
+	}
+}
