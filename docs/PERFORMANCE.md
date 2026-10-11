@@ -2,6 +2,14 @@
 
 Work in progress, 11 October 2026. Target: the user's MacBook and **waiMini**, not Mark's Mac.
 
+## Current candidate: 0.2.1 (20)
+
+Both Macs installed the same signed/notarized universal build through Sparkle (MacBook 19→20, Mini 17→20). Trusted devices and existing WAI Remote permissions remained usable. The public immutable DMG was downloaded and its SHA-256 matched the locally mounted and verified installer. The stable appcast and landing still advertise 0.2.0 while comparison continues.
+
+The 611-second relay/TCP run on 11 October delivered **3840×2160 H.264 / VideoToolbox**, median **55 fps**, and 33,468 decoded frames with zero decoder drops. Application input acknowledgement p50/p95/max was **126/259/429 ms** over 1,251 samples. Video-buffer p50/p95 was **32.33/40.28 ms**; one interval reached 698 ms. Eighteen freezes totaled **5.901 seconds over 609 measured seconds (0.97%)**. All original numerical gates passed for this run, but it was close to the freeze threshold and does not prove consistently smooth playback. Per-second renderer maximum gaps had p50/p95 **125/148 ms**, with a worst gap of 496 ms.
+
+Five real native clicks incremented the counter from zero to five; mixed-language paste and a 60×40-pixel diagonal title drag landed correctly. The TCP-only preference was then removed. Preferred UDP, reconnection, and the AnyDesk comparison remain to be completed on the final build. Raw measurements: `.runtime/mini-candidate20-tcp.jsonl`; screenshot: `.runtime/mini-build20-tcp-live.png`.
+
 ## Measurements before changing behavior
 
 Build 4 is an instrumented 0.2.0 baseline plus the separately verified stale-frame fix. `defaults write is.wai.remote.dev performanceDiagnostics -bool true` before launch enables bounded local JSONL files in the user's temporary directory (`wai-remote-performance-PID.jsonl`). This records no screen pixels, text, keys, SDP, IP addresses, or device names. Disable the preference after the comparison.
@@ -142,7 +150,7 @@ The 140-ms experiment (viewer 19) did not demonstrate a useful improvement: its 
 
 Both devices' independent UDP STUN probes had p95 around **174 ms**. Mini's maximum was **1.203 seconds**, with 150/150 replies. A paired MacBook probe with default versus AF41 DSCP marking gave essentially identical results (p50 ~89.6 ms, p95 ~164.7 ms); no QoS setting was added. Existing VPNs, network settings and unrelated applications were left unchanged.
 
-AnyDesk 9.8.1 is installed on Mini. The owner approved Screen Recording/Accessibility, but macOS is waiting for the owner's password before applying them. An ordinary MacBook session request remained unaccepted and was cancelled. There is **no completed AnyDesk performance comparison**, no unattended password, and no basis for a market-superiority claim. Final candidate testing and comparison remain open.
+AnyDesk 9.8.1 is installed on Mini. After the owner entered the system password, both Screen Recording and Accessibility showed **Granted**; Full Disk Access stayed denied. The first ordinary MacBook session request still remained unaccepted and was cancelled. There is **no completed AnyDesk performance comparison** yet, no unattended password, and no basis for a market-superiority claim. Final candidate testing and comparison remain open.
 
 ## Current implementation
 
