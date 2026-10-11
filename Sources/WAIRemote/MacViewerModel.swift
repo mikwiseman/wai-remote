@@ -18,7 +18,9 @@ final class MacViewerModel: ObservableObject {
     @Published var connecting = false
     @Published var connected = false
     @Published var receivedFrame = false
-    @Published var track: RTCVideoTrack?
+    @Published var track: RTCVideoTrack? {
+        didSet { if track !== oldValue { receivedFrame = false } }
+    }
     @Published private(set) var session = ViewerSession()
     @Published var tool: DrawingTool = .pen
     @Published var color = InkStore.colors[0]
