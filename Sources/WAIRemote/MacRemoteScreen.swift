@@ -27,7 +27,7 @@ private final class FrameRenderer: NSObject, RTCVideoRenderer {
 
 final class RemoteScreenView: NSView, NSTextInputClient {
     private let model: MacViewerModel
-    private let video = RTCMTLNSVideoView(frame: .zero)
+    private var video: RTCMTLNSVideoView?
     private let ink = InkView()
     private var renderer: FrameRenderer?
     private var track: RTCVideoTrack?
@@ -43,7 +43,7 @@ final class RemoteScreenView: NSView, NSTextInputClient {
         self.model = model
         super.init(frame: .zero)
         wantsLayer = true; layer?.backgroundColor = NSColor.black.cgColor
-        addSubview(video); addSubview(ink)
+        addSubview(ink)
         setAccessibilityElement(true); setAccessibilityRole(.image)
         setAccessibilityLabel("Экран другого Mac. Нажмите для управления. Command Option Escape освобождает клавиатуру.")
     }
@@ -56,23 +56,36 @@ final class RemoteScreenView: NSView, NSTextInputClient {
     override func layout() {
         super.layout()
         let fit = viewport
-        video.frame = NSRect(x: fit.x, y: fit.y, width: fit.width, height: fit.height)
-        ink.frame = video.frame
+        let frame = NSRect(x: fit.x, y: fit.y, width: fit.width, height: fit.height)
+        video?.frame = frame
+        ink.frame = frame
     }
     func update() {
         if track !== model.track {
-            detach(); track = model.track
-            let renderer = FrameRenderer(video: video)
-            renderer.onFrame = { [weak model] in model?.receivedFrame = true }
-            self.renderer = renderer; track?.add(renderer)
+            detach()
+            if let track = model.track {
+                // Metal keeps its last texture, so each track needs a fresh surface.
+                let video = RTCMTLNSVideoView(frame: .zero)
+                self.video = video; self.track = track
+                addSubview(video, positioned: .below, relativeTo: ink)
+                let renderer = FrameRenderer(video: video)
+                renderer.onFrame = { [weak self, weak model, weak track] in
+                    guard let self, let model, let track,
+                          self.track === track, model.track === track else { return }
+                    model.receivedFrame = true
+                }
+                self.renderer = renderer; track.add(renderer)
+            }
         }
         ink.referenceWidth = Double(model.session.state?.surface.width ?? 1920)
         ink.strokes = model.visibleStrokes
         needsLayout = true
     }
     func detach() {
+        renderer?.onFrame = nil
         if let renderer { track?.remove(renderer) }
         renderer = nil; track = nil
+        video?.removeFromSuperview(); video = nil
         pressedKeys.removeAll(); pointerDown = false
     }
     override func updateTrackingAreas() {
@@ -201,6 +214,7 @@ struct ViewerWindowView: View {
                 Color.black
                 MacRemoteScreen(model: model)
                 if !model.connected || !model.receivedFrame {
+                    Color.black
                     VStack(spacing: 16) {
                         if model.connecting || model.connected { ProgressView().tint(.white) }
                         Image(systemName: model.connecting ? "desktopcomputer" : "display.trianglebadge.exclamationmark").font(.system(size: 40)).foregroundStyle(.white.opacity(0.6))

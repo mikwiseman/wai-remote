@@ -15,7 +15,8 @@ let package = Package(
     targets: [
         .target(name: "RemoteCore"),
         .executableTarget(name: "WAIRemote", dependencies: ["RemoteCore", "WebRTC", "Sparkle"]),
-        .testTarget(name: "RemoteCoreTests", dependencies: ["RemoteCore"])
+        .testTarget(name: "RemoteCoreTests", dependencies: ["RemoteCore"]),
+        .testTarget(name: "WAIRemoteTests", dependencies: ["WAIRemote"])
     ],
     swiftLanguageModes: [.v5]
 )
