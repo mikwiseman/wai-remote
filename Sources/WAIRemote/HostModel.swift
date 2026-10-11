@@ -24,6 +24,7 @@ final class HostModel: ObservableObject {
     @Published var detail = "Откройте доступ, когда будете готовы."
     @Published var sharing = false
     @Published var starting = false
+    @Published private(set) var reconnecting = false
     @Published var isLab = false
     @Published var connectedName: String?
     @Published var pending: PendingPeer?
@@ -65,15 +66,15 @@ final class HostModel: ObservableObject {
         self.identity = identity
         RTCInitializeSSL()
         factory = RTCPeerConnectionFactory(encoderFactory: ScreenVideoEncoderFactory(), decoderFactory: ScreenVideoDecoderFactory())
-        for event in [NSWorkspace.sessionDidResignActiveNotification, NSWorkspace.willSleepNotification, NSWorkspace.screensDidSleepNotification] {
-            observers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: event, object: nil, queue: .main) { [weak self] _ in self?.stop(reason: "Сеанс Mac завершён или заблокирован") })
+        for (event, cause) in [(NSWorkspace.sessionDidResignActiveNotification, "session-inactive"), (NSWorkspace.willSleepNotification, "system-sleep"), (NSWorkspace.screensDidSleepNotification, "display-sleep")] {
+            observers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: event, object: nil, queue: .main) { [weak self] _ in self?.stop(reason: "Сеанс Mac завершён или заблокирован", cause: cause) })
         }
         observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
             guard let self, self.sharing, !self.isLab else { return }
             // AppKit posts this for unrelated display/settings changes too.
             let screen = NSScreen.screens.first { String(($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? UInt32) ?? 0) == self.surface.id }
             guard let screen, screen.frame == self.capturedScreenFrame else {
-                self.stop(reason: "Общий экран изменился. Откройте доступ для нового размера."); return
+                self.stop(reason: "Общий экран изменился. Откройте доступ для нового размера.", cause: "display-changed"); return
             }
         })
         observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
@@ -83,7 +84,7 @@ final class HostModel: ObservableObject {
         DistributedNotificationCenter.default().addObserver(self, selector: #selector(screenLocked), name: NSNotification.Name("com.apple.screenIsLocked"), object: nil)
         tick = Timer.connectionTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in self?.housekeeping() }
     }
-    @objc private func screenLocked() { DispatchQueue.main.async { [weak self] in self?.stop(reason: "Mac заблокирован") } }
+    @objc private func screenLocked() { DispatchQueue.main.async { [weak self] in self?.stop(reason: "Mac заблокирован", cause: "screen-locked") } }
     func refreshPermissions() {
         let screen = CGPreflightScreenCaptureAccess(), control = CGPreflightPostEventAccess()
         if screenAllowed != screen { screenAllowed = screen }
@@ -130,7 +131,7 @@ final class HostModel: ObservableObject {
         guard let base = URL(string: gateway), RemoteInvite.isAllowedGateway(base) else {
             status = "Укажите HTTPS-сервер или адрес в локальной сети"; return
         }
-        starting = true; isLab = lab; status = "Подготовка…"; connectionGeneration = UUID()
+        starting = true; reconnecting = false; isLab = lab; status = "Подготовка…"; connectionGeneration = UUID()
         let generation = connectionGeneration
         let video = makeCapture(); capture = video
         Task { @MainActor in
@@ -157,29 +158,37 @@ final class HostModel: ObservableObject {
                 if !lab { video.stop(); capture = nil }
                 sharing = true; starting = false; status = "Подключаем сервер…"
                 let signal = Signaling(identity: identity); signaling = signal
+                var registered = false
                 signal.onRelayRefresh = { [weak self] configuration in self?.iceConfiguration = configuration }
                 signal.onReady = { [weak self] configuration in
                     guard let self else { return }
-                    self.iceConfiguration = configuration
+                    self.iceConfiguration = configuration; self.reconnecting = false
                     UserDefaults.standard.set(self.gateway, forKey: "signalingGateway")
-                    self.status = "Доступ открыт"; self.detail = "Подключение нового устройства потребует вашего подтверждения."; self.newInvite()
+                    self.status = self.transport?.isReady == true ? "Устройство подключено" : self.transport == nil ? "Доступ открыт" : "Соединяемся…"
+                    self.detail = "Подключение нового устройства потребует вашего подтверждения."
+                    if !registered { registered = true; self.newInvite() }
+                }
+                signal.onReconnecting = { [weak self] in
+                    guard let self else { return }
+                    self.reconnecting = true
+                    if self.transport == nil { self.status = "Восстанавливаем связь…" }
                 }
                 signal.onMessage = { [weak self] object in self?.receiveSignal(object) }
-                signal.onFailure = { [weak self] error in self?.stop(reason: error) }
+                signal.onFailure = { [weak self] error in self?.stop(reason: error, cause: "signaling-invalid") }
                 var components = URLComponents(url: base, resolvingAgainstBaseURL: false)!
                 components.scheme = base.scheme == "https" ? "wss" : "ws"
                 components.path = base.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")).isEmpty ? "/signal" : "/" + base.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/signal"
                 signal.connect(url: components.url!)
             } catch {
                 guard connectionGeneration == generation else { video.stop(); return }
-                stop(reason: "Не удалось начать захват: \(error.localizedDescription)")
+                stop(reason: "Не удалось начать захват: \(error.localizedDescription)", cause: "capture-start")
             }
         }
     }
     func newInvite() {
         guard sharing else { return }
         var data = Data(count: 32); let result = data.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }
-        guard result == errSecSuccess else { stop(reason: "Не удалось создать ключ приглашения"); return }
+        guard result == errSecSuccess else { stop(reason: "Не удалось создать ключ приглашения", cause: "invite-randomness"); return }
         secret = data; secretExpiry = Date().addingTimeInterval(600)
         var url = URLComponents(string: gateway)!
         if !url.path.hasSuffix("/") { url.path += "/" }; url.query = nil
@@ -233,7 +242,7 @@ final class HostModel: ObservableObject {
         } else { machine = SessionMachine(surface: surface, permissions: permissions, author: offer.peerID) }
         _ = machine?.setSystemControlAllowed(isLab || controlAllowed)
         if !iceConfiguration.iceServers.isEmpty && iceConfiguration.expiresAt <= Date().timeIntervalSince1970 {
-            stop(reason: "Параметры подключения истекли. Откройте доступ заново."); return
+            stop(reason: "Параметры подключения истекли. Откройте доступ заново.", cause: "relay-expired"); return
         }
         let peer = PeerTransport(factory: factory, source: capture.source, ice: iceConfiguration); transport = peer
         connectedName = offer.name; status = "Соединяемся…"
@@ -253,7 +262,7 @@ final class HostModel: ObservableObject {
                         try await capture.startDisplay(display, excluding: excluded)
                     } catch {
                         guard let self, self.capture === capture, self.transport === peer else { return }
-                        self.stop(reason: "Не удалось начать захват: \(error.localizedDescription)")
+                        self.stop(reason: "Не удалось начать захват: \(error.localizedDescription)", cause: "capture-start")
                     }
                 }
             }
@@ -341,7 +350,7 @@ final class HostModel: ObservableObject {
         let video = VideoCapture(factory: factory)
         video.onError = { [weak self, weak video] _ in
             guard let self, self.capture === video else { return }
-            self.stop(reason: "Захват экрана остановлен системой")
+            self.stop(reason: "Захват экрана остановлен системой", cause: "capture-stopped")
         }
         return video
     }
@@ -362,15 +371,16 @@ final class HostModel: ObservableObject {
         if !isLab { stopCapture() }
         localDrawing = false; overlay?.drawing = false; localStrokeID = nil; refreshInk()
         if let activity { ProcessInfo.processInfo.endActivity(activity); self.activity = nil }
-        if sharing { status = "Доступ открыт"; detail = "Устройство отключено. Новое подключение возможно до закрытия доступа." }
+        if sharing { status = reconnecting ? "Восстанавливаем связь…" : "Доступ открыт"; detail = "Устройство отключено. Новое подключение возможно до закрытия доступа." }
     }
     func forget(_ id: String) {
         if machine?.author == id { disconnectViewer() }
         let updated = peers.filter { $0.id != id }
         do { try KeyStore.save(updated); peers = updated } catch { status = "Не удалось удалить устройство" }
     }
-    func stop(reason: String = "Доступ закрыт") {
-        connectionGeneration = UUID(); sharing = false; starting = false
+    func stop(reason: String = "Доступ закрыт", cause: String = "owner") {
+        if sharing || starting { PerformanceLog.record("host-stop", ["cause": cause, "connected": transport?.isReady == true]) }
+        connectionGeneration = UUID(); sharing = false; starting = false; reconnecting = false
         disconnectViewer(); machine?.stop(); machine = nil
         stopCapture(); capturedDisplay = nil; capturedScreenFrame = nil; overlay?.close(); overlay = nil; labWindow?.orderOut(nil)
         signaling?.close(); signaling = nil; pending = nil; secret = nil; invite = ""; status = reason
@@ -378,7 +388,7 @@ final class HostModel: ObservableObject {
     }
     private func housekeeping() {
         refreshPermissions()
-        if sharing && !isLab && !screenAllowed { stop(reason: "Разрешение на экран отозвано"); return }
+        if sharing && !isLab && !screenAllowed { stop(reason: "Разрешение на экран отозвано", cause: "screen-permission-revoked"); return }
         if let deadline = connectionDeadline, ProcessInfo.processInfo.systemUptime >= deadline {
             if let author = machine?.author { signaling?.send(["type":"reject","to":author,"body":["reason":"network"]]) }
             disconnectViewer(); status = "Не удалось установить соединение. Можно попробовать снова."

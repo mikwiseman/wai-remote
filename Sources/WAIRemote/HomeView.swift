@@ -20,7 +20,7 @@ struct HomeView: View {
                 Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 30, height: 30)
                 Text("WAI Remote").font(.system(size: 15, weight: .semibold))
                 Spacer()
-                Label(host.sharing ? "Ваш экран доступен" : "Ваш экран закрыт", systemImage: host.sharing ? "circle.fill" : "lock.fill")
+                Label(host.reconnecting ? "Восстанавливаем связь" : host.sharing ? "Ваш экран доступен" : "Ваш экран закрыт", systemImage: host.sharing ? "circle.fill" : "lock.fill")
                     .font(.system(size: 11, weight: .medium)).foregroundStyle(host.sharing ? accent : .secondary)
             }.padding(.horizontal, 30).padding(.top, 22).padding(.bottom, 24)
             Picker("Что вы хотите сделать", selection: $sharingTab) {
@@ -100,7 +100,7 @@ struct HomeView: View {
     }
     private var shareContent: some View {
         VStack(alignment: .leading, spacing: 24) {
-            title(host.sharing ? "Можно подключаться." : "Ваш экран.\nПо вашему приглашению.", subtitle: host.sharing ? "Новые устройства подключаются только с вашего согласия." : "Отправьте приглашение себе или человеку, которому доверяете. Вы решаете, кто увидит экран.")
+            title(host.reconnecting ? "Восстанавливаем связь." : host.sharing ? "Можно подключаться." : "Ваш экран.\nПо вашему приглашению.", subtitle: host.reconnecting ? "Сервер временно недоступен. Подключение восстановится автоматически." : host.sharing ? "Новые устройства подключаются только с вашего согласия." : "Отправьте приглашение себе или человеку, которому доверяете. Вы решаете, кто увидит экран.")
             if (!host.sharing || !host.isLab) && (!host.screenAllowed || !host.controlAllowed) {
                 VStack(alignment: .leading, spacing: 16) {
                     if !host.screenAllowed { permission("Показать экран", detail: "Включите WAI Remote в разделе записи экрана macOS, затем вернитесь сюда.", action: host.requestScreen) }
@@ -146,7 +146,7 @@ struct HomeView: View {
                 }
                 Divider()
                 HStack {
-                    Label("Доступ открыт", systemImage: "circle.fill").font(.system(size: 12, weight: .medium)).foregroundStyle(accent)
+                    Label(host.reconnecting ? "Восстанавливаем связь…" : "Доступ открыт", systemImage: "circle.fill").font(.system(size: 12, weight: .medium)).foregroundStyle(accent)
                     Spacer()
                     Button("Закрыть доступ") { host.stop() }.foregroundStyle(.red).controlSize(.large)
                 }
