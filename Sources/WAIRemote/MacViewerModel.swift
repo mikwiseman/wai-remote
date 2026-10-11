@@ -106,7 +106,7 @@ final class MacViewerModel: ObservableObject {
                 if !self.connected { self.disconnect(message: "Не удалось связаться с Mac. Проверьте интернет и убедитесь, что на нём открыт доступ.") }
             }
             timeout = Timer.connectionTimer(withTimeInterval: 110, repeats: false) { [weak self] _ in
-                guard let self, self.attempt == token else { return }; self.disconnect(message: "Время подключения истекло. Создайте новое приглашение на другом Mac и повторите.")
+                guard let self, self.attempt == token else { return }; self.disconnect(message: "Время подключения истекло. Проверьте доступ на другом Mac и попробуйте снова.")
             }
             signal.connect()
         } catch { status = "Нужно приглашение с Mac"; detail = "Скопируйте ссылку целиком из WAI Remote. Для первого подключения нужна новая ссылка." }
@@ -160,7 +160,7 @@ final class MacViewerModel: ObservableObject {
         } else if message["type"] as? String == "unavailable" { disconnect(message: "Mac недоступен. Откройте доступ в WAI Remote на Mac.") }
         else if message["type"] as? String == "reject" {
             let reason = (message["body"] as? [String: Any])?["reason"] as? String
-            disconnect(message: reason == "busy" ? "К Mac уже подключено другое устройство." : reason == "new-invite-required" ? "Нужно новое приглашение для настоящего экрана Mac." : "Подключение отклонено на Mac.")
+            disconnect(message: reason == "busy" ? "К Mac уже подключено другое устройство." : reason == "network" ? "Не удалось установить соединение через интернет. Попробуйте подключиться снова." : reason == "new-invite-required" ? "Нужно новое приглашение для настоящего экрана Mac." : "Подключение отклонено на Mac.")
         }
     }
     func disconnect(message: String = "Вы отключились") {

@@ -59,7 +59,7 @@ final class ViewerTransport: NSObject, RTCPeerConnectionDelegate, RTCDataChannel
     func answer(_ sdp: String, completion: @escaping (Error?) -> Void) {
         peer.setRemoteDescription(RTCSessionDescription(type: .answer, sdp: sdp)) { error in DispatchQueue.main.async { completion(error) } }
     }
-    private func gathered() { if let sdp = peer.localDescription?.sdp { finish(.success(sdp)) } }
+    private func gathered() { if let sdp = peer.localDescription?.sdp { finish(ICEGatheringDeadline.result(for: sdp)) } }
     private func finish(_ result: Result<String, Error>) {
         guard !closed else { return }; gathering.cancel()
         let callback = completion; completion = nil; callback?(result)

@@ -57,7 +57,7 @@ final class PeerTransport: NSObject, RTCPeerConnectionDelegate, RTCDataChannelDe
             }
         }
     }
-    private func finishGathering() { if let sdp = pc.localDescription?.sdp { finishAnswer(.success(sdp)) } }
+    private func finishGathering() { if let sdp = pc.localDescription?.sdp { finishAnswer(ICEGatheringDeadline.result(for: sdp)) } }
     private func finishAnswer(_ result: Result<String, Error>) {
         guard !closed else { return }; gathering.cancel()
         let completion = answerCompletion; answerCompletion = nil; completion?(result)

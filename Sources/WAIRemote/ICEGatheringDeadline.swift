@@ -22,13 +22,17 @@ final class ICEGatheringDeadline {
             // unreachable, retain direct candidates at the final deadline.
             guard elapsed >= 12 || elapsed >= 2 && !candidates.isEmpty && (hasRelay || !self.relayConfigured) else { return }
             self.cancel()
-            if candidates.isEmpty {
-                completion(.failure(NSError(domain: "WebRTC", code: 1, userInfo: [NSLocalizedDescriptionKey: "Не найден сетевой маршрут"])))
-            } else {
+            if !candidates.isEmpty {
                 PerformanceLog.record("ice-ready", ["gatheringMs": elapsed * 1000, "candidateCount": candidates.count, "hasRelay": hasRelay])
-                completion(.success(sdp))
             }
+            completion(Self.result(for: sdp))
         }
+    }
+    static func result(for sdp: String) -> Result<String, Error> {
+        guard sdp.components(separatedBy: .newlines).contains(where: { $0.hasPrefix("a=candidate:") }) else {
+            return .failure(NSError(domain: "WebRTC", code: 1, userInfo: [NSLocalizedDescriptionKey: "Не найден сетевой маршрут"]))
+        }
+        return .success(sdp)
     }
     func cancel() { timer?.invalidate(); timer = nil }
     deinit { cancel() }

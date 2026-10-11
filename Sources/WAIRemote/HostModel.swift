@@ -53,6 +53,7 @@ final class HostModel: ObservableObject {
     private var observers: [NSObjectProtocol] = []
     private var localStrokeID: String?
     private var activity: NSObjectProtocol?
+    private var connectionDeadline: TimeInterval?
     private var connectionGeneration = UUID()
     private var capturedScreenFrame: CGRect?
     @Published var permissionRequested = false
@@ -191,10 +192,13 @@ final class HostModel: ObservableObject {
               let pub = Data(base64URL: offer.publicKey), DeviceIdentity.id(publicKeyData: pub) == from,
               DeviceIdentity.verify(signature, data: payload, domain: "wai-remote/offer/v1", publicKey: offer.publicKey),
               seenNonces[offer.nonce] == nil else { return }
-        guard transport == nil, pending == nil else { signaling?.send(["type":"reject","to":from,"body":["reason":"busy"]]); return }
         let trusted = peers.first { $0.id == from && $0.publicKey == offer.publicKey }
         let proofValid = secret != nil && secretExpiry > Date() && DeviceIdentity.verifyPairingProof(body["proof"] as? String ?? "", secret: secret!, payload: payload)
         guard trusted != nil || proofValid else { return }
+        // A signed retry from the same device can replace its unfinished attempt.
+        // An established session or another device still owns the connection.
+        if transport != nil, transport?.isReady == false, machine?.author == from { disconnectViewer() }
+        guard transport == nil, pending == nil else { signaling?.send(["type":"reject","to":from,"body":["reason":"busy"]]); return }
         seenNonces[offer.nonce] = Date()
         if let trusted, isLab || !trusted.labOnly { connect(offer, permissions: trusted.permissions) }
         else if proofValid { pending = PendingPeer(offer: offer); NSApp.activate(ignoringOtherApps: true) }
@@ -223,9 +227,11 @@ final class HostModel: ObservableObject {
         }
         let peer = PeerTransport(factory: factory, source: capture.source, ice: iceConfiguration); transport = peer
         connectedName = offer.name; status = "Соединяемся…"
+        connectionDeadline = ProcessInfo.processInfo.systemUptime + 20
         let generation = connectionGeneration
         peer.onOpen = { [weak self, weak peer] in
             guard let self, self.transport === peer else { return }
+            self.connectionDeadline = nil
             self.status = "Устройство подключено"; self.sendState(); self.sendSnapshot()
             self.activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled], reason: "WAI Remote active session")
         }
@@ -239,7 +245,9 @@ final class HostModel: ObservableObject {
         peer.answer(offer: offer.sdp) { [weak self, weak peer] result in
             guard let self, self.connectionGeneration == generation, self.transport === peer else { return }
             switch result {
-            case .failure: self.disconnectViewer(); self.status = "Не удалось установить соединение"
+            case .failure:
+                self.signaling?.send(["type":"reject","to":offer.peerID,"body":["reason":"network"]])
+                self.disconnectViewer(); self.status = "Не удалось установить соединение. Можно попробовать снова."
             case .success(let sdp):
                 let answer: [String: Any] = ["hostID":self.identity.id,"peerID":offer.peerID,"nonce":offer.nonce,"sdp":sdp,"lab":self.isLab,"name":String((Host.current().localizedName ?? "Mac").prefix(60))]
                 guard let data = try? JSONSerialization.data(withJSONObject: answer), let sig = try? self.identity.sign(data, domain: "wai-remote/answer/v1") else { return }
@@ -307,6 +315,7 @@ final class HostModel: ObservableObject {
     }
     func clearInk() { if let machine { apply(machine.clearAllLocally()) } }
     func disconnectViewer() {
+        connectionDeadline = nil
         injector.releaseAll(); machine?.disconnect(); transport?.close(); transport = nil; connectedName = nil
         localDrawing = false; overlay?.drawing = false; localStrokeID = nil; refreshInk()
         if let activity { ProcessInfo.processInfo.endActivity(activity); self.activity = nil }
@@ -327,6 +336,10 @@ final class HostModel: ObservableObject {
     private func housekeeping() {
         refreshPermissions()
         if sharing && !isLab && !screenAllowed { stop(reason: "Разрешение на экран отозвано"); return }
+        if let deadline = connectionDeadline, ProcessInfo.processInfo.systemUptime >= deadline {
+            if let author = machine?.author { signaling?.send(["type":"reject","to":author,"body":["reason":"network"]]) }
+            disconnectViewer(); status = "Не удалось установить соединение. Можно попробовать снова."
+        }
         if let machine { apply(machine.tick(now: ProcessInfo.processInfo.systemUptime)) }
         if let pending, pending.offer.expiresAt < Date().timeIntervalSince1970 * 1000 { reject() }
         if secretExpiry < Date() { secret = nil; invite = "" }
