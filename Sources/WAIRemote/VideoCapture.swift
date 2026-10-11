@@ -9,6 +9,7 @@ final class VideoCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private var stream: SCStream?
     private let queue = DispatchQueue(label: "is.wai.remote.capture", qos: .userInteractive)
     private var lastMeasurement = 0.0
+    private var capturedFrames = 0
     private var labTimer: Timer?
     var onError: ((String) -> Void)?
     var onLabImage: ((NSImage) -> Void)?
@@ -37,7 +38,10 @@ final class VideoCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         config.width = max(2, Int(Double(size.width) * ratio) / 2 * 2)
         config.height = max(2, Int(Double(size.height) * ratio) / 2 * 2)
         config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
-        config.queueDepth = 3; config.showsCursor = true; config.capturesAudio = false
+        // VideoToolbox retains surfaces asynchronously. Three surfaces stall
+        // 60 Hz capture once encoding takes over 33 ms under GPU load.
+        // Eight is ScreenCaptureKit's supported limit, not a playout queue.
+        config.queueDepth = 8; config.showsCursor = true; config.capturesAudio = false
         config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         return config
     }
@@ -48,11 +52,15 @@ final class VideoCapture: NSObject, SCStreamOutput, SCStreamDelegate {
               let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         if PerformanceLog.enabled {
             let now = ProcessInfo.processInfo.systemUptime
+            if lastMeasurement == 0 { lastMeasurement = now }
+            capturedFrames += 1
             if now - lastMeasurement >= 1 {
+                let fps = Double(capturedFrames) / (now - lastMeasurement)
                 lastMeasurement = now
+                capturedFrames = 0
                 // ScreenCaptureKit's display timestamp can be slightly in the future.
                 // This clock offset is not an end-to-end capture latency measurement.
-                PerformanceLog.record("capture", ["sampleOffsetMs": (CMClockGetTime(CMClockGetHostTimeClock()).seconds - sampleBuffer.presentationTimeStamp.seconds) * 1000])
+                PerformanceLog.record("capture", ["fps": fps, "sampleOffsetMs": (CMClockGetTime(CMClockGetHostTimeClock()).seconds - sampleBuffer.presentationTimeStamp.seconds) * 1000])
             }
         }
         push(buffer, timestamp: sampleBuffer.presentationTimeStamp)

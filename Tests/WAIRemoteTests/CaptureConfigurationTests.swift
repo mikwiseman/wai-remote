@@ -18,6 +18,6 @@ final class CaptureConfigurationTests: XCTestCase {
         let config = VideoCapture.configuration(size: CGSize(width: 1920, height: 1080), pixelScale: 1)
         XCTAssertEqual(config.minimumFrameInterval.seconds, 1.0 / 60, accuracy: 0.00001)
         XCTAssertEqual(config.pixelFormat, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)
-        XCTAssertEqual(config.queueDepth, 3, "Keep the surface pool bounded; do not hide slow encoding with more queued frames.")
+        XCTAssertEqual(config.queueDepth, 8, "Keep the surface pool within Apple's limit while asynchronous hardware encoding retains frames.")
     }
 }
