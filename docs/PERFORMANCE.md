@@ -132,6 +132,18 @@ Build 17 adds opt-in capture and renderer interval diagnostics. MacBook 17 → M
 
 An independent 150-request UDP STUN probe from the MacBook to the public TURN endpoint returned all 150 responses, RTT p50/p95/max **93/174/211 ms**, with 19 responses over 150 ms. Meanwhile Mini's 60-second sample showed encode p95 18.04 ms and packet-send delay p95 0.002 ms. ICMP ping was under 1 ms on both Macs through their existing VPNs; it is not credible evidence of real latency to the remote server. No VPN or network settings were changed. Capture-gap and AnyDesk comparisons remain necessary before choosing the final release.
 
-## Current implementation status
+## Bounded smoothing versus immediate playout
+
+Mini 17, 14:49:40–14:50:40 Moscow: capture median **56.98 fps**, per-second maximum capture gap p50/p95/max **26.27/27.42/42.01 ms**, sender median **55 fps**, encode interval mean p50/p95 **17.81/17.97 ms**. This separates the large receiver gaps from capture starvation.
+
+An 80-ms bounded adaptive playout experiment (viewer 18) delivered native 4K H.264 at median **55 fps**, with input acknowledgement p50/p95/max **126/265/601 ms** during the 357-second snapshot. Video-buffer residence was **35.74/42.56/70.26 ms** p50/p95/max. All ten real clicks, mixed-language paste and a 30×20-pixel title drag passed. There were **15 freezes totaling 3.802 seconds over 353 measured seconds (1.08%)**, zero decoder drops and zero sampled input backlog. This is substantially improved over immediate playout, but narrowly fails the original 1% freeze gate; do not describe it as completely smooth.
+
+The 140-ms experiment (viewer 19) did not demonstrate a useful improvement: its first 160 measured seconds had six freezes totaling 1.763 seconds (1.10%), median 55 fps and video-buffer p95 61.40 ms. Build 20 retains the 80-ms limit. This is a receiver-only change; the control data channel has no added playout delay. A nonzero minimum enables WebRTC pacing; `min=0,max<=500` uses immediate rendering in the pinned implementation. See [WebRTC timing](https://webrtc.googlesource.com/src/+/main/modules/video_coding/timing/timing.cc).
+
+Both devices' independent UDP STUN probes had p95 around **174 ms**. Mini's maximum was **1.203 seconds**, with 150/150 replies. A paired MacBook probe with default versus AF41 DSCP marking gave essentially identical results (p50 ~89.6 ms, p95 ~164.7 ms); no QoS setting was added. Existing VPNs, network settings and unrelated applications were left unchanged.
+
+AnyDesk 9.8.1 is installed on Mini. The owner approved Screen Recording/Accessibility, but macOS is waiting for the owner's password before applying them. An ordinary MacBook session request remained unaccepted and was cancelled. There is **no completed AnyDesk performance comparison**, no unattended password, and no basis for a market-superiority claim. Final candidate testing and comparison remain open.
+
+## Current implementation
 
 Native Retina pixels, 60 fps NV12 capture, H.264 codec preference, a bounded 32 Mbps sender, authenticated UDP relay/TCP fallback, common-mode connection timers, effective system permissions separated from owner approval, and explicit permission return/relaunch guidance. Harmless display notifications no longer close access when the shared display geometry is unchanged.
