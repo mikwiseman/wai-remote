@@ -2,10 +2,37 @@ import AppKit
 import WebRTC
 import XCTest
 import RemoteCore
+import Combine
 @testable import WAIRemote
 
 @MainActor
 final class RemoteScreenTests: XCTestCase {
+    func testHeartbeatDoesNotInvalidateTheVideoView() {
+        let model = MacViewerModel(identity: DeviceIdentity())
+        var invalidations = 0
+        let observation = model.objectWillChange.sink { invalidations += 1 }
+        defer { observation.cancel() }
+
+        // A mutating protocol call must not publish UI changes, including
+        // when a heartbeat races with disconnect and no session remains.
+        XCTAssertFalse(model.send("heartbeat"))
+        XCTAssertEqual(invalidations, 0)
+    }
+
+    func testUnchangedScreenDoesNotScheduleAnotherMetalLayout() {
+        let model = MacViewerModel(identity: DeviceIdentity())
+        let factory = RTCPeerConnectionFactory()
+        model.track = factory.videoTrack(with: factory.videoSource(), trackId: "screen")
+        let screen = RemoteScreenView(model: model)
+        screen.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+        screen.update(); screen.layoutSubtreeIfNeeded()
+        XCTAssertFalse(screen.needsLayout)
+
+        screen.update()
+
+        XCTAssertFalse(screen.needsLayout)
+    }
+
     func testDisconnectRemovesThePreviousVideoSurface() throws {
         let model = MacViewerModel(identity: DeviceIdentity())
         let factory = RTCPeerConnectionFactory()

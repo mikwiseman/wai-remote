@@ -21,7 +21,9 @@ final class MacViewerModel: ObservableObject {
     @Published var track: RTCVideoTrack? {
         didSet { if track !== oldValue { receivedFrame = false } }
     }
-    @Published private(set) var session = ViewerSession()
+    // Packet sequence changes are not UI changes. Publishing every heartbeat
+    // or mouse move repeatedly invalidates the live Metal view.
+    private(set) var session = ViewerSession()
     @Published var tool: DrawingTool = .pen
     @Published var color = InkStore.colors[0]
     @Published var width = 4.0
@@ -36,6 +38,7 @@ final class MacViewerModel: ObservableObject {
     private var transport: ViewerTransport?
     private var heartbeat: Timer?
     private var timeout: Timer?
+    private var activity: NSObjectProtocol?
     private var attempt = UUID()
     private var snapshot: [InkStroke]?
     private var activeStroke: String?
@@ -167,6 +170,7 @@ final class MacViewerModel: ObservableObject {
         if connected, let release = session.release(), let data = try? JSONEncoder().encode(release) { _ = transport?.send(data) }
         attempt = UUID(); heartbeat?.invalidate(); heartbeat = nil; timeout?.invalidate(); timeout = nil
         signaling?.close(); signaling = nil; transport?.close(); transport = nil
+        if let activity { ProcessInfo.processInfo.endActivity(activity); self.activity = nil }
         connecting = false; connected = false; receivedFrame = false; track = nil; session = ViewerSession()
         strokes = []; previews = [:]; snapshot = nil; hiddenIDs = []; erasedIDs = []; activeStroke = nil; selectedID = nil
         answerAccepted = false; offerStarted = false; gestureRevision += 1
@@ -184,7 +188,7 @@ final class MacViewerModel: ObservableObject {
         guard transport?.send(data) == true else { disconnect(message: "Передача остановлена. Подключитесь заново."); return false }
         return true
     }
-    @discardableResult private func send(_ type: String, edit: (inout WireMessage) -> Void = { _ in }) -> Bool {
+    @discardableResult func send(_ type: String, edit: (inout WireMessage) -> Void = { _ in }) -> Bool {
         guard var operation = session.make(type) else { return false }; edit(&operation); return transmit(operation)
     }
     private func decode<T: Decodable>(_ object: Any, as: T.Type) throws -> T { try JSONDecoder().decode(T.self, from: JSONSerialization.data(withJSONObject: object)) }
@@ -198,9 +202,11 @@ final class MacViewerModel: ObservableObject {
                 }
             case "state":
                 let state = try decode(m["state"] ?? [:], as: HostState.self)
+                objectWillChange.send()
                 if try session.accept(state) { cancelGesture(notify: false) }
                 if !connected {
                     connected = true; connecting = false; timeout?.invalidate(); timeout = nil
+                    activity = ProcessInfo.processInfo.beginActivity(options: .userInteractive, reason: "WAI Remote live screen")
                     remember()
                     heartbeat = Timer.connectionTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in _ = self?.send("heartbeat") }
                 }

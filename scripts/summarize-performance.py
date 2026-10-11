@@ -10,6 +10,7 @@ from pathlib import Path
 def summarize(path):
     rows = [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
     samples, previous = defaultdict(list), {}
+    video = defaultdict(float)
     formats, routes, codecs = set(), set(), set()
     for row in rows:
         event = row["event"]
@@ -21,7 +22,13 @@ def summarize(path):
         elif event == "input-dispatch":
             samples["host_input_queue_ms"].append(row["queueMs"])
         elif event == "capture":
-            samples["capture_sample_offset_ms"].append(row.get("sampleOffsetMs", row.get("ageMs")))
+            for field, name in [("fps", "capture_fps"), ("sampleOffsetMs", "capture_sample_offset_ms"), ("gapMaxMs", "capture_gap_max_ms")]:
+                if field in row:
+                    samples[name].append(row[field])
+        elif event == "renderer":
+            for field, name in [("fps", "renderer_fps"), ("gapP95Ms", "renderer_gap_p95_ms"),
+                                ("gapMaxMs", "renderer_gap_max_ms"), ("gapsOver100Ms", "renderer_gaps_over_100ms")]:
+                samples[name].append(row[field])
         elif event == "rtc":
             samples["buffered_bytes"].append(row["bufferedBytes"])
             stats = {s["id"]: s for s in row["stats"]}
@@ -55,6 +62,13 @@ def summarize(path):
                         return None
                     difference = value[field] - prior[field]
                     return difference if difference >= 0 else None
+                if kind == "inbound-rtp":
+                    video["measured_s"] += elapsed
+                    for field, name in [("framesDecoded", "decoded_frames"), ("framesDropped", "dropped_frames"),
+                                        ("freezeCount", "freezes"), ("totalFreezesDuration", "freeze_duration_s")]:
+                        change = delta(field)
+                        if change is not None:
+                            video[name] += change
                 for time_key, count_key, name in [
                     ("totalEncodeTime", "framesEncoded", "encode_ms"),
                     ("totalDecodeTime", "framesDecoded", "decode_ms"),
@@ -77,8 +91,11 @@ def summarize(path):
             return None
         return {"n": len(values), "p50": round(values[math.ceil(len(values) * .5) - 1], 3),
                 "p95": round(values[math.ceil(len(values) * .95) - 1], 3), "max": round(values[-1], 3)}
+    if video.get("measured_s"):
+        video["freeze_fraction"] = video["freeze_duration_s"] / video["measured_s"]
     return {"file": str(path), "duration_s": round(rows[-1]["time"] - rows[0]["time"], 1) if rows else 0,
             "formats": sorted(formats), "codecs": sorted(codecs), "routes": sorted(routes),
+            "video_totals": {key: round(value, 4) for key, value in sorted(video.items())},
             "measurements": {key: distribution(value) for key, value in sorted(samples.items())}}
 
 

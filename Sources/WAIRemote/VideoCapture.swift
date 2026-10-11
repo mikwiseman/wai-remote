@@ -10,6 +10,8 @@ final class VideoCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private let queue = DispatchQueue(label: "is.wai.remote.capture", qos: .userInteractive)
     private var lastMeasurement = 0.0
     private var capturedFrames = 0
+    private var lastCapturedTime = 0.0
+    private var largestCaptureGap = 0.0
     private var labTimer: Timer?
     var onError: ((String) -> Void)?
     var onLabImage: ((NSImage) -> Void)?
@@ -52,6 +54,8 @@ final class VideoCapture: NSObject, SCStreamOutput, SCStreamDelegate {
               let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         if PerformanceLog.enabled {
             let now = ProcessInfo.processInfo.systemUptime
+            if lastCapturedTime > 0 { largestCaptureGap = max(largestCaptureGap, (now - lastCapturedTime) * 1000) }
+            lastCapturedTime = now
             if lastMeasurement == 0 { lastMeasurement = now }
             capturedFrames += 1
             if now - lastMeasurement >= 1 {
@@ -60,7 +64,9 @@ final class VideoCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                 capturedFrames = 0
                 // ScreenCaptureKit's display timestamp can be slightly in the future.
                 // This clock offset is not an end-to-end capture latency measurement.
-                PerformanceLog.record("capture", ["fps": fps, "sampleOffsetMs": (CMClockGetTime(CMClockGetHostTimeClock()).seconds - sampleBuffer.presentationTimeStamp.seconds) * 1000])
+                PerformanceLog.record("capture", ["fps": fps, "gapMaxMs": largestCaptureGap,
+                    "sampleOffsetMs": (CMClockGetTime(CMClockGetHostTimeClock()).seconds - sampleBuffer.presentationTimeStamp.seconds) * 1000])
+                largestCaptureGap = 0
             }
         }
         push(buffer, timestamp: sampleBuffer.presentationTimeStamp)

@@ -32,7 +32,16 @@ enum ScreenVideoPolicy {
 final class ScreenVideoEncoderFactory: NSObject, RTCVideoEncoderFactory {
     private let base = RTCDefaultVideoEncoderFactory()
     func supportedCodecs() -> [RTCVideoCodecInfo] { ScreenVideoPolicy.screenCodecs(base.supportedCodecs()) }
-    func createEncoder(_ info: RTCVideoCodecInfo) -> RTCVideoEncoder? { base.createEncoder(info) }
+    func createEncoder(_ info: RTCVideoCodecInfo) -> RTCVideoEncoder? {
+        // Low-latency VideoToolbox chooses its own level. Use it only when the
+        // peer negotiated our 4K60 capability, not a lower remote level.
+        if info.name == "H264", let profile = info.parameters["profile-level-id"],
+           profile.hasPrefix("64"), profile.hasSuffix("34"),
+           info.parameters["packetization-mode"] == "1" {
+            return LowLatencyH264Encoder(codec: info)
+        }
+        return base.createEncoder(info)
+    }
 }
 
 final class ScreenVideoDecoderFactory: NSObject, RTCVideoDecoderFactory {

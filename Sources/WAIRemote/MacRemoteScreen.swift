@@ -15,12 +15,30 @@ private final class FrameRenderer: NSObject, RTCVideoRenderer {
     var onFrame: (() -> Void)?
     private let lock = NSLock()
     private var delivered = false
+    private var previousFrameTime = 0.0
+    private var reportTime = 0.0
+    private var frameGaps: [Double] = []
     init(video: RTCMTLNSVideoView) { self.video = video }
     func setSize(_ size: CGSize) { video.setSize(size) }
     func renderFrame(_ frame: RTCVideoFrame?) {
         video.renderFrame(frame)
         guard frame != nil else { return }
-        lock.lock(); let first = !delivered; delivered = true; lock.unlock()
+        lock.lock()
+        let first = !delivered; delivered = true
+        if PerformanceLog.enabled {
+            let now = ProcessInfo.processInfo.systemUptime
+            if previousFrameTime > 0 { frameGaps.append((now - previousFrameTime) * 1000) }
+            previousFrameTime = now
+            if reportTime == 0 { reportTime = now }
+            if now - reportTime >= 1, !frameGaps.isEmpty {
+                let gaps = frameGaps.sorted()
+                PerformanceLog.record("renderer", ["fps": Double(gaps.count) / (now - reportTime),
+                    "gapP95Ms": gaps[Int(ceil(Double(gaps.count) * 0.95)) - 1],
+                    "gapMaxMs": gaps.last!, "gapsOver100Ms": gaps.filter { $0 > 100 }.count])
+                frameGaps.removeAll(keepingCapacity: true); reportTime = now
+            }
+        }
+        lock.unlock()
         if first { DispatchQueue.main.async { [weak self] in self?.onFrame?() } }
     }
 }
@@ -55,10 +73,13 @@ final class RemoteScreenView: NSView, NSTextInputClient {
     }
     override func layout() {
         super.layout()
+        let frame = videoFrame
+        if let video, video.frame != frame { video.frame = frame }
+        if ink.frame != frame { ink.frame = frame }
+    }
+    private var videoFrame: NSRect {
         let fit = viewport
-        let frame = NSRect(x: fit.x, y: fit.y, width: fit.width, height: fit.height)
-        video?.frame = frame
-        ink.frame = frame
+        return NSRect(x: fit.x, y: fit.y, width: fit.width, height: fit.height)
     }
     func update() {
         if track !== model.track {
@@ -78,8 +99,10 @@ final class RemoteScreenView: NSView, NSTextInputClient {
             }
         }
         ink.referenceWidth = Double(model.session.state?.surface.width ?? 1920)
-        ink.strokes = model.visibleStrokes
-        needsLayout = true
+        let strokes = model.visibleStrokes
+        if ink.strokes != strokes { ink.strokes = strokes }
+        let frame = videoFrame
+        if ink.frame != frame || (video != nil && video?.frame != frame) { needsLayout = true }
     }
     func detach() {
         renderer?.onFrame = nil

@@ -233,7 +233,7 @@ final class HostModel: ObservableObject {
             guard let self, self.transport === peer else { return }
             self.connectionDeadline = nil
             self.status = "Устройство подключено"; self.sendState(); self.sendSnapshot()
-            self.activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled], reason: "WAI Remote active session")
+            self.activity = ProcessInfo.processInfo.beginActivity(options: .userInteractive, reason: "WAI Remote active session")
         }
         peer.onMessage = { [weak self, weak peer] data in guard let self, self.transport === peer else { return }; self.receiveInteraction(data) }
         peer.onState = { [weak self, weak peer] state in
@@ -272,7 +272,7 @@ final class HostModel: ObservableObject {
         if e.releaseInput { injector.releaseAll() }
         if machine?.stalled == true, let activity { ProcessInfo.processInfo.endActivity(activity); self.activity = nil }
         if e.accepted, machine?.connected == true, machine?.stalled == false, transport?.isReady == true, activity == nil {
-            activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled], reason: "WAI Remote active session")
+            activity = ProcessInfo.processInfo.beginActivity(options: .userInteractive, reason: "WAI Remote active session")
         }
         if let input = e.input { if isLab { capture?.applyLab(input) } else { injector.apply(input) } }
         if let point = e.laser {

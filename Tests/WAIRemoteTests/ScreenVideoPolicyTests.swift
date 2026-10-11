@@ -29,6 +29,41 @@ final class ScreenVideoPolicyTests: XCTestCase {
         XCTAssertEqual(encoder.encode(frame, codecSpecificInfo: nil, frameTypes: [3]), 0)
         wait(for: [encoded], timeout: 3)
     }
+    func testRetinaKeyAndDeltaFramesDecodeWithTheStandardWebRTCDecoder() throws {
+        let factory = ScreenVideoEncoderFactory()
+        let codec = try XCTUnwrap(factory.supportedCodecs().first { $0.name == "H264" })
+        let encoder = try XCTUnwrap(factory.createEncoder(codec))
+        let decoder = try XCTUnwrap(RTCDefaultVideoDecoderFactory().createDecoder(codec))
+        defer { _ = encoder.release(); _ = decoder.release() }
+        let settings = RTCVideoEncoderSettings()
+        settings.name = "H264"; settings.width = 3840; settings.height = 2160
+        settings.startBitrate = 32000; settings.maxBitrate = 32000; settings.maxFramerate = 60
+        settings.mode = .screensharing
+        XCTAssertEqual(encoder.startEncode(with: settings, numberOfCores: 4), 0)
+        XCTAssertEqual(decoder.startDecode(withNumberOfCores: 4), 0)
+        for index in 0..<3 {
+            let timestamp = UInt32.max &- 100 &+ UInt32(index * 9000)
+            let decoded = expectation(description: "Decoded desktop frame \(index)")
+            decoder.setCallback { frame in
+                XCTAssertEqual(frame.width, 3840); XCTAssertEqual(frame.height, 2160)
+                decoded.fulfill()
+            }
+            encoder.setCallback { frame, info in
+                XCTAssertEqual(frame.timeStamp, timestamp)
+                XCTAssertEqual(frame.frameType, index == 1 ? .videoFrameDelta : .videoFrameKey)
+                XCTAssertEqual(decoder.decode(frame, missingFrames: false, codecSpecificInfo: info, renderTimeMs: 0), 0)
+                return true
+            }
+            var pixel: CVPixelBuffer?
+            XCTAssertEqual(CVPixelBufferCreate(kCFAllocatorDefault, 3840, 2160, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+                [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary, &pixel), kCVReturnSuccess)
+            let frame = RTCVideoFrame(buffer: RTCCVPixelBuffer(pixelBuffer: try XCTUnwrap(pixel)), rotation: ._0,
+                timeStampNs: Int64(index + 1) * 100_000_000)
+            frame.timeStamp = Int32(bitPattern: timestamp)
+            XCTAssertEqual(encoder.encode(frame, codecSpecificInfo: nil, frameTypes: [index == 1 ? 4 : 3]), 0)
+            wait(for: [decoded], timeout: 3)
+        }
+    }
     func testHostAnswerKeepsHardwareH264First() {
         let factory = RTCPeerConnectionFactory(encoderFactory: ScreenVideoEncoderFactory(), decoderFactory: ScreenVideoDecoderFactory())
         let host = PeerTransport(factory: factory, source: factory.videoSource(forScreenCast: true), ice: .local)
