@@ -143,10 +143,10 @@ private struct DiagnosticsView: View {
 }
 
 MainActor.assumeIsolated {
-    // Bound adaptive video smoothing to 70 ms on variable-latency routes.
-    // A nonzero minimum enables pacing; 0 bypasses it in the pinned framework.
+    // Keep a small 60–70 ms playout budget on variable-latency routes.
+    // A ceiling alone lets the jitter estimator remove needed frame pacing.
     // Input stays on its independent data channel. Configure before RTC objects.
-    RTCInitFieldTrialDictionary(["WebRTC-ForcePlayoutDelay": "min_ms:1,max_ms:70"])
+    RTCInitFieldTrialDictionary(["WebRTC-ForcePlayoutDelay": "min_ms:60,max_ms:70"])
     let app = NSApplication.shared
     let delegate = AppDelegate()
     app.setActivationPolicy(.regular)
