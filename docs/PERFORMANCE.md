@@ -8,7 +8,15 @@ Both Macs installed the same signed/notarized universal build through Sparkle (M
 
 The 611-second relay/TCP run on 11 October delivered **3840×2160 H.264 / VideoToolbox**, median **55 fps**, and 33,468 decoded frames with zero decoder drops. Application input acknowledgement p50/p95/max was **126/259/429 ms** over 1,251 samples. Video-buffer p50/p95 was **32.33/40.28 ms**; one interval reached 698 ms. Eighteen freezes totaled **5.901 seconds over 609 measured seconds (0.97%)**. All original numerical gates passed for this run, but it was close to the freeze threshold and does not prove consistently smooth playback. Per-second renderer maximum gaps had p50/p95 **125/148 ms**, with a worst gap of 496 ms.
 
-Five real native clicks incremented the counter from zero to five; mixed-language paste and a 60×40-pixel diagonal title drag landed correctly. The TCP-only preference was then removed. Preferred UDP, reconnection, and the AnyDesk comparison remain to be completed on the final build. Raw measurements: `.runtime/mini-candidate20-tcp.jsonl`; screenshot: `.runtime/mini-build20-tcp-live.png`.
+Five real native clicks incremented the counter from zero to five; mixed-language paste and a 60×40-pixel diagonal title drag landed correctly. The TCP-only preference was then removed. The 287-second preferred UDP run delivered median 55 fps, acknowledgement p50/p95/max **127/269/562 ms**, and video-buffer p95 **36.54 ms**. Twelve freezes totaled **3.605 seconds over 283 measured seconds (1.27%)**, so this run **failed** the original 1% freeze gate. Reconnection showed a fresh frame in 4.2 seconds; another five clicks, mixed-language replacement and diagonal dragging passed. Raw measurements: `.runtime/mini-candidate20-{tcp,udp}.jsonl`; screenshot: `.runtime/mini-build20-tcp-live.png`.
+
+## AnyDesk comparison and idle-capture regression
+
+After the owner granted permissions and AnyDesk restarted, the MacBook connected to Mini at about 15:25 Moscow. AnyDesk reported 3840×2160, Best quality and its relay connection. Five real clicks incremented the same counter from 5 to 10. Automated paste conflicted with clipboard synchronization; plain text entry arrived without the requested uppercase letters, and the automated drag did not move the window. These automation results are not evidence that a human would experience the same limitations.
+
+Exploratory OCR samples read the host's rendered timestamp from 60 screenshots per client (about 3.4 seconds each). They are not click-to-photon measurements: host/client clock offset was not independently calibrated and the capture call itself spans about 50 ms. They must not support a superiority claim.
+
+The attempted isolated comparison revealed a product regression: **WAI capture continued after its viewer disconnected**. At 15:28:43, Mini's WAI process still captured 56.10 fps and used 22.8% CPU / 96.34 MiB RSS. AnyDesk's four processes used 57.3% CPU / 466.66 MiB summed RSS in that snapshot; shared pages may be counted twice. Since WAI's capture was competing for resources, these are not fair comparative CPU or video results. `scripts/check-idle-capture.py` checks new capture reports after all viewers disconnect; keep diagnostics enabled and verify the host process separately before interpreting it. Fix and retest this lifecycle before repeating the comparison.
 
 ## Measurements before changing behavior
 
@@ -150,8 +158,18 @@ The 140-ms experiment (viewer 19) did not demonstrate a useful improvement: its 
 
 Both devices' independent UDP STUN probes had p95 around **174 ms**. Mini's maximum was **1.203 seconds**, with 150/150 replies. A paired MacBook probe with default versus AF41 DSCP marking gave essentially identical results (p50 ~89.6 ms, p95 ~164.7 ms); no QoS setting was added. Existing VPNs, network settings and unrelated applications were left unchanged.
 
-AnyDesk 9.8.1 is installed on Mini. After the owner entered the system password, both Screen Recording and Accessibility showed **Granted**; Full Disk Access stayed denied. The first ordinary MacBook session request still remained unaccepted and was cancelled. There is **no completed AnyDesk performance comparison** yet, no unattended password, and no basis for a market-superiority claim. Final candidate testing and comparison remain open.
+AnyDesk 9.8.1 is installed on Mini. After the owner entered the system password, both Screen Recording and Accessibility showed **Granted**; Full Disk Access stayed denied. The initial unaccepted request was cancelled; an ordinary session connected after restarting AnyDesk. No unattended password was created. The comparison and its resource-isolation limitation are recorded above; there is no basis for a market-superiority claim.
 
 ## Current implementation
 
 Native Retina pixels, 60 fps NV12 capture, H.264 codec preference, a bounded 32 Mbps sender, authenticated UDP relay/TCP fallback, common-mode connection timers, effective system permissions separated from owner approval, and explicit permission return/relaunch guidance. Harmless display notifications no longer close access when the shared display geometry is unchanged.
+
+## Capture lifetime regression
+
+With no viewer connected, Mini build 20 still produced 10 new capture reports over 10.005 seconds (15:38:44–15:38:54 Moscow), at 56.11–56.84 fps. Diagnostics were enabled and PID 76332 was independently confirmed alive; WAI used 22.8% CPU. The device check exited 1 before the change. `scripts/check-idle-capture.py` checks new records only; verify a live diagnostic-enabled host separately before relying on its result.
+
+Build 21 validates Screen Recording while the owner opens sharing, stops that initial probe, and starts a fresh ScreenCaptureKit stream only when a viewer's data channel opens. Disconnect cancels any in-progress start and then stops that specific capture, so a late start cannot survive a disconnect or stop the next session. Native laboratory preview keeps its existing lifetime. The complete 45 Swift tests pass; on-device idle/reconnect verification is required before promotion.
+
+The notarized universal build 21 installed on the MacBook through Sparkle 20→21. Saved computers remained present and the temporary preview override was removed. An immediate automation observation during Sparkle's relaunch opened a second process; it was normally quit and one process remained. Do not count an automation-triggered duplicate launch as a successful single-instance relaunch test.
+
+A clean AnyDesk sample followed closing WAI sharing through the Mini UI. Sixty screenshots over 3.344 seconds all yielded the native test window's timestamp after OCR whitespace normalization. Apparent frame age lower/upper bounds were p50 284/339 ms, p95 414/465 ms, and maximum 420/473 ms. These are short, uncalibrated-clock screenshot observations, not physical click-to-photon latency or a market ranking. AnyDesk used Best quality, Stretch, automatic speed detection and no Preserve details. Its Local keyboard mode preserved uppercase input through computer-use automation; the earlier Auto-mode lowercase result was not a fair test of ordinary human typing.

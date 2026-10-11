@@ -36,6 +36,8 @@ final class HostModel: ObservableObject {
     let identity: DeviceIdentity
     private let factory: RTCPeerConnectionFactory
     private var capture: VideoCapture?
+    private var captureStartTask: Task<Void, Never>?
+    private var capturedDisplay: SCDisplay?
     private var signaling: Signaling?
     private var transport: PeerTransport?
     private var iceConfiguration = ICEConfiguration.local
@@ -130,8 +132,7 @@ final class HostModel: ObservableObject {
         }
         starting = true; isLab = lab; status = "Подготовка…"; connectionGeneration = UUID()
         let generation = connectionGeneration
-        let video = VideoCapture(factory: factory); capture = video
-        video.onError = { [weak self] _ in self?.stop(reason: "Захват экрана остановлен системой") }
+        let video = makeCapture(); capture = video
         Task { @MainActor in
             do {
                 if lab {
@@ -146,10 +147,14 @@ final class HostModel: ObservableObject {
                     overlay?.onClear = { [weak self] in self?.clearInk() }
                     surface = Surface(id: String(display.displayID), width: Int(screen.frame.width), height: Int(screen.frame.height))
                     capturedScreenFrame = screen.frame
+                    capturedDisplay = display
                     injector.bounds = CGDisplayBounds(display.displayID)
                     try await video.startDisplay(display, excluding: [CGWindowID(overlay!.panel.windowNumber)])
                 }
                 guard connectionGeneration == generation else { video.stop(); return }
+                // Validate screen permission while the owner is here, then idle
+                // until a viewer connects. Each session gets a fresh SCStream.
+                if !lab { video.stop(); capture = nil }
                 sharing = true; starting = false; status = "Подключаем сервер…"
                 let signal = Signaling(identity: identity); signaling = signal
                 signal.onRelayRefresh = { [weak self] configuration in self?.iceConfiguration = configuration }
@@ -165,7 +170,10 @@ final class HostModel: ObservableObject {
                 components.scheme = base.scheme == "https" ? "wss" : "ws"
                 components.path = base.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")).isEmpty ? "/signal" : "/" + base.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/signal"
                 signal.connect(url: components.url!)
-            } catch { stop(reason: "Не удалось начать захват: \(error.localizedDescription)") }
+            } catch {
+                guard connectionGeneration == generation else { video.stop(); return }
+                stop(reason: "Не удалось начать захват: \(error.localizedDescription)")
+            }
         }
     }
     func newInvite() {
@@ -217,6 +225,8 @@ final class HostModel: ObservableObject {
     }
     func reject() { if let pending { signaling?.send(["type":"reject","to":pending.id,"body":["reason":"declined"]]) }; pending = nil }
     private func connect(_ offer: Offer, permissions: Permissions) {
+        guard sharing else { return }
+        if !isLab { capture = makeCapture() }
         guard let capture, sharing else { return }
         if let machine, machine.author == offer.peerID, machine.state.surface == surface {
             machine.reconnect(); _ = machine.setPermissions(permissions)
@@ -233,7 +243,20 @@ final class HostModel: ObservableObject {
             guard let self, self.transport === peer else { return }
             self.connectionDeadline = nil
             self.status = "Устройство подключено"; self.sendState(); self.sendSnapshot()
+            guard self.transport === peer, self.capture === capture, self.sharing else { return }
             self.activity = ProcessInfo.processInfo.beginActivity(options: .userInteractive, reason: "WAI Remote active session")
+            if !self.isLab, let display = self.capturedDisplay {
+                let excluded = self.overlay.map { [CGWindowID($0.panel.windowNumber)] } ?? []
+                self.captureStartTask = Task { @MainActor [weak self, weak peer] in
+                    do {
+                        try Task.checkCancellation()
+                        try await capture.startDisplay(display, excluding: excluded)
+                    } catch {
+                        guard let self, self.capture === capture, self.transport === peer else { return }
+                        self.stop(reason: "Не удалось начать захват: \(error.localizedDescription)")
+                    }
+                }
+            }
         }
         peer.onMessage = { [weak self, weak peer] data in guard let self, self.transport === peer else { return }; self.receiveInteraction(data) }
         peer.onState = { [weak self, weak peer] state in
@@ -314,9 +337,29 @@ final class HostModel: ObservableObject {
         if type == "strokeEnd" { localStrokeID = nil }
     }
     func clearInk() { if let machine { apply(machine.clearAllLocally()) } }
+    private func makeCapture() -> VideoCapture {
+        let video = VideoCapture(factory: factory)
+        video.onError = { [weak self, weak video] _ in
+            guard let self, self.capture === video else { return }
+            self.stop(reason: "Захват экрана остановлен системой")
+        }
+        return video
+    }
+    private func stopCapture() {
+        let video = capture, start = captureStartTask
+        capture = nil; captureStartTask = nil
+        start?.cancel()
+        // A disconnect can arrive while ScreenCaptureKit is starting. Wait for
+        // that start to finish before stopping its stream, even after reconnect.
+        Task { @MainActor in
+            await start?.value
+            video?.stop()
+        }
+    }
     func disconnectViewer() {
         connectionDeadline = nil
         injector.releaseAll(); machine?.disconnect(); transport?.close(); transport = nil; connectedName = nil
+        if !isLab { stopCapture() }
         localDrawing = false; overlay?.drawing = false; localStrokeID = nil; refreshInk()
         if let activity { ProcessInfo.processInfo.endActivity(activity); self.activity = nil }
         if sharing { status = "Доступ открыт"; detail = "Устройство отключено. Новое подключение возможно до закрытия доступа." }
@@ -329,7 +372,7 @@ final class HostModel: ObservableObject {
     func stop(reason: String = "Доступ закрыт") {
         connectionGeneration = UUID(); sharing = false; starting = false
         disconnectViewer(); machine?.stop(); machine = nil
-        capture?.stop(); capture = nil; capturedScreenFrame = nil; overlay?.close(); overlay = nil; labWindow?.orderOut(nil)
+        stopCapture(); capturedDisplay = nil; capturedScreenFrame = nil; overlay?.close(); overlay = nil; labWindow?.orderOut(nil)
         signaling?.close(); signaling = nil; pending = nil; secret = nil; invite = ""; status = reason
         detail = "Чтобы подключиться снова, откройте доступ на этом Mac."
     }

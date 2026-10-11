@@ -25,6 +25,7 @@ final class VideoCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     }
     func startDisplay(_ display: SCDisplay, excluding windowIDs: [CGWindowID]) async throws {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+        try Task.checkCancellation()
         let excluded = content.windows.filter { windowIDs.contains($0.windowID) }
         let filter = SCContentFilter(display: display, excludingWindows: excluded)
         let config = Self.configuration(size: filter.contentRect.size, pixelScale: CGFloat(filter.pointPixelScale))
