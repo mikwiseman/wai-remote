@@ -2,7 +2,7 @@
 
 Work in progress, 11 October 2026. Target: the user's MacBook and **waiMini**, not Mark's Mac.
 
-## Current candidate: 0.2.1 (20)
+## Build 20 baseline
 
 Both Macs installed the same signed/notarized universal build through Sparkle (MacBook 19→20, Mini 17→20). Trusted devices and existing WAI Remote permissions remained usable. The public immutable DMG was downloaded and its SHA-256 matched the locally mounted and verified installer. The stable appcast and landing still advertise 0.2.0 while comparison continues.
 
@@ -173,3 +173,14 @@ Build 21 validates Screen Recording while the owner opens sharing, stops that in
 The notarized universal build 21 installed on the MacBook through Sparkle 20→21. Saved computers remained present and the temporary preview override was removed. An immediate automation observation during Sparkle's relaunch opened a second process; it was normally quit and one process remained. Do not count an automation-triggered duplicate launch as a successful single-instance relaunch test.
 
 A clean AnyDesk sample followed closing WAI sharing through the Mini UI. Sixty screenshots over 3.344 seconds all yielded the native test window's timestamp after OCR whitespace normalization. Apparent frame age lower/upper bounds were p50 284/339 ms, p95 414/465 ms, and maximum 420/473 ms. These are short, uncalibrated-clock screenshot observations, not physical click-to-photon latency or a market ranking. AnyDesk used Best quality, Stretch, automatic speed detection and no Preserve details. Its Local keyboard mode preserved uppercase input through computer-use automation; the earlier Auto-mode lowercase result was not a fair test of ordinary human typing.
+
+
+## Build 21 device verification and 60 ms comparison
+
+Mini installed 20→21 through Sparkle. The live bundle reported build 21, one PID (83431), and diagnostics enabled. Its preview-feed override was removed. With the viewer disconnected, an 8-second grace followed by a 10-second observation found zero new capture reports while the process stayed alive. Two saved-device reconnects produced fresh frames in 4.50 and 4.68 seconds. Ten native clicks, mixed-language text, a 60×40-pixel diagonal drag, and existing permissions/trust passed. Evidence is in `.runtime/mini-build21-{idle,input}-proof.png` and the corresponding device-result JSON.
+
+A 230-second animated UDP run on build 21 delivered median 56 fps, input acknowledgement p50/p95/max 127/262/517 ms, and 0.58% freeze time. Video-buffer p95 was 66.22 ms, failing the original 50-ms gate. This is a continuous animated scene; static desktop intervals and later compilation work were excluded. Sixty screenshot observations over 2.775 seconds yielded apparent frame-age lower/upper bounds of p50 376/419 ms and p95 409/459 ms. The clock and screenshot limitations above still apply, and the AnyDesk and WAI window sizes differed.
+
+Viewer build 22 tested a 60-ms cap against the unchanged Mini 21. The 221-second animated run delivered median 56 fps and acknowledgement p50/p95/max 124/257/558 ms. Video-buffer p95 fell to 22.36 ms, but freeze time increased to 1.10%, failing the original 1% gate. A separate 60-frame screenshot series yielded apparent age p50 325/370 ms and p95 434/484 ms. Lower median age alone does not establish a better experience. Local menu/focus recovery, five native clicks and mixed-language replacement passed. Both MacBook updates completed through Sparkle with one relaunched process, preserved saved computers and removed preview-feed overrides.
+
+Build 23 tests the intermediate 70-ms cap. Do not promote it until the actual device result is recorded. The stable feed remains 0.2.0 during these experiments.
