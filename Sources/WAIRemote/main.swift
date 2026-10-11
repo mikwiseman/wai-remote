@@ -81,11 +81,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard viewer != nil else { return }
         if !viewer.connected && !viewer.connecting { viewer.connect() }
         if viewerWindow == nil {
-            let remote = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1200, height: 780), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+            let size = NSSize(width: 1200, height: 780)
+            let remote = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
             remote.title = "\(viewer.computerName) — WAI Remote"; remote.isReleasedWhenClosed = false
             remote.contentMinSize = NSSize(width: 720, height: 480); remote.collectionBehavior = [.fullScreenPrimary]
             remote.delegate = self
             remote.contentViewController = NSHostingController(rootView: ViewerWindowView(model: viewer, fullScreen: { [weak remote] in remote?.toggleFullScreen(nil) }))
+            remote.setContentSize(size)
             remote.center(); viewerWindow = remote
         }
         viewerWindow?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)

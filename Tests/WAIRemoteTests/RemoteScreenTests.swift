@@ -7,6 +7,22 @@ import Combine
 
 @MainActor
 final class RemoteScreenTests: XCTestCase {
+    func testViewerOpensAtReadableSizeInsteadOfItsMinimum() throws {
+        _ = NSApplication.shared
+        let delegate = AppDelegate()
+        delegate.viewer = MacViewerModel(identity: DeviceIdentity())
+        delegate.viewer.connecting = true
+
+        delegate.connect()
+        let window = try XCTUnwrap(delegate.viewerWindow)
+        defer { window.close() }
+        window.contentView?.layoutSubtreeIfNeeded()
+
+        let content = try XCTUnwrap(window.contentView)
+        XCTAssertEqual(content.bounds.width, 1200, accuracy: 1)
+        XCTAssertEqual(content.bounds.height, 780, accuracy: 1)
+    }
+
     func testHeartbeatDoesNotInvalidateTheVideoView() {
         let model = MacViewerModel(identity: DeviceIdentity())
         var invalidations = 0
