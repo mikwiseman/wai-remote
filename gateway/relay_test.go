@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-func TestPublicICECanUseDirectOrUDPBeforeTCP(t *testing.T) {
+func TestPublicICEUsesUDPRelayWithTCPFallback(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "secret")
 	if err := os.WriteFile(path, []byte(strings.Repeat("s", 32)), 0600); err != nil {
 		t.Fatal(err)
@@ -21,8 +21,8 @@ func TestPublicICECanUseDirectOrUDPBeforeTCP(t *testing.T) {
 		t.Fatal(err)
 	}
 	ice := r.issue("peer", time.Now())
-	if ice.Policy != "all" {
-		t.Fatal("direct authenticated peer routes are unnecessarily disabled")
+	if ice.Policy != "relay" {
+		t.Fatal("public connections must use the verified relay route")
 	}
 	urls := ice.Servers[0].URLs
 	if len(urls) != 2 || urls[0] != "turn:203.0.113.1:3478?transport=udp" || urls[1] != "turn:203.0.113.1:3478?transport=tcp" {
@@ -34,7 +34,7 @@ func TestRelayCredentialsAreBoundedAndDistinct(t *testing.T) {
 	r := &relayIssuer{secret: []byte(strings.Repeat("s", 32)), urls: []string{"turn:203.0.113.1:3478?transport=udp", "turn:203.0.113.1:3478?transport=tcp"}}
 	now := time.Unix(1700000000, 0)
 	a, b := r.issue("alice", now), r.issue("bob", now)
-	if a.Policy != "all" || a.ExpiresAt != now.Add(time.Hour).Unix() || a.Servers[0].Username == b.Servers[0].Username {
+	if a.Policy != "relay" || a.ExpiresAt != now.Add(time.Hour).Unix() || a.Servers[0].Username == b.Servers[0].Username {
 		t.Fatal("unbounded or shared credential")
 	}
 	mac := hmac.New(sha1.New, r.secret)

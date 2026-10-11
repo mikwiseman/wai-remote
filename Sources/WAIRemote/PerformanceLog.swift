@@ -4,6 +4,7 @@ import WebRTC
 /// Opt-in, local measurements. Never record SDP, addresses, device names, or input contents.
 enum PerformanceLog {
     static let enabled = UserDefaults.standard.bool(forKey: "performanceDiagnostics")
+    static var tcpOnly: Bool { enabled && UserDefaults.standard.bool(forKey: "performanceTCPOnly") }
     private static let queue = DispatchQueue(label: "is.wai.remote.performance", qos: .utility)
     private static let url = FileManager.default.temporaryDirectory.appendingPathComponent("wai-remote-performance-\(ProcessInfo.processInfo.processIdentifier).jsonl")
     private static var written = 0

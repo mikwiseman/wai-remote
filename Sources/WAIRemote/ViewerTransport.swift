@@ -18,8 +18,12 @@ final class ViewerTransport: NSObject, RTCPeerConnectionDelegate, RTCDataChannel
         super.init()
         let config = RTCConfiguration(); config.sdpSemantics = .unifiedPlan
         config.bundlePolicy = .maxBundle; config.rtcpMuxPolicy = .require
-        config.iceServers = ice.iceServers.map { RTCIceServer(urlStrings: $0.urls, username: $0.username, credential: $0.credential) }
+        config.iceServers = ice.iceServers.compactMap {
+            let urls = PerformanceLog.tcpOnly ? $0.urls.filter { $0.contains("transport=tcp") } : $0.urls
+            return urls.isEmpty ? nil : RTCIceServer(urlStrings: urls, username: $0.username, credential: $0.credential)
+        }
         config.iceTransportPolicy = ice.iceTransportPolicy == "relay" ? .relay : .all
+        PerformanceLog.record("ice-policy", ["relayOnly": config.iceTransportPolicy == .relay])
         peer = factory.peerConnection(with: config, constraints: RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil), delegate: self)
         let receive = RTCRtpTransceiverInit(); receive.direction = .recvOnly
         if let video = peer.addTransceiver(of: .video, init: receive) {

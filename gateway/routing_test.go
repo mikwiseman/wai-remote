@@ -15,7 +15,7 @@ import (
 
 func httpHandler(h *hub) http.Handler { return http.HandlerFunc(h.serve) }
 
-func TestRouteDiscoveryRequiresClientCapability(t *testing.T) {
+func TestUDPRelayRequiresClientCapabilityAndPreservesReliableRouting(t *testing.T) {
 	for _, version := range []int{0, 2} {
 		h := newHub()
 		h.relay = &relayIssuer{secret: []byte(strings.Repeat("s", 32)), urls: []string{"turn:203.0.113.1:3478?transport=udp", "turn:203.0.113.1:3478?transport=tcp"}}
@@ -46,8 +46,8 @@ func TestRouteDiscoveryRequiresClientCapability(t *testing.T) {
 		if version == 0 && (ready.ICE.Policy != "relay" || len(ready.ICE.Servers[0].URLs) != 1 || !strings.HasSuffix(ready.ICE.Servers[0].URLs[0], "transport=tcp")) {
 			t.Error("Old apps must retain their working TCP relay configuration until they can handle partial ICE gathering")
 		}
-		if version == 2 && (ready.ICE.Policy != "all" || len(ready.ICE.Servers[0].URLs) != 2) {
-			t.Error("Updated apps need direct and UDP routes")
+		if version == 2 && (ready.ICE.Policy != "relay" || len(ready.ICE.Servers[0].URLs) != 2) {
+			t.Error("Updated apps need UDP with TCP fallback, while avoiding direct VPN routes that stall SCTP input")
 		}
 		c.CloseNow()
 		cancel()

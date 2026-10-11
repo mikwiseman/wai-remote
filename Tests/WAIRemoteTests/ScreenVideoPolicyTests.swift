@@ -81,7 +81,7 @@ final class ScreenVideoPolicyTests: XCTestCase {
         let sender = try XCTUnwrap(pc.add(factory.videoTrack(with: factory.videoSource(forScreenCast: true), trackId: "screen"), streamIds: ["screen"]))
         ScreenVideoPolicy.configure(sender)
         let parameters = sender.parameters
-        XCTAssertEqual(parameters.degradationPreference?.intValue, RTCDegradationPreference.maintainResolution.rawValue)
+        XCTAssertEqual(parameters.degradationPreference?.intValue, RTCDegradationPreference.maintainFramerateAndResolution.rawValue)
         XCTAssertEqual(parameters.encodings.first?.maxFramerate?.intValue, 60)
         XCTAssertEqual(parameters.encodings.first?.maxBitrateBps?.intValue, 32_000_000)
     }

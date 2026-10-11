@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import Combine
 import RemoteCore
+import WebRTC
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
@@ -142,6 +143,10 @@ private struct DiagnosticsView: View {
 }
 
 MainActor.assumeIsolated {
+    // Desktop control needs the newest complete frame, without the adaptive
+    // video-conference playout queue. Set this before creating any RTC object.
+    // The pinned framework exposes this setting through its field-trial API.
+    RTCInitFieldTrialDictionary(["WebRTC-ForcePlayoutDelay": "min_ms:0,max_ms:0"])
     let app = NSApplication.shared
     let delegate = AppDelegate()
     app.setActivationPolicy(.regular)

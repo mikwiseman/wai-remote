@@ -49,7 +49,9 @@ func (r *relayIssuer) issue(peer string, now time.Time) *iceConfiguration {
 	username := strconv.FormatInt(expiry, 10) + ":" + hex.EncodeToString(id[:16])
 	mac := hmac.New(sha1.New, r.secret)
 	mac.Write([]byte(username))
-	return &iceConfiguration{Servers: []iceServer{{URLs: r.urls, Username: username, Credential: base64.StdEncoding.EncodeToString(mac.Sum(nil))}}, Policy: "all", ExpiresAt: expiry}
+	// Direct VPN paths can keep video flowing while SCTP commands stall for
+	// seconds. Use the measured UDP relay route, retaining TCP as a fallback.
+	return &iceConfiguration{Servers: []iceServer{{URLs: r.urls, Username: username, Credential: base64.StdEncoding.EncodeToString(mac.Sum(nil))}}, Policy: "relay", ExpiresAt: expiry}
 }
 
 func (r *relayIssuer) forClient(hello Hello, now time.Time) *iceConfiguration {

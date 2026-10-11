@@ -17,7 +17,9 @@ enum ScreenVideoPolicy {
     }
     static func configure(_ sender: RTCRtpSender) {
         let parameters = sender.parameters
-        parameters.degradationPreference = NSNumber(value: RTCDegradationPreference.maintainResolution.rawValue)
+        // Hardware encoding is asynchronous; its wall time is not CPU load.
+        // Keep the native display cadence instead of reducing it on that heuristic.
+        parameters.degradationPreference = NSNumber(value: RTCDegradationPreference.maintainFramerateAndResolution.rawValue)
         for encoding in parameters.encodings {
             encoding.maxBitrateBps = 32_000_000
             encoding.maxFramerate = 60
