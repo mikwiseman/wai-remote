@@ -3,16 +3,18 @@ import WebRTC
 import RemoteCore
 
 final class ViewerTransport: NSObject, RTCPeerConnectionDelegate, RTCDataChannelDelegate {
-    private let factory = RTCPeerConnectionFactory(encoderFactory: RTCDefaultVideoEncoderFactory(), decoderFactory: RTCDefaultVideoDecoderFactory())
+    private let factory = RTCPeerConnectionFactory(encoderFactory: ScreenVideoEncoderFactory(), decoderFactory: ScreenVideoDecoderFactory())
     private var peer: RTCPeerConnection!
     private var channel: RTCDataChannel!
-    private var timer: Timer?
+    private let gathering: ICEGatheringDeadline
     private var completion: ((Result<String, Error>) -> Void)?
     private var closed = false
+    private var statisticsTimer: Timer?
     var onVideo: ((RTCVideoTrack) -> Void)?
     var onMessage: ((Data) -> Void)?
     var onState: ((RTCPeerConnectionState) -> Void)?
     init(ice: ICEConfiguration) {
+        gathering = ICEGatheringDeadline(ice: ice)
         super.init()
         let config = RTCConfiguration(); config.sdpSemantics = .unifiedPlan
         config.bundlePolicy = .maxBundle; config.rtcpMuxPolicy = .require
@@ -20,15 +22,27 @@ final class ViewerTransport: NSObject, RTCPeerConnectionDelegate, RTCDataChannel
         config.iceTransportPolicy = ice.iceTransportPolicy == "relay" ? .relay : .all
         peer = factory.peerConnection(with: config, constraints: RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil), delegate: self)
         let receive = RTCRtpTransceiverInit(); receive.direction = .recvOnly
-        _ = peer.addTransceiver(of: .video, init: receive)
+        if let video = peer.addTransceiver(of: .video, init: receive) {
+            video.setCodecPreferences(ScreenVideoPolicy.codecs(factory.rtpReceiverCapabilities(forKind: "video").codecs))
+        }
         let data = RTCDataChannelConfiguration(); data.isOrdered = true
         channel = peer.dataChannel(forLabel: "interaction", configuration: data); channel.delegate = self
     }
+    private func startMeasurements() {
+        guard PerformanceLog.enabled, statisticsTimer == nil else { return }
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            guard let self, !self.closed else { return }
+            let buffered = self.channel.bufferedAmount
+            self.peer.statistics { report in PerformanceLog.record(report, role: "viewer", buffered: buffered) }
+        }
+        statisticsTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
     func offer(_ completion: @escaping (Result<String, Error>) -> Void) {
         self.completion = completion
-        timer = Timer.scheduledTimer(withTimeInterval: 12, repeats: false) { [weak self] _ in
-            self?.finish(.failure(NSError(domain: "WebRTC", code: 1, userInfo: [NSLocalizedDescriptionKey: "Не найден сетевой маршрут"])))
-        }
+        startMeasurements()
+        gathering.start(description: { [weak self] in self?.peer.localDescription?.sdp },
+                        completion: { [weak self] in self?.finish($0) })
         peer.offer(for: RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil)) { [weak self] sdp, error in
             guard let self else { return }
             if let error { DispatchQueue.main.async { self.finish(.failure(error)) }; return }
@@ -43,7 +57,7 @@ final class ViewerTransport: NSObject, RTCPeerConnectionDelegate, RTCDataChannel
     }
     private func gathered() { if let sdp = peer.localDescription?.sdp { finish(.success(sdp)) } }
     private func finish(_ result: Result<String, Error>) {
-        guard !closed else { return }; timer?.invalidate(); timer = nil
+        guard !closed else { return }; gathering.cancel()
         let callback = completion; completion = nil; callback?(result)
     }
     @discardableResult func send(_ data: Data) -> Bool {
@@ -51,7 +65,7 @@ final class ViewerTransport: NSObject, RTCPeerConnectionDelegate, RTCDataChannel
         return channel.sendData(RTCDataBuffer(data: data, isBinary: false))
     }
     func close() {
-        closed = true; timer?.invalidate(); completion = nil
+        closed = true; statisticsTimer?.invalidate(); statisticsTimer = nil; gathering.cancel(); completion = nil
         channel.delegate = nil; channel.close(); peer.delegate = nil; peer.close()
     }
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange stateChanged: RTCSignalingState) {}
@@ -77,6 +91,6 @@ final class ViewerTransport: NSObject, RTCPeerConnectionDelegate, RTCDataChannel
     }
     func dataChannel(_ dataChannel: RTCDataChannel, didReceiveMessageWith buffer: RTCDataBuffer) {
         guard !buffer.isBinary, buffer.data.count <= 65_536 else { return }
-        DispatchQueue.main.async { [weak self] in guard let self, !self.closed else { return }; self.onMessage?(buffer.data) }
+        RunLoop.main.perform(inModes: [.common]) { [weak self] in guard let self, !self.closed else { return }; self.onMessage?(buffer.data) }
     }
 }

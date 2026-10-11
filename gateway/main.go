@@ -111,7 +111,7 @@ func (h *hub) serve(w http.ResponseWriter, r *http.Request) {
 	ready := map[string]any{"type": "ready"}
 	lastRelay := time.Now()
 	if h.relay != nil {
-		ready["ice"] = h.relay.issue(hello.PeerID, lastRelay)
+		ready["ice"] = h.relay.forClient(hello, lastRelay)
 	}
 	if h.ice != nil {
 		if h.ice.ExpiresAt <= time.Now().Unix() {
@@ -145,7 +145,7 @@ func (h *hub) serve(w http.ResponseWriter, r *http.Request) {
 		if msg.Type == "ping" {
 			if h.relay != nil && hello.Role == "host" && time.Since(lastRelay) >= 30*time.Minute {
 				lastRelay = time.Now()
-				if current.send(map[string]any{"type": "relay", "ice": h.relay.issue(hello.PeerID, lastRelay)}) != nil {
+				if current.send(map[string]any{"type": "relay", "ice": h.relay.forClient(hello, lastRelay)}) != nil {
 					return
 				}
 			}

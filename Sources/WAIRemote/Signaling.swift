@@ -13,7 +13,7 @@ final class Signaling {
     func connect(url: URL) {
         let socket = URLSession.shared.webSocketTask(with: url); self.socket = socket
         socket.maximumMessageSize = 131_072; socket.resume(); receive(socket)
-        ping = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in self?.send(["type": "ping"]) }
+        ping = Timer.connectionTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in self?.send(["type": "ping"]) }
     }
     private func receive(_ current: URLSessionWebSocketTask) {
         current.receive { [weak self] result in
@@ -34,7 +34,7 @@ final class Signaling {
         if object["type"] as? String == "challenge", let nonce = object["nonce"] as? String, nonce.utf8.count <= 100 {
             let payload = Data("host\n\(identity.id)\n\(identity.id)\n\(nonce)".utf8)
             guard let sig = try? identity.sign(payload, domain: "wai-remote/signal/v1") else { return }
-            send(["type":"hello","role":"host","hostID":identity.id,"peerID":identity.id,"publicKey":identity.publicKey,"signature":sig])
+            send(["type":"hello","role":"host","hostID":identity.id,"peerID":identity.id,"publicKey":identity.publicKey,"signature":sig,"iceVersion":2])
         } else if ["ready", "relay"].contains(object["type"] as? String ?? "") {
             do {
                 let configuration = try ICEConfiguration.read(object)

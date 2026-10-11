@@ -40,6 +40,7 @@ final class MacViewerModel: ObservableObject {
     private var snapshot: [InkStroke]?
     private var activeStroke: String?
     private var erasedIDs = Set<String>()
+    private var pendingMeasurements: [String: (time: Double, kind: String)] = [:]
     private var nonce = ""
     private var answerAccepted = false
     private var offerStarted = false
@@ -104,7 +105,7 @@ final class MacViewerModel: ObservableObject {
                 guard let self, self.attempt == token else { return }
                 if !self.connected { self.disconnect(message: "Не удалось связаться с Mac. Проверьте интернет и убедитесь, что на нём открыт доступ.") }
             }
-            timeout = Timer.scheduledTimer(withTimeInterval: 110, repeats: false) { [weak self] _ in
+            timeout = Timer.connectionTimer(withTimeInterval: 110, repeats: false) { [weak self] _ in
                 guard let self, self.attempt == token else { return }; self.disconnect(message: "Время подключения истекло. Создайте новое приглашение на другом Mac и повторите.")
             }
             signal.connect()
@@ -169,12 +170,17 @@ final class MacViewerModel: ObservableObject {
         connecting = false; connected = false; receivedFrame = false; track = nil; session = ViewerSession()
         strokes = []; previews = [:]; snapshot = nil; hiddenIDs = []; erasedIDs = []; activeStroke = nil; selectedID = nil
         answerAccepted = false; offerStarted = false; gestureRevision += 1
-        currentInvite = nil
+        currentInvite = nil; pendingMeasurements.removeAll()
         if !message.isEmpty { status = message; detail = "Подключитесь снова, когда доступ на Mac открыт." }
     }
     func releaseInput() { cancelGesture(notify: true); _ = transmit(session.release()) }
     @discardableResult private func transmit(_ operation: WireMessage?) -> Bool {
         guard let operation, let data = try? JSONEncoder().encode(operation) else { return false }
+        if PerformanceLog.enabled && (operation.type == "heartbeat" || operation.type == "pointer" && operation.action != "move") {
+            let now = ProcessInfo.processInfo.systemUptime
+            pendingMeasurements = pendingMeasurements.filter { now - $0.value.time < 30 }
+            pendingMeasurements[operation.operationID] = (now, operation.action ?? operation.type)
+        }
         guard transport?.send(data) == true else { disconnect(message: "Передача остановлена. Подключитесь заново."); return false }
         return true
     }
@@ -186,13 +192,17 @@ final class MacViewerModel: ObservableObject {
         do {
             guard let m = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
             switch m["type"] as? String {
+            case "performanceAck":
+                if let id = m["id"] as? String, let sent = pendingMeasurements.removeValue(forKey: id) {
+                    PerformanceLog.record("input-roundtrip", ["kind": sent.kind, "ms": (ProcessInfo.processInfo.systemUptime - sent.time) * 1000])
+                }
             case "state":
                 let state = try decode(m["state"] ?? [:], as: HostState.self)
                 if try session.accept(state) { cancelGesture(notify: false) }
                 if !connected {
                     connected = true; connecting = false; timeout?.invalidate(); timeout = nil
                     remember()
-                    heartbeat = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in _ = self?.send("heartbeat") }
+                    heartbeat = Timer.connectionTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in _ = self?.send("heartbeat") }
                 }
                 status = mode == .paused ? "Владелец Mac приостановил управление" : m["lab"] as? Bool == true ? "Проверочный экран" : "Ваш Mac · защищённое соединение"
             case "ink":

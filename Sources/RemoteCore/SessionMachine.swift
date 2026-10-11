@@ -10,9 +10,12 @@ public final class SessionMachine {
     private var lastActivity: Double?
     private var locallyPaused = false
     private var transportAvailable = true
+    private var approvedPermissions: Permissions
+    private var systemControlAllowed = true
 
     public init(surface: Surface, permissions: Permissions = .init(), author: String = "remote") {
         self.author = author
+        approvedPermissions = permissions
         state = HostState(sessionID: UUID().uuidString, controllerEpoch: 1, inputEpoch: 1,
                           modeGeneration: 0, mode: .control, permissions: permissions,
                           surface: surface, layerEpoch: 1, reason: "connected")
@@ -112,8 +115,18 @@ public final class SessionMachine {
         return invalidate(reason: "host-resumed")
     }
     @discardableResult public func setPermissions(_ permissions: Permissions) -> SessionEffects {
-        state.permissions = permissions
-        if !permissions.annotate { _ = ink.edit("clear", author: author); state.layerEpoch = ink.epoch }
+        approvedPermissions = permissions
+        return refreshEffectivePermissions()
+    }
+    @discardableResult public func setSystemControlAllowed(_ allowed: Bool) -> SessionEffects {
+        systemControlAllowed = allowed
+        return refreshEffectivePermissions()
+    }
+    private func refreshEffectivePermissions() -> SessionEffects {
+        let effective = Permissions(control: approvedPermissions.control && systemControlAllowed, annotate: approvedPermissions.annotate)
+        guard state.permissions != effective else { return .init() }
+        state.permissions = effective
+        if !effective.annotate { _ = ink.edit("clear", author: author); state.layerEpoch = ink.epoch }
         return invalidate(reason: "permissions-changed")
     }
     @discardableResult public func reconnect() -> SessionEffects {

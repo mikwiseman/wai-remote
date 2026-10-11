@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +14,46 @@ import (
 )
 
 func httpHandler(h *hub) http.Handler { return http.HandlerFunc(h.serve) }
+
+func TestRouteDiscoveryRequiresClientCapability(t *testing.T) {
+	for _, version := range []int{0, 2} {
+		h := newHub()
+		h.relay = &relayIssuer{secret: []byte(strings.Repeat("s", 32)), urls: []string{"turn:203.0.113.1:3478?transport=udp", "turn:203.0.113.1:3478?transport=tcp"}}
+		server := httptest.NewServer(httpHandler(h))
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		c, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http"), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var challenge map[string]string
+		if err = wsjson.Read(ctx, c, &challenge); err != nil {
+			t.Fatal(err)
+		}
+		hello := signedHello(t, "host", challenge["nonce"])
+		data, _ := json.Marshal(hello)
+		var wire map[string]any
+		_ = json.Unmarshal(data, &wire)
+		wire["iceVersion"] = version
+		if err = wsjson.Write(ctx, c, wire); err != nil {
+			t.Fatal(err)
+		}
+		var ready struct {
+			ICE iceConfiguration `json:"ice"`
+		}
+		if err = wsjson.Read(ctx, c, &ready); err != nil {
+			t.Fatal(err)
+		}
+		if version == 0 && (ready.ICE.Policy != "relay" || len(ready.ICE.Servers[0].URLs) != 1 || !strings.HasSuffix(ready.ICE.Servers[0].URLs[0], "transport=tcp")) {
+			t.Error("Old apps must retain their working TCP relay configuration until they can handle partial ICE gathering")
+		}
+		if version == 2 && (ready.ICE.Policy != "all" || len(ready.ICE.Servers[0].URLs) != 2) {
+			t.Error("Updated apps need direct and UDP routes")
+		}
+		c.CloseNow()
+		cancel()
+		server.Close()
+	}
+}
 
 func connectTest(t *testing.T, url, role, host string) (*websocket.Conn, Hello) {
 	t.Helper()

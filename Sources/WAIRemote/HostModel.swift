@@ -54,27 +54,43 @@ final class HostModel: ObservableObject {
     private var localStrokeID: String?
     private var activity: NSObjectProtocol?
     private var connectionGeneration = UUID()
+    private var capturedScreenFrame: CGRect?
+    @Published var permissionRequested = false
     private var surface = Surface(id: "lab", width: 1280, height: 800)
 
     init(identity: DeviceIdentity) {
         self.identity = identity
         RTCInitializeSSL()
-        factory = RTCPeerConnectionFactory(encoderFactory: RTCDefaultVideoEncoderFactory(), decoderFactory: RTCDefaultVideoDecoderFactory())
+        factory = RTCPeerConnectionFactory(encoderFactory: ScreenVideoEncoderFactory(), decoderFactory: ScreenVideoDecoderFactory())
         for event in [NSWorkspace.sessionDidResignActiveNotification, NSWorkspace.willSleepNotification, NSWorkspace.screensDidSleepNotification] {
             observers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: event, object: nil, queue: .main) { [weak self] _ in self?.stop(reason: "Сеанс Mac завершён или заблокирован") })
         }
         observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
-            guard let self, self.sharing, !self.isLab else { return }; self.stop(reason: "Изменился экран. Откройте доступ заново.")
+            guard let self, self.sharing, !self.isLab else { return }
+            // AppKit posts this for unrelated display/settings changes too.
+            let screen = NSScreen.screens.first { String(($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? UInt32) ?? 0) == self.surface.id }
+            guard let screen, screen.frame == self.capturedScreenFrame else {
+                self.stop(reason: "Общий экран изменился. Откройте доступ для нового размера."); return
+            }
+        })
+        observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.refreshPermissions()
         })
         // Extra defense on current macOS, not a documented security API. Physical lock verification remains a release gate.
         DistributedNotificationCenter.default().addObserver(self, selector: #selector(screenLocked), name: NSNotification.Name("com.apple.screenIsLocked"), object: nil)
-        tick = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in self?.housekeeping() }
+        tick = Timer.connectionTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in self?.housekeeping() }
     }
     @objc private func screenLocked() { DispatchQueue.main.async { [weak self] in self?.stop(reason: "Mac заблокирован") } }
-    func refreshPermissions() { screenAllowed = CGPreflightScreenCaptureAccess(); controlAllowed = CGPreflightPostEventAccess() }
+    func refreshPermissions() {
+        let screen = CGPreflightScreenCaptureAccess(), control = CGPreflightPostEventAccess()
+        if screenAllowed != screen { screenAllowed = screen }
+        if controlAllowed != control { controlAllowed = control }
+        if sharing, let machine { apply(machine.setSystemControlAllowed(isLab || control)) }
+    }
     func showInputTest() {
         if inputTestWindow == nil {
-            let window = NSWindow(contentRect: NSRect(x:0,y:0,width:900,height:580), styleMask: [.titled,.closable,.miniaturizable,.resizable], backing: .buffered, defer: false)
+            let window = NSWindow(contentRect: NSRect(x:0,y:0,width:760,height:620), styleMask: [.titled,.closable,.miniaturizable,.resizable], backing: .buffered, defer: false)
+            window.contentMinSize = NSSize(width: 680, height: 580)
             window.title = "Проверка ввода — WAI Remote"; window.isReleasedWhenClosed = false
             window.appearance = NSAppearance(named: .aqua)
             window.contentViewController = NSHostingController(rootView: InputTestView())
@@ -82,8 +98,28 @@ final class HostModel: ObservableObject {
         }
         inputTestWindow?.center(); inputTestWindow?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
     }
-    func requestScreen() { _ = CGRequestScreenCaptureAccess(); refreshPermissions() }
-    func requestControl() { _ = CGRequestPostEventAccess(); refreshPermissions() }
+    func requestScreen() {
+        permissionRequested = true
+        _ = CGRequestScreenCaptureAccess(); refreshPermissions()
+        if !screenAllowed { openPermissionSettings("Privacy_ScreenCapture") }
+    }
+    func requestControl() {
+        permissionRequested = true
+        _ = CGRequestPostEventAccess(); refreshPermissions()
+        if !controlAllowed { openPermissionSettings("Privacy_Accessibility") }
+    }
+    private func openPermissionSettings(_ pane: String) {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?" + pane) { NSWorkspace.shared.open(url) }
+    }
+    func restartForPermissions() {
+        let resumeKey = "continueSharingAfterPermissionRestart"
+        UserDefaults.standard.set(true, forKey: resumeKey)
+        let helper = Process()
+        helper.executableURL = URL(fileURLWithPath: "/bin/sh")
+        helper.arguments = ["-c", "while /bin/kill -0 \"$1\" 2>/dev/null; do /bin/sleep 0.1; done; /usr/bin/open \"$2\"", "wai-remote-relaunch", String(ProcessInfo.processInfo.processIdentifier), Bundle.main.bundlePath]
+        do { try helper.run(); NSApp.terminate(nil) }
+        catch { UserDefaults.standard.removeObject(forKey: resumeKey); status = "Не удалось перезапустить. Закройте WAI Remote и откройте снова." }
+    }
     func start(lab: Bool) {
         guard !sharing, !starting else { return }
         refreshPermissions()
@@ -108,6 +144,7 @@ final class HostModel: ObservableObject {
                     overlay?.onFinish = { [weak self] in if self?.localDrawing == true { self?.toggleLocalDraw() } }
                     overlay?.onClear = { [weak self] in self?.clearInk() }
                     surface = Surface(id: String(display.displayID), width: Int(screen.frame.width), height: Int(screen.frame.height))
+                    capturedScreenFrame = screen.frame
                     injector.bounds = CGDisplayBounds(display.displayID)
                     try await video.startDisplay(display, excluding: [CGWindowID(overlay!.panel.windowNumber)])
                 }
@@ -180,6 +217,7 @@ final class HostModel: ObservableObject {
         if let machine, machine.author == offer.peerID, machine.state.surface == surface {
             machine.reconnect(); _ = machine.setPermissions(permissions)
         } else { machine = SessionMachine(surface: surface, permissions: permissions, author: offer.peerID) }
+        _ = machine?.setSystemControlAllowed(isLab || controlAllowed)
         if !iceConfiguration.iceServers.isEmpty && iceConfiguration.expiresAt <= Date().timeIntervalSince1970 {
             stop(reason: "Параметры подключения истекли. Откройте доступ заново."); return
         }
@@ -211,10 +249,15 @@ final class HostModel: ObservableObject {
     }
     private func receiveInteraction(_ data: Data) {
         guard sharing, let machine, let m = try? JSONDecoder().decode(WireMessage.self, from: data) else { return }
+        let handlingStart = ProcessInfo.processInfo.systemUptime
         let effects = machine.handle(m, now: ProcessInfo.processInfo.systemUptime)
         if effects.accepted {
             if m.type.hasPrefix("stroke") { if transport?.send(["type":"ink","author":machine.author,"op":m.jsonObject()]) != true { disconnectViewer(); return } }
             apply(effects)
+            if PerformanceLog.enabled && (m.type == "heartbeat" || m.type == "pointer" && m.action != "move") {
+                PerformanceLog.record("input-applied", ["kind": m.type, "action": m.action ?? "", "handlingMs": (ProcessInfo.processInfo.systemUptime - handlingStart) * 1000])
+                _ = transport?.send(["type": "performanceAck", "id": m.operationID])
+            }
         } else if m.type != "heartbeat" { sendState(); sendSnapshot() }
     }
     private func apply(_ e: SessionEffects) {
@@ -277,16 +320,13 @@ final class HostModel: ObservableObject {
     func stop(reason: String = "Доступ закрыт") {
         connectionGeneration = UUID(); sharing = false; starting = false
         disconnectViewer(); machine?.stop(); machine = nil
-        capture?.stop(); capture = nil; overlay?.close(); overlay = nil; labWindow?.orderOut(nil)
+        capture?.stop(); capture = nil; capturedScreenFrame = nil; overlay?.close(); overlay = nil; labWindow?.orderOut(nil)
         signaling?.close(); signaling = nil; pending = nil; secret = nil; invite = ""; status = reason
         detail = "Чтобы подключиться снова, откройте доступ на этом Mac."
     }
     private func housekeeping() {
         refreshPermissions()
         if sharing && !isLab && !screenAllowed { stop(reason: "Разрешение на экран отозвано"); return }
-        if sharing && !isLab && !controlAllowed, let machine, machine.state.permissions.control {
-            apply(machine.setPermissions(Permissions(control: false, annotate: machine.state.permissions.annotate)))
-        }
         if let machine { apply(machine.tick(now: ProcessInfo.processInfo.systemUptime)) }
         if let pending, pending.offer.expiresAt < Date().timeIntervalSince1970 * 1000 { reject() }
         if secretExpiry < Date() { secret = nil; invite = "" }

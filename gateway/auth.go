@@ -10,12 +10,13 @@ import (
 )
 
 type Hello struct {
-	Type      string `json:"type"`
-	Role      string `json:"role"`
-	HostID    string `json:"hostID"`
-	PeerID    string `json:"peerID"`
-	PublicKey string `json:"publicKey"`
-	Signature string `json:"signature"`
+	Type       string `json:"type"`
+	Role       string `json:"role"`
+	HostID     string `json:"hostID"`
+	PeerID     string `json:"peerID"`
+	PublicKey  string `json:"publicKey"`
+	Signature  string `json:"signature"`
+	ICEVersion int    `json:"iceVersion,omitempty"`
 }
 
 func authenticate(h Hello, nonce string) bool {

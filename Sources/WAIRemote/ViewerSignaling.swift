@@ -13,7 +13,7 @@ final class ViewerSignaling {
     func connect() {
         let task = URLSession.shared.webSocketTask(with: invite.signalingURL)
         socket = task; task.maximumMessageSize = 131_072; task.resume(); receive(task)
-        ping = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in self?.send(["type": "ping"]) }
+        ping = Timer.connectionTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in self?.send(["type": "ping"]) }
     }
     func send(_ object: [String: Any]) {
         guard let task = socket, let data = try? JSONSerialization.data(withJSONObject: object),
@@ -35,7 +35,7 @@ final class ViewerSignaling {
                     if object["type"] as? String == "challenge", let nonce = object["nonce"] as? String, nonce.count <= 100 {
                         let payload = Data("viewer\n\(self.invite.hostID)\n\(self.identity.id)\n\(nonce)".utf8)
                         guard let signature = try? self.identity.sign(payload, domain: "wai-remote/signal/v1") else { self.onFailure?(); return }
-                        self.send(["type": "hello", "role": "viewer", "hostID": self.invite.hostID, "peerID": self.identity.id, "publicKey": self.identity.publicKey, "signature": signature])
+                        self.send(["type": "hello", "role": "viewer", "hostID": self.invite.hostID, "peerID": self.identity.id, "publicKey": self.identity.publicKey, "signature": signature, "iceVersion": 2])
                     } else if object["type"] as? String == "ready" {
                         do { self.onReady?(try ICEConfiguration.read(object)) }
                         catch { self.onFailure?(); self.close(); return }

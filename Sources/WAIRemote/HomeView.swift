@@ -41,6 +41,7 @@ struct HomeView: View {
         .frame(minWidth: 680, minHeight: 610)
         .background(Color(nsColor: .windowBackgroundColor))
         .tint(accent)
+        .onAppear { if host.starting || host.sharing || host.permissionRequested { sharingTab = true } }
         .onChange(of: host.pending?.id) { _, pending in if pending != nil { sharingTab = true } }
         .sheet(item: $editing) { computer in
             VStack(alignment: .leading, spacing: 18) {
@@ -100,6 +101,16 @@ struct HomeView: View {
     private var shareContent: some View {
         VStack(alignment: .leading, spacing: 24) {
             title(host.sharing ? "Можно подключаться." : "Ваш экран.\nПо вашему приглашению.", subtitle: host.sharing ? "Новые устройства подключаются только с вашего согласия." : "Отправьте приглашение себе или человеку, которому доверяете. Вы решаете, кто увидит экран.")
+            if (!host.sharing || !host.isLab) && (!host.screenAllowed || !host.controlAllowed) {
+                VStack(alignment: .leading, spacing: 16) {
+                    if !host.screenAllowed { permission("Показать экран", detail: "Включите WAI Remote в разделе записи экрана macOS, затем вернитесь сюда.", action: host.requestScreen) }
+                    if !host.controlAllowed { permission("Управлять мышью и клавиатурой", detail: "Включите WAI Remote в настройках управления macOS. Разрешение подхватится после возвращения.", action: host.requestControl) }
+                    if host.permissionRequested {
+                        Text("Если macOS попросила перезапуск или разрешение уже включено, продолжите после перезапуска приложения.").font(.system(size: 11)).foregroundStyle(.secondary)
+                        Button("Перезапустить и продолжить") { host.restartForPermissions() }
+                    }
+                }
+            }
             if let pending = host.pending {
                 VStack(alignment: .leading, spacing: 14) {
                     Label("\(pending.offer.name) хочет подключиться", systemImage: "person.crop.circle.badge.questionmark").font(.headline)
@@ -142,12 +153,6 @@ struct HomeView: View {
                 Text("Блокировка и сон Mac закрывают доступ. Уже разрешённые устройства могут подключаться, пока доступ открыт.")
                     .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             } else {
-                if !host.screenAllowed || !host.controlAllowed {
-                    VStack(alignment: .leading, spacing: 16) {
-                        if !host.screenAllowed { permission("Показать экран", detail: "Разрешите запись экрана в настройках macOS.", action: host.requestScreen) }
-                        if !host.controlAllowed { permission("Управлять мышью и клавиатурой", detail: "Разрешите управление в настройках macOS. Для просмотра это не обязательно.", action: host.requestControl) }
-                    }
-                }
                 Button { host.start(lab: false) } label: {
                     HStack { if host.starting { ProgressView().controlSize(.small) }; Text(host.starting ? "Открываем доступ…" : "Открыть доступ к экрану") }
                 }.buttonStyle(.borderedProminent).controlSize(.large).disabled(host.starting || !host.screenAllowed)

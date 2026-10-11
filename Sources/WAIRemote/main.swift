@@ -31,6 +31,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 case .success(let identity):
                     self.model = HostModel(identity: identity)
                     self.viewer = MacViewerModel(identity: identity)
+                    if UserDefaults.standard.bool(forKey: "continueSharingAfterPermissionRestart") {
+                        UserDefaults.standard.removeObject(forKey: "continueSharingAfterPermissionRestart")
+                        self.model.permissionRequested = true
+                        self.model.start(lab: false)
+                    }
                     self.window.contentViewController = NSHostingController(rootView: HomeView(host: self.model, viewer: self.viewer, connect: self.connect))
                     self.model.$pending.sink { [weak self] value in if value != nil { self?.showWindow() } }.store(in: &self.subscriptions)
                     self.model.$sharing.sink { [weak self] value in self?.statusItem.button?.toolTip = value ? "WAI Remote · доступ к экрану открыт" : "WAI Remote · доступ закрыт" }.store(in: &self.subscriptions)

@@ -17,7 +17,7 @@ import (
 
 type relayIssuer struct {
 	secret []byte
-	url    string
+	urls   []string
 }
 
 func loadRelay(path, address, publicIP string) (*relayIssuer, error) {
@@ -40,7 +40,7 @@ func loadRelay(path, address, publicIP string) (*relayIssuer, error) {
 	if len(secret) < 32 || len(secret) > 256 {
 		return nil, errors.New("relay secret must contain 32 to 256 bytes")
 	}
-	return &relayIssuer{secret: secret, url: "turn:" + ip.String() + ":3478?transport=tcp"}, nil
+	return &relayIssuer{secret: secret, urls: []string{"turn:" + ip.String() + ":3478?transport=udp", "turn:" + ip.String() + ":3478?transport=tcp"}}, nil
 }
 
 func (r *relayIssuer) issue(peer string, now time.Time) *iceConfiguration {
@@ -49,7 +49,18 @@ func (r *relayIssuer) issue(peer string, now time.Time) *iceConfiguration {
 	username := strconv.FormatInt(expiry, 10) + ":" + hex.EncodeToString(id[:16])
 	mac := hmac.New(sha1.New, r.secret)
 	mac.Write([]byte(username))
-	return &iceConfiguration{Servers: []iceServer{{URLs: []string{r.url}, Username: username, Credential: base64.StdEncoding.EncodeToString(mac.Sum(nil))}}, Policy: "relay", ExpiresAt: expiry}
+	return &iceConfiguration{Servers: []iceServer{{URLs: r.urls, Username: username, Credential: base64.StdEncoding.EncodeToString(mac.Sum(nil))}}, Policy: "all", ExpiresAt: expiry}
+}
+
+func (r *relayIssuer) forClient(hello Hello, now time.Time) *iceConfiguration {
+	ice := r.issue(hello.PeerID, now)
+	if hello.ICEVersion < 2 {
+		// Released clients require every interface to finish gathering. Preserve
+		// their working relay configuration until the desktop app is updated.
+		ice.Policy = "relay"
+		ice.Servers[0].URLs = []string{r.urls[len(r.urls)-1]}
+	}
+	return ice
 }
 
 type admissionEntry struct {

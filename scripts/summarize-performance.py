@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""Summarize opt-in WAI Remote JSONL measurements; never treat RTT as click-to-photon."""
+import argparse
+import json
+import math
+from collections import defaultdict
+from pathlib import Path
+
+
+def summarize(path):
+    rows = [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
+    samples, previous = defaultdict(list), {}
+    formats, routes, codecs = set(), set(), set()
+    for row in rows:
+        event = row["event"]
+        if event == "input-roundtrip":
+            samples["input_roundtrip_ms"].append(row["ms"])
+            samples[f'{row["kind"]}_roundtrip_ms'].append(row["ms"])
+        elif event == "input-applied":
+            samples["host_input_handler_ms"].append(row["handlingMs"])
+        elif event == "input-dispatch":
+            samples["host_input_queue_ms"].append(row["queueMs"])
+        elif event == "capture":
+            samples["capture_sample_offset_ms"].append(row.get("sampleOffsetMs", row.get("ageMs")))
+        elif event == "rtc":
+            samples["buffered_bytes"].append(row["bufferedBytes"])
+            stats = {s["id"]: s for s in row["stats"]}
+            selected = {s["values"].get("selectedCandidatePairId") for s in stats.values() if s["type"] == "transport"}
+            for stat in stats.values():
+                value, kind, key = stat["values"], stat["type"], stat["id"]
+                if kind == "candidate-pair" and key in selected:
+                    if "currentRoundTripTime" in value:
+                        samples["network_rtt_ms"].append(value["currentRoundTripTime"] * 1000)
+                    local = stats.get(value.get("localCandidateId"), {}).get("values", {})
+                    remote = stats.get(value.get("remoteCandidateId"), {}).get("values", {})
+                    routes.add(f'{local.get("candidateType")}/{local.get("relayProtocol", local.get("protocol"))} -> {remote.get("candidateType")}')
+                if kind not in ("inbound-rtp", "outbound-rtp") or value.get("kind") != "video":
+                    continue
+                if "frameWidth" in value:
+                    formats.add(f'{value["frameWidth"]}x{value["frameHeight"]}')
+                codec = stats.get(value.get("codecId"), {}).get("values", {}).get("mimeType")
+                if codec:
+                    codecs.add(f'{codec} / {value.get("encoderImplementation", value.get("decoderImplementation", "unknown"))}')
+                if "framesPerSecond" in value:
+                    samples["fps"].append(value["framesPerSecond"])
+                before = previous.get(key)
+                previous[key] = (row["time"], value)
+                if not before:
+                    continue
+                elapsed, prior = row["time"] - before[0], before[1]
+                if elapsed <= 0:
+                    continue
+                def delta(field):
+                    if field not in value or field not in prior:
+                        return None
+                    difference = value[field] - prior[field]
+                    return difference if difference >= 0 else None
+                for time_key, count_key, name in [
+                    ("totalEncodeTime", "framesEncoded", "encode_ms"),
+                    ("totalDecodeTime", "framesDecoded", "decode_ms"),
+                    ("jitterBufferDelay", "jitterBufferEmittedCount", "video_buffer_ms"),
+                    ("totalPacketSendDelay", "packetsSent", "packet_send_delay_ms"),
+                ]:
+                    duration, count = delta(time_key), delta(count_key)
+                    if duration is not None and count:
+                        samples[name].append(duration / count * 1000)
+                byte_delta = delta("bytesReceived" if kind == "inbound-rtp" else "bytesSent")
+                if byte_delta is not None:
+                    samples["video_mbps"].append(byte_delta * 8 / elapsed / 1e6)
+                for field, name in [("framesDropped", "dropped_frames_per_s"), ("freezeCount", "freezes_per_s")]:
+                    change = delta(field)
+                    if change is not None:
+                        samples[name].append(change / elapsed)
+    def distribution(values):
+        values = sorted(x for x in values if math.isfinite(x))
+        if not values:
+            return None
+        return {"n": len(values), "p50": round(values[math.ceil(len(values) * .5) - 1], 3),
+                "p95": round(values[math.ceil(len(values) * .95) - 1], 3), "max": round(values[-1], 3)}
+    return {"file": str(path), "duration_s": round(rows[-1]["time"] - rows[0]["time"], 1) if rows else 0,
+            "formats": sorted(formats), "codecs": sorted(codecs), "routes": sorted(routes),
+            "measurements": {key: distribution(value) for key, value in sorted(samples.items())}}
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("files", nargs="+")
+    args = parser.parse_args()
+    print(json.dumps([summarize(path) for path in args.files], indent=2))

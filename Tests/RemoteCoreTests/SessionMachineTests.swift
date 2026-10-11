@@ -2,6 +2,29 @@ import XCTest
 @testable import RemoteCore
 
 final class SessionMachineTests: XCTestCase {
+    func testSystemPermissionCanReturnWithoutLosingTheOwnersGrant() {
+        let host = machine()
+        let queued = pointer(host.state)
+        XCTAssertTrue(host.setSystemControlAllowed(false).releaseInput)
+        XCTAssertFalse(host.state.permissions.control)
+        XCTAssertNil(host.handle(queued, now: 1).input)
+        XCTAssertTrue(host.setSystemControlAllowed(true).stateChanged)
+        XCTAssertTrue(host.state.permissions.control)
+        XCTAssertNotNil(host.handle(pointer(host.state), now: 2).input)
+        XCTAssertFalse(host.setSystemControlAllowed(true).stateChanged)
+    }
+    func testSystemGrantNeverPromotesAViewOnlyConnection() {
+        let host = machine(.init(control: false, annotate: true))
+        _ = host.setSystemControlAllowed(false)
+        _ = host.setSystemControlAllowed(true)
+        XCTAssertFalse(host.state.permissions.control)
+        XCTAssertNil(host.handle(pointer(host.state), now: 1).input)
+        _ = host.setPermissions(.init(control: true, annotate: true))
+        _ = host.setSystemControlAllowed(false)
+        _ = host.setPermissions(.init(control: false, annotate: true))
+        _ = host.setSystemControlAllowed(true)
+        XCTAssertFalse(host.state.permissions.control, "A revoked owner grant must stay revoked after macOS permission returns.")
+    }
     func testTransportRecoveryNeedsNewEpochAndPreservesLocalPause() {
         let host = machine()
         let old = pointer(host.state)

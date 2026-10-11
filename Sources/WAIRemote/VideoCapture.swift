@@ -8,6 +8,7 @@ final class VideoCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private let capturer: RTCVideoCapturer
     private var stream: SCStream?
     private let queue = DispatchQueue(label: "is.wai.remote.capture", qos: .userInteractive)
+    private var lastMeasurement = 0.0
     private var labTimer: Timer?
     var onError: ((String) -> Void)?
     var onLabImage: ((NSImage) -> Void)?
@@ -23,28 +24,43 @@ final class VideoCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
         let excluded = content.windows.filter { windowIDs.contains($0.windowID) }
         let filter = SCContentFilter(display: display, excludingWindows: excluded)
-        let config = SCStreamConfiguration()
-        let ratio = min(1, 1920.0 / Double(display.width))
-        config.width = max(2, Int(Double(display.width) * ratio) / 2 * 2)
-        config.height = max(2, Int(Double(display.height) * ratio) / 2 * 2)
-        config.minimumFrameInterval = CMTime(value: 1, timescale: 30)
-        config.queueDepth = 3; config.showsCursor = true; config.capturesAudio = false
-        config.pixelFormat = kCVPixelFormatType_32BGRA
+        let config = Self.configuration(size: filter.contentRect.size, pixelScale: CGFloat(filter.pointPixelScale))
+        PerformanceLog.record("capture-config", ["width": config.width, "height": config.height, "fps": 60, "format": "NV12", "queueDepth": config.queueDepth])
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
         self.stream = stream
         try await stream.startCapture()
+    }
+    static func configuration(size: CGSize, pixelScale: CGFloat) -> SCStreamConfiguration {
+        let config = SCStreamConfiguration()
+        let ratio = max(1, Double(pixelScale))
+        config.width = max(2, Int(Double(size.width) * ratio) / 2 * 2)
+        config.height = max(2, Int(Double(size.height) * ratio) / 2 * 2)
+        config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
+        config.queueDepth = 3; config.showsCursor = true; config.capturesAudio = false
+        config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        return config
     }
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .screen, sampleBuffer.isValid,
               let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
               let raw = attachments.first?[.status] as? Int, SCFrameStatus(rawValue: raw) == .complete,
               let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        push(buffer)
+        if PerformanceLog.enabled {
+            let now = ProcessInfo.processInfo.systemUptime
+            if now - lastMeasurement >= 1 {
+                lastMeasurement = now
+                // ScreenCaptureKit's display timestamp can be slightly in the future.
+                // This clock offset is not an end-to-end capture latency measurement.
+                PerformanceLog.record("capture", ["sampleOffsetMs": (CMClockGetTime(CMClockGetHostTimeClock()).seconds - sampleBuffer.presentationTimeStamp.seconds) * 1000])
+            }
+        }
+        push(buffer, timestamp: sampleBuffer.presentationTimeStamp)
     }
-    private func push(_ buffer: CVPixelBuffer) {
+    private func push(_ buffer: CVPixelBuffer, timestamp: CMTime? = nil) {
+        let seconds = timestamp.flatMap { $0.isNumeric && $0.seconds.isFinite ? $0.seconds : nil } ?? ProcessInfo.processInfo.systemUptime
         let frame = RTCVideoFrame(buffer: RTCCVPixelBuffer(pixelBuffer: buffer), rotation: ._0,
-                                 timeStampNs: Int64(ProcessInfo.processInfo.systemUptime * 1_000_000_000))
+                                 timeStampNs: Int64(seconds * 1_000_000_000))
         source.capturer(capturer, didCapture: frame)
     }
     func stream(_ stream: SCStream, didStopWithError error: Error) { DispatchQueue.main.async { [weak self] in self?.onError?(error.localizedDescription) } }
@@ -53,7 +69,7 @@ final class VideoCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         if let stream { Task { try? await stream.stopCapture() } }; stream = nil
     }
     func startLab() {
-        labTimer = Timer.scheduledTimer(withTimeInterval: 1.0/15, repeats: true) { [weak self] _ in self?.renderLab() }
+        labTimer = Timer.connectionTimer(withTimeInterval: 1.0/15, repeats: true) { [weak self] _ in self?.renderLab() }
         renderLab()
     }
     func applyLab(_ m: WireMessage) {
