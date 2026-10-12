@@ -2,6 +2,18 @@ import XCTest
 @testable import RemoteCore
 
 final class SessionMachineTests: XCTestCase {
+    func testWindowResizeRejectsQueuedCoordinatesAndKeepsTheSession() {
+        let host = machine()
+        let queued = pointer(host.state), session = host.state.sessionID
+        let effects = host.resizeSurface(width: 800, height: 600)
+        XCTAssertTrue(effects.releaseInput)
+        XCTAssertEqual(host.state.surface.width, 800)
+        XCTAssertEqual(host.state.surface.height, 600)
+        XCTAssertEqual(host.state.sessionID, session)
+        XCTAssertNil(host.handle(queued, now: 1).input)
+        XCTAssertNotNil(host.handle(pointer(host.state), now: 2).input)
+        XCTAssertFalse(host.resizeSurface(width: 800, height: 600).stateChanged)
+    }
     func testSystemPermissionCanReturnWithoutLosingTheOwnersGrant() {
         let host = machine()
         let queued = pointer(host.state)

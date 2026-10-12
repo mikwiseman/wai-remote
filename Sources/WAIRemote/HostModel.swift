@@ -18,6 +18,11 @@ struct PendingPeer: Identifiable {
     var id: String { offer.peerID }
     let offer: Offer
 }
+struct SharedWindowChoice: Identifiable {
+    let window: SCWindow
+    var id: CGWindowID { window.windowID }
+    var name: String { [window.owningApplication?.applicationName, window.title].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ") }
+}
 
 final class HostModel: ObservableObject {
     @Published var status = "Доступ закрыт"
@@ -34,11 +39,15 @@ final class HostModel: ObservableObject {
     @Published var controlAllowed = CGPreflightPostEventAccess()
     @Published var gateway = UserDefaults.standard.string(forKey: "signalingGateway") ?? "https://waiwai.is/remote/connect/"
     @Published var peers = KeyStore.peers()
+    @Published var windowChoices: [SharedWindowChoice] = []
+    @Published private(set) var sharedWindowName: String?
     let identity: DeviceIdentity
     private let factory: RTCPeerConnectionFactory
     private var capture: VideoCapture?
     private var captureStartTask: Task<Void, Never>?
     private var capturedDisplay: SCDisplay?
+    private var capturedWindow: SCWindow?
+    private var resizingWindow = false
     private var signaling: Signaling?
     private var transport: PeerTransport?
     private var iceConfiguration = ICEConfiguration.local
@@ -70,7 +79,7 @@ final class HostModel: ObservableObject {
             observers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: event, object: nil, queue: .main) { [weak self] _ in self?.stop(reason: "Сеанс Mac завершён или заблокирован", cause: cause) })
         }
         observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
-            guard let self, self.sharing, !self.isLab else { return }
+            guard let self, self.sharing, !self.isLab, self.capturedWindow == nil else { return }
             // AppKit posts this for unrelated display/settings changes too.
             let screen = NSScreen.screens.first { String(($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? UInt32) ?? 0) == self.surface.id }
             guard let screen, screen.frame == self.capturedScreenFrame else {
@@ -124,7 +133,17 @@ final class HostModel: ObservableObject {
         do { try helper.run(); NSApp.terminate(nil) }
         catch { UserDefaults.standard.removeObject(forKey: resumeKey); status = "Не удалось перезапустить. Закройте WAI Remote и откройте снова." }
     }
-    func start(lab: Bool) {
+    @MainActor func loadWindows() async {
+        do {
+            let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+            windowChoices = content.windows.filter {
+                $0.windowLayer == 0 && $0.frame.width >= 200 && $0.frame.height >= 100 &&
+                $0.owningApplication != nil && !($0.title ?? "").isEmpty &&
+                ($0.owningApplication?.processID != ProcessInfo.processInfo.processIdentifier || $0.windowID == inputTestWindow.map { CGWindowID($0.windowNumber) })
+            }.map { SharedWindowChoice(window: $0) }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        } catch { windowChoices = []; status = "Не удалось получить список окон." }
+    }
+    func start(lab: Bool, window: SCWindow? = nil) {
         guard !sharing, !starting else { return }
         refreshPermissions()
         if !lab && !screenAllowed { status = "Нужно разрешение на запись экрана"; return }
@@ -141,6 +160,16 @@ final class HostModel: ObservableObject {
                     video.onLabImage = { [weak self] image in self?.labImage?.image = image }; video.startLab()
                 } else {
                     let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+                    if let window {
+                        guard WindowInputTarget.isSupported,
+                              let selected = content.windows.first(where: { $0.windowID == window.windowID && $0.owningApplication?.processID == window.owningApplication?.processID }),
+                              let pid = selected.owningApplication?.processID else { throw NSError(domain: "Capture", code: 2, userInfo: [NSLocalizedDescriptionKey: "Выбранное окно больше недоступно."]) }
+                        guard connectionGeneration == generation else { return }
+                        capturedWindow = selected; sharedWindowName = SharedWindowChoice(window: selected).name
+                        injector.setWindowTarget(WindowInputTarget(pid: pid, windowID: selected.windowID))
+                        surface = Surface(id: "window:\(pid):\(selected.windowID)", width: Int(selected.frame.width), height: Int(selected.frame.height))
+                        try await video.startWindow(selected)
+                    } else {
                     guard let display = content.displays.first(where: { $0.displayID == CGMainDisplayID() }), let screen = NSScreen.screens.first(where: { ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? UInt32) == display.displayID }) else { throw NSError(domain: "Capture", code: 1) }
                     guard connectionGeneration == generation else { return }
                     overlay = InkOverlay(screen: screen); overlay?.view.onDraw = { [weak self] type, point in self?.drawLocally(type, point) }
@@ -151,6 +180,7 @@ final class HostModel: ObservableObject {
                     capturedDisplay = display
                     injector.bounds = CGDisplayBounds(display.displayID)
                     try await video.startDisplay(display, excluding: [CGWindowID(overlay!.panel.windowNumber)])
+                    }
                 }
                 guard connectionGeneration == generation else { video.stop(); return }
                 // Validate screen permission while the owner is here, then idle
@@ -235,6 +265,7 @@ final class HostModel: ObservableObject {
     func reject() { if let pending { signaling?.send(["type":"reject","to":pending.id,"body":["reason":"declined"]]) }; pending = nil }
     private func connect(_ offer: Offer, permissions: Permissions) {
         guard sharing else { return }
+        let permissions = Permissions(control: permissions.control, annotate: capturedWindow == nil && permissions.annotate)
         if !isLab { capture = makeCapture() }
         guard let capture, sharing else { return }
         if let machine, machine.author == offer.peerID, machine.state.surface == surface {
@@ -254,12 +285,14 @@ final class HostModel: ObservableObject {
             self.status = "Устройство подключено"; self.sendState(); self.sendSnapshot()
             guard self.transport === peer, self.capture === capture, self.sharing else { return }
             self.activity = ProcessInfo.processInfo.beginActivity(options: .userInteractive, reason: "WAI Remote active session")
-            if !self.isLab, let display = self.capturedDisplay {
+            if !self.isLab {
+                let display = self.capturedDisplay, window = self.capturedWindow
                 let excluded = self.overlay.map { [CGWindowID($0.panel.windowNumber)] } ?? []
                 self.captureStartTask = Task { @MainActor [weak self, weak peer] in
                     do {
                         try Task.checkCancellation()
-                        try await capture.startDisplay(display, excluding: excluded)
+                        if let window { try await capture.startWindow(window) }
+                        else if let display { try await capture.startDisplay(display, excluding: excluded) }
                     } catch {
                         guard let self, self.capture === capture, self.transport === peer else { return }
                         self.stop(reason: "Не удалось начать захват: \(error.localizedDescription)", cause: "capture-start")
@@ -301,6 +334,8 @@ final class HostModel: ObservableObject {
         } else if m.type != "heartbeat" { sendState(); sendSnapshot() }
     }
     private func apply(_ e: SessionEffects) {
+        transport?.clipboard.setEnabled(!isLab && sharing && machine?.connected == true &&
+            machine?.stalled == false && machine?.state.permissions.control == true && machine?.state.mode != .paused)
         if e.releaseInput { injector.releaseAll() }
         if machine?.stalled == true, let activity { ProcessInfo.processInfo.endActivity(activity); self.activity = nil }
         if e.accepted, machine?.connected == true, machine?.stalled == false, transport?.isReady == true, activity == nil {
@@ -383,11 +418,18 @@ final class HostModel: ObservableObject {
         connectionGeneration = UUID(); sharing = false; starting = false; reconnecting = false
         disconnectViewer(); machine?.stop(); machine = nil
         stopCapture(); capturedDisplay = nil; capturedScreenFrame = nil; overlay?.close(); overlay = nil; labWindow?.orderOut(nil)
+        injector.setWindowTarget(nil); capturedWindow = nil; sharedWindowName = nil; resizingWindow = false
         signaling?.close(); signaling = nil; pending = nil; secret = nil; invite = ""; status = reason
         detail = "Чтобы подключиться снова, откройте доступ на этом Mac."
     }
     private func housekeeping() {
         refreshPermissions()
+        if sharing, capturedWindow != nil {
+            guard let frame = injector.windowTarget?.frame else {
+                stop(reason: "Общее окно закрыто. Выберите другое окно.", cause: "window-closed"); return
+            }
+            resizeWindowIfNeeded(frame.size)
+        }
         if sharing && !isLab && !screenAllowed { stop(reason: "Разрешение на экран отозвано", cause: "screen-permission-revoked"); return }
         if let deadline = connectionDeadline, ProcessInfo.processInfo.systemUptime >= deadline {
             if let author = machine?.author { signaling?.send(["type":"reject","to":author,"body":["reason":"network"]]) }
@@ -397,6 +439,27 @@ final class HostModel: ObservableObject {
         if let pending, pending.offer.expiresAt < Date().timeIntervalSince1970 * 1000 { reject() }
         if secretExpiry < Date() { secret = nil; invite = "" }
         seenNonces = seenNonces.filter { Date().timeIntervalSince($0.value) < 150 }
+    }
+    private func resizeWindowIfNeeded(_ size: CGSize) {
+        let width = Int(size.width), height = Int(size.height)
+        guard !resizingWindow, width != surface.width || height != surface.height else { return }
+        resizingWindow = true
+        if let machine { apply(machine.pause(reason: "window-resizing")) }
+        let generation = connectionGeneration, video = capture
+        Task { @MainActor in
+            do {
+                try await video?.resizeWindow(size)
+                guard self.connectionGeneration == generation else { return }
+                if let machine = self.machine {
+                    self.apply(machine.resizeSurface(width: width, height: height)); self.surface = machine.state.surface
+                    self.apply(machine.resume())
+                } else { self.surface.width = width; self.surface.height = height; self.surface.revision += 1 }
+                self.resizingWindow = false
+            } catch {
+                guard self.connectionGeneration == generation else { return }
+                self.stop(reason: "Не удалось обновить размер общего окна.", cause: "window-resize-failed")
+            }
+        }
     }
     func showLab() {
         if labWindow == nil {

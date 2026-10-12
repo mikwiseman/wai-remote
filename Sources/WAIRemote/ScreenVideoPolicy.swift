@@ -33,13 +33,7 @@ final class ScreenVideoEncoderFactory: NSObject, RTCVideoEncoderFactory {
     private let base = RTCDefaultVideoEncoderFactory()
     func supportedCodecs() -> [RTCVideoCodecInfo] { ScreenVideoPolicy.screenCodecs(base.supportedCodecs()) }
     func createEncoder(_ info: RTCVideoCodecInfo) -> RTCVideoEncoder? {
-        // Low-latency VideoToolbox chooses its own level. Use it only when the
-        // peer negotiated our 4K60 capability, not a lower remote level.
-        if info.name == "H264", let profile = info.parameters["profile-level-id"],
-           profile.hasPrefix("64"), profile.hasSuffix("34"),
-           info.parameters["packetization-mode"] == "1" {
-            return LowLatencyH264Encoder(codec: info)
-        }
+        PerformanceLog.record("encoder", ["implementation": "WebRTC", "lowLatency": false])
         return base.createEncoder(info)
     }
 }
@@ -47,5 +41,28 @@ final class ScreenVideoEncoderFactory: NSObject, RTCVideoEncoderFactory {
 final class ScreenVideoDecoderFactory: NSObject, RTCVideoDecoderFactory {
     private let base = RTCDefaultVideoDecoderFactory()
     func supportedCodecs() -> [RTCVideoCodecInfo] { ScreenVideoPolicy.screenCodecs(base.supportedCodecs()) }
-    func createDecoder(_ info: RTCVideoCodecInfo) -> RTCVideoDecoder? { base.createDecoder(info) }
+    func createDecoder(_ info: RTCVideoCodecInfo) -> RTCVideoDecoder? {
+        guard let decoder = base.createDecoder(info) else { return nil }
+        return PerformanceLog.enabled ? MeasuredVideoDecoder(decoder) : decoder
+    }
+}
+
+private final class MeasuredVideoDecoder: NSObject, RTCVideoDecoder {
+    private let decoder: RTCVideoDecoder
+    private let input = FrameTimingLog("decode-input")
+    private let output = FrameTimingLog("decode-output")
+    init(_ decoder: RTCVideoDecoder) { self.decoder = decoder }
+    func implementationName() -> String { decoder.implementationName() }
+    func startDecode(withNumberOfCores cores: Int32) -> Int { decoder.startDecode(withNumberOfCores: cores) }
+    func release() -> Int { decoder.release() }
+    func setCallback(_ callback: @escaping RTCVideoDecoderCallback) {
+        decoder.setCallback { [output] frame in
+            output.frame(frame.timeStampNs)
+            callback(frame)
+        }
+    }
+    func decode(_ image: RTCEncodedImage, missingFrames: Bool, codecSpecificInfo info: RTCCodecSpecificInfo?, renderTimeMs: Int64) -> Int {
+        input.frame(Int64(image.timeStamp), detail: renderTimeMs)
+        return decoder.decode(image, missingFrames: missingFrames, codecSpecificInfo: info, renderTimeMs: renderTimeMs)
+    }
 }

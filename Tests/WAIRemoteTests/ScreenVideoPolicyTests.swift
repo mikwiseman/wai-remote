@@ -6,6 +6,55 @@ import CoreVideo
 
 @MainActor
 final class ScreenVideoPolicyTests: XCTestCase {
+    func testHardwareEncoderResumesAfterSparseDesktopUpdates() async throws {
+        let factory = ScreenVideoEncoderFactory()
+        let codec = try XCTUnwrap(factory.supportedCodecs().first { $0.name == "H264" })
+        let encoder = try XCTUnwrap(factory.createEncoder(codec))
+        let decoder = try XCTUnwrap(RTCDefaultVideoDecoderFactory().createDecoder(codec))
+        defer { _ = encoder.release(); _ = decoder.release() }
+        let settings = RTCVideoEncoderSettings()
+        settings.name = "H264"; settings.width = 3840; settings.height = 2160
+        settings.startBitrate = 4000; settings.maxBitrate = 32000; settings.maxFramerate = 60
+        settings.mode = .screensharing
+        XCTAssertEqual(encoder.startEncode(with: settings, numberOfCores: 4), 0)
+        XCTAssertEqual(decoder.startDecode(withNumberOfCores: 4), 0)
+        for index in 0..<8 {
+            try await Task.sleep(for: .seconds((3...5).contains(index) ? 2 : 1.0 / 60))
+            // Large alternating changes distinguish fresh pixels from a stale
+            // frame even at the low bitrate's deliberately lossy quantization.
+            let luma = index.isMultiple(of: 2) ? 40 : 200
+            var pixels: CVPixelBuffer?
+            XCTAssertEqual(CVPixelBufferCreate(kCFAllocatorDefault, 3840, 2160, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+                [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary, &pixels), kCVReturnSuccess)
+            let pixel = try XCTUnwrap(pixels)
+            CVPixelBufferLockBaseAddress(pixel, [])
+            memset(CVPixelBufferGetBaseAddressOfPlane(pixel, 0), Int32(luma),
+                   CVPixelBufferGetBytesPerRowOfPlane(pixel, 0) * CVPixelBufferGetHeightOfPlane(pixel, 0))
+            memset(CVPixelBufferGetBaseAddressOfPlane(pixel, 1), 128,
+                   CVPixelBufferGetBytesPerRowOfPlane(pixel, 1) * CVPixelBufferGetHeightOfPlane(pixel, 1))
+            CVPixelBufferUnlockBaseAddress(pixel, [])
+            let buffer = RTCCVPixelBuffer(pixelBuffer: pixel)
+            let decoded = expectation(description: "Fresh desktop pixels after idle \(index)")
+            decoder.setCallback { frame in
+                XCTAssertEqual(frame.width, 3840); XCTAssertEqual(frame.height, 2160)
+                XCTAssertEqual(Int(frame.buffer.toI420().dataY.pointee), luma, accuracy: 16)
+                decoded.fulfill()
+            }
+            encoder.setCallback { image, info in
+                XCTAssertEqual(image.timeStamp, UInt32(index * 180000))
+                XCTAssertEqual(decoder.decode(image, missingFrames: false, codecSpecificInfo: info, renderTimeMs: 0), 0)
+                return true
+            }
+            if index == 3 { XCTAssertEqual(encoder.setBitrate(4000, framerate: 1), 0) }
+            if index == 6 { XCTAssertEqual(encoder.setBitrate(4000, framerate: 60), 0) }
+            let frame = RTCVideoFrame(buffer: buffer, rotation: ._0,
+                timeStampNs: Int64(ProcessInfo.processInfo.systemUptime * 1_000_000_000))
+            frame.timeStamp = Int32(index * 180000)
+            XCTAssertEqual(encoder.encode(frame, codecSpecificInfo: nil, frameTypes: [index == 0 ? 3 : 4]), 0)
+            await fulfillment(of: [decoded], timeout: 1)
+        }
+    }
+
     func testNativeH264CanEncodeARetinaScreenFrame() throws {
         let factory = ScreenVideoEncoderFactory()
         let codec = try XCTUnwrap(factory.supportedCodecs().first { $0.name == "H264" })

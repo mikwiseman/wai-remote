@@ -7,6 +7,7 @@ final class VideoCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     let source: RTCVideoSource
     private let capturer: RTCVideoCapturer
     private var stream: SCStream?
+    private var windowPixelScale: CGFloat?
     private let queue = DispatchQueue(label: "is.wai.remote.capture", qos: .userInteractive)
     private var lastMeasurement = 0.0
     private var capturedFrames = 0
@@ -28,12 +29,28 @@ final class VideoCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         try Task.checkCancellation()
         let excluded = content.windows.filter { windowIDs.contains($0.windowID) }
         let filter = SCContentFilter(display: display, excludingWindows: excluded)
+        windowPixelScale = nil
+        try await start(filter)
+    }
+    func startWindow(_ window: SCWindow) async throws {
+        let filter = SCContentFilter(desktopIndependentWindow: window)
+        windowPixelScale = CGFloat(filter.pointPixelScale)
+        try await start(filter)
+    }
+    private func start(_ filter: SCContentFilter) async throws {
         let config = Self.configuration(size: filter.contentRect.size, pixelScale: CGFloat(filter.pointPixelScale))
+        if windowPixelScale != nil { config.showsCursor = false; config.ignoreShadowsSingleWindow = true }
         PerformanceLog.record("capture-config", ["width": config.width, "height": config.height, "fps": 60, "format": "NV12", "queueDepth": config.queueDepth])
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
         self.stream = stream
         try await stream.startCapture()
+    }
+    func resizeWindow(_ size: CGSize) async throws {
+        guard let windowPixelScale, let stream else { return }
+        let config = Self.configuration(size: size, pixelScale: windowPixelScale)
+        config.showsCursor = false; config.ignoreShadowsSingleWindow = true
+        try await stream.updateConfiguration(config)
     }
     static func configuration(size: CGSize, pixelScale: CGFloat) -> SCStreamConfiguration {
         let config = SCStreamConfiguration()

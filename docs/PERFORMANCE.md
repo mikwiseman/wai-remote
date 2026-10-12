@@ -1,6 +1,6 @@
 # Responsiveness verification
 
-Work in progress, 11 October 2026. Target: the user's MacBook and **waiMini**, not Mark's Mac.
+Work in progress, 12 October 2026. Target: the user's MacBook and **waiMini**, not Mark's Mac.
 
 ## Build 20 baseline
 
@@ -232,3 +232,31 @@ Both GitHub checks for `eceb7f7` passed, including Swift, the gateway race tests
 Mini's bounded repeat succeeded through Sparkle 25→26 at approximately 22:41 Moscow. The installed bundle and single PID 24228 were verified before inspecting the UI; both trusted devices and permissions survived. Its preview feed was removed and diagnostics/TCP-only remained off. MacBook was independently verified on 26 with one PID 2252. The saved Mini connection reopened without a new invitation or approval. Three real clicks advanced the reset native counter from 0 to 3, and `WAI Remote 26 — Mac Mini подключён` arrived exactly.
 
 The horizontal-drag anomaly also occurred with local computer-use input directly on Mini: a single title drag from [1040,28] to [784,28] left the window at the same desktop x-coordinate, as independently observed in WAI's live full-desktop view. After closing the adjacent WAI settings and home windows, a remote −240/0 pixel drag moved the test window from x819 to x579; the following +240/−80 drag restored x819 and moved its top from y443 to y363. This is consistent with native window alignment behavior, but it does not establish its exact cause. No input-code change was made based on this observation. The normal connection was left open on build 26 at both ends.
+
+## Display cadence and sparse-desktop stall, build 27
+
+On 12 October, a native regression against the pinned WebRTC framework found that the viewer's `MTKView` requested **30 Hz**, despite a 60-fps capture/received stream. The test failed at 30 versus 60 before the fix. Each new video surface now requests 60 Hz. Earlier received-frame statistics did not prove 60-fps display. WebRTC's [Metal renderer initialization](https://webrtc.googlesource.com/src/+/main/sdk/objc/components/renderer/metal/RTCMTLRenderer.mm) confirms the default; the test checks the actual installed dependency.
+
+The same morning, Mini build 26 froze after 76 encoded/sent frames while its capture reports and approximately 130–210 ms input/heartbeat acknowledgements continued. Clicks and window movement became visible only after reconnection. The host log separates this from capture-pool starvation: sparse capture continued, but encoded frames and video bytes did not advance for about two minutes. Preserved evidence: `.runtime/mini-build26-oct12-full.jsonl`.
+
+A native hardware regression reproduced the custom low-latency encoder dropping seven subsequent 4K updates at a 4-Mbps starting rate, including updates spaced two seconds apart. VideoToolbox reported successful callbacks with the frame-dropped flag. The standard WebRTC H.264 encoder passed the same sequence, so build 27 uses it and removes the custom implementation. The regression now decodes all eight alternating dark/light updates and checks fresh pixels, including the return from sparse to 60-fps timing. This proves recovery at that test rate, not sustained Mini throughput. A proposed `MaxFrameDelayCount=1` setting was unsupported and is **not** part of the fix.
+
+Opt-in, bounded local diagnostics now include batched decode-input, decode-output, renderer-delivery and unique-frame draw-submission timestamps. These contain no pixels or input contents. Draw submission is not physical presentation or click-to-photon latency. The standard encoder's latency and sustained UDP/TCP smoothness still require a fresh two-device run; the stable feed remains 0.2.0 (3).
+
+Build 27 is a signed, notarized and stapled universal candidate. Its isolated Sparkle feed and public ZIP checksum were verified before installation. ZIP SHA-256: `2c10ad37e8aeb19b209f85771b1906849574d5103462f506622848e3a73380b8`. Both Macs installed it; Mini's Sparkle 26→27 update retained permissions and trusted devices.
+
+The 300-second UDP desktop observation at 09:26:42–09:31:42 Moscow delivered native 4K, median 57 received fps and zero decoder drops. Acknowledgement p50/p95/max was 125/201/516 ms. Eleven freezes totaled 3.219 seconds (1.08%); video-buffer p95 was 97.82 ms. Both gates failed. Unique-frame draw submissions averaged 47.74 fps. Host capture and transmission stayed around 57 fps, while available bitrate swung between approximately 0.3 and 32 Mbps. No causal claim about probing follows from this correlation. The visible desktop included settings, and this is not an isolated animation benchmark.
+
+A 120-second TCP observation at 09:21:36–09:23:36 delivered median 57 received fps, two freezes totaling 0.636 seconds (0.53%), and acknowledgement p95/max 207/410 ms. Its video-buffer p95 of 73 ms failed the original 50-ms gate. Stable promotion remains withheld.
+
+Build 28 adds a separate `performanceNetworkTrace` opt-in, effective only with diagnostics enabled. It writes a private, bounded WebRTC event log containing network metadata. Do not publish raw traces. `scripts/summarize-network-trace.py` extracts only congestion/probe numbers, excludes addresses and packet data, and explicitly labels first-in-batch observations without pretending to decode their compressed deltas.
+
+## Clipboard and window control candidates, 28–29
+
+Candidate 28 was installed on both Macs (Mini via Sparkle 27→28). The public ZIP checksum is `ac078eb2f7e0f19aaa88888453e88027b7ac1b44dcf1e262bf392cd1eee70f0b`; notarization was accepted as `7a9c5ead-d3f0-4ecb-8b00-2530f3a1a812`. The stable feed is unchanged. On 12 October at 10:35–10:36 Moscow, native paste delivered mixed Latin/Cyrillic text and an emoji from MacBook to Mini. Appending ` 42` through remote input, selecting and copying on Mini returned the exact 43 UTF-8 bytes to the MacBook clipboard. Image/file device checks are still in progress.
+
+The clipboard uses a separate reliable ordered WebRTC channel, 10-KiB chunks and bounded buffering. Native representations, including formatting and image bytes, are preserved. Copied files/folders carry bytes and are materialized locally; remote file paths are not treated as local files. The limit is 100 MiB/2,048 entries; symlinks and special files are rejected. Received file backing is bounded to three transfers. Concealed pasteboard contents are not exported. A connection does not automatically send a clipboard that predates it. Control permission, an active connection and an unpaused session are required. Permission loss/disconnect cancels pending transfers. Explicit Paste snapshots the clipboard before asynchronous file work and waits for a receiver acknowledgement before sending Command-V. Tests cover late/local-copy races and echo prevention.
+
+The loopback WebRTC clipboard integration test is opt-in with `WAI_NETWORK_TESTS=1`: this Mac's firewall blocks inbound traffic to xctest. It was attempted and failed to establish ICE, so it is not counted as an integration pass. Native two-device verification is required regardless of unit-test results. Build 28 passed 62 local tests, with that one network test skipped.
+
+Candidate 29 adds an owner-selected window capture and process/window-targeted input. This is a shared macOS login session, with a shared clipboard, not two independent desktops. It uses private window-location SPI at runtime, following the attributed MIT references; unavailable SPI disables the option. It never falls back to global HID input for a selected window. Owner PID/window checks stop stale routing, and geometry changes invalidate queued coordinates. Real foreground/background behavior across native and browser apps is still a release gate; some apps/dialogs may require activation.

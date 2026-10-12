@@ -6,6 +6,8 @@ final class ViewerTransport: NSObject, RTCPeerConnectionDelegate, RTCDataChannel
     private let factory = RTCPeerConnectionFactory(encoderFactory: ScreenVideoEncoderFactory(), decoderFactory: ScreenVideoDecoderFactory())
     private var peer: RTCPeerConnection!
     private var channel: RTCDataChannel!
+    private var clipboardChannel: RTCDataChannel?
+    let clipboard: ClipboardSync
     private let gathering: ICEGatheringDeadline
     private var completion: ((Result<String, Error>) -> Void)?
     private var closed = false
@@ -13,9 +15,15 @@ final class ViewerTransport: NSObject, RTCPeerConnectionDelegate, RTCDataChannel
     var onVideo: ((RTCVideoTrack) -> Void)?
     var onMessage: ((Data) -> Void)?
     var onState: ((RTCPeerConnectionState) -> Void)?
-    init(ice: ICEConfiguration) {
+    init(ice: ICEConfiguration, clipboard: ClipboardSync = .init()) {
+        self.clipboard = clipboard
         gathering = ICEGatheringDeadline(ice: ice)
         super.init()
+        clipboard.send = { [weak self] data in
+            guard let self, !self.closed, let channel = self.clipboardChannel,
+                  channel.readyState == .open, channel.bufferedAmount < 32_768 else { return false }
+            return channel.sendData(RTCDataBuffer(data: data, isBinary: true))
+        }
         let config = RTCConfiguration(); config.sdpSemantics = .unifiedPlan
         config.bundlePolicy = .maxBundle; config.rtcpMuxPolicy = .require
         config.iceServers = ice.iceServers.compactMap {
@@ -25,12 +33,15 @@ final class ViewerTransport: NSObject, RTCPeerConnectionDelegate, RTCDataChannel
         config.iceTransportPolicy = ice.iceTransportPolicy == "relay" ? .relay : .all
         PerformanceLog.record("ice-policy", ["relayOnly": config.iceTransportPolicy == .relay])
         peer = factory.peerConnection(with: config, constraints: RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil), delegate: self)
+        PerformanceLog.startNetworkTrace(peer, role: "viewer")
         let receive = RTCRtpTransceiverInit(); receive.direction = .recvOnly
         if let video = peer.addTransceiver(of: .video, init: receive) {
             video.setCodecPreferences(ScreenVideoPolicy.codecs(factory.rtpReceiverCapabilities(forKind: "video").codecs))
         }
         let data = RTCDataChannelConfiguration(); data.isOrdered = true
         channel = peer.dataChannel(forLabel: "interaction", configuration: data); channel.delegate = self
+        clipboardChannel = peer.dataChannel(forLabel: ClipboardSync.label, configuration: data)
+        clipboardChannel?.delegate = self
     }
     private func startMeasurements() {
         guard PerformanceLog.enabled, statisticsTimer == nil else { return }
@@ -70,6 +81,7 @@ final class ViewerTransport: NSObject, RTCPeerConnectionDelegate, RTCDataChannel
     }
     func close() {
         closed = true; statisticsTimer?.invalidate(); statisticsTimer = nil; gathering.cancel(); completion = nil
+        clipboard.close(); clipboardChannel?.delegate = nil; clipboardChannel?.close()
         channel.delegate = nil; channel.close(); peer.delegate = nil; peer.close()
     }
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange stateChanged: RTCSignalingState) {}
@@ -91,10 +103,30 @@ final class ViewerTransport: NSObject, RTCPeerConnectionDelegate, RTCDataChannel
         DispatchQueue.main.async { [weak self] in guard let self, !self.closed else { return }; self.onVideo?(track) }
     }
     func dataChannelDidChangeState(_ dataChannel: RTCDataChannel) {
+        if dataChannel.label == ClipboardSync.label {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, !self.closed, dataChannel === self.clipboardChannel else { return }
+                self.clipboard.setOpen(dataChannel.readyState == .open)
+            }; return
+        }
         if dataChannel.readyState == .closed { DispatchQueue.main.async { [weak self] in guard let self, !self.closed else { return }; self.onState?(.closed) } }
     }
     func dataChannel(_ dataChannel: RTCDataChannel, didReceiveMessageWith buffer: RTCDataBuffer) {
+        if dataChannel.label == ClipboardSync.label {
+            guard buffer.isBinary, buffer.data.count <= ClipboardSync.messageLimit else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, !self.closed, dataChannel === self.clipboardChannel else { return }
+                self.clipboard.receive(buffer.data)
+            }; return
+        }
         guard !buffer.isBinary, buffer.data.count <= 65_536 else { return }
         RunLoop.main.perform(inModes: [.common]) { [weak self] in guard let self, !self.closed else { return }; self.onMessage?(buffer.data) }
+    }
+    func dataChannel(_ dataChannel: RTCDataChannel, didChangeBufferedAmount amount: UInt64) {
+        guard dataChannel.label == ClipboardSync.label else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.closed, dataChannel === self.clipboardChannel else { return }
+            self.clipboard.pump()
+        }
     }
 }

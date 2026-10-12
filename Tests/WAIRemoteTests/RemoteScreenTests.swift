@@ -3,10 +3,25 @@ import WebRTC
 import XCTest
 import RemoteCore
 import Combine
+import MetalKit
 @testable import WAIRemote
 
 @MainActor
 final class RemoteScreenTests: XCTestCase {
+    func testMetalDisplayDoesNotHalveTheSixtyFPSScreenStream() throws {
+        guard MTLCreateSystemDefaultDevice() != nil else { throw XCTSkip("Metal hardware required") }
+        let model = MacViewerModel(identity: DeviceIdentity())
+        let factory = RTCPeerConnectionFactory()
+        model.track = factory.videoTrack(with: factory.videoSource(), trackId: "screen")
+        let screen = RemoteScreenView(model: model)
+        screen.update()
+        let video = try XCTUnwrap(screen.subviews.first { $0 is RTCMTLNSVideoView })
+        let metal = try XCTUnwrap(video.subviews.compactMap { $0 as? MTKView }.first)
+
+        XCTAssertEqual(metal.preferredFramesPerSecond, 60,
+                       "Received FPS does not prove displayed FPS: WebRTC defaults the Metal view to 30 Hz.")
+    }
+
     func testViewerOpensAtReadableSizeInsteadOfItsMinimum() throws {
         _ = NSApplication.shared
         let delegate = AppDelegate()

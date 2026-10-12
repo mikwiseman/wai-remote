@@ -114,6 +114,12 @@ public final class SessionMachine {
         locallyPaused = false; state.mode = transportAvailable ? .control : .paused
         return invalidate(reason: "host-resumed")
     }
+    @discardableResult public func resizeSurface(width: Int, height: Int) -> SessionEffects {
+        guard width > 0, height > 0, width != state.surface.width || height != state.surface.height else { return .init() }
+        state.surface.width = width; state.surface.height = height; state.surface.revision += 1
+        ink.clearAll(); state.layerEpoch = ink.epoch
+        return invalidate(reason: "surface-resized")
+    }
     @discardableResult public func setPermissions(_ permissions: Permissions) -> SessionEffects {
         approvedPermissions = permissions
         return refreshEffectivePermissions()

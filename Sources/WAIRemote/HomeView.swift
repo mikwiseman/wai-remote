@@ -10,6 +10,7 @@ struct HomeView: View {
     @State private var copied = false
     @State private var editing: SavedComputer?
     @State private var computerName = ""
+    @State private var choosingWindow = false
     @Environment(\.colorScheme) private var colorScheme
     private var accent: Color { colorScheme == .dark ? Color(red: 0.66, green: 0.84, blue: 0.72) : Color(red: 0.19, green: 0.34, blue: 0.28) }
     private func connectInvitation() { viewer.invitation = viewer.invitationDraft; connect() }
@@ -49,6 +50,21 @@ struct HomeView: View {
                 TextField("Например, Mac mini дома", text: $computerName).textFieldStyle(.roundedBorder)
                 HStack { Button("Отмена") { editing = nil }; Spacer(); Button("Сохранить") { viewer.rename(computer.id, name: computerName); editing = nil }.keyboardShortcut(.defaultAction) }
             }.padding(28).frame(width: 360)
+        }
+        .sheet(isPresented: $choosingWindow) {
+            VStack(alignment: .leading, spacing: 18) {
+                Text("Работать в отдельном окне").font(.title2.weight(.semibold))
+                Text("Выберите окно для удалённой работы. На этом Mac можно пользоваться другими приложениями. Буфер обмена остаётся общим.")
+                    .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                List(host.windowChoices) { choice in
+                    Button { choosingWindow = false; host.start(lab: false, window: choice.window) } label: {
+                        HStack { Image(systemName: "macwindow"); Text(choice.name).lineLimit(2); Spacer(); Image(systemName: "arrow.up.right") }.padding(.vertical, 5)
+                    }.buttonStyle(.plain)
+                }.frame(height: 260)
+                Text("Некоторые приложения и отдельные диалоги требуют активного окна. Общий рабочий стол в этом режиме не передаётся.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                HStack { Button("Обновить список") { Task { await host.loadWindows() } }; Spacer(); Button("Отмена") { choosingWindow = false }.keyboardShortcut(.cancelAction) }
+            }.padding(26).frame(width: 480).task { await host.loadWindows() }
         }
     }
     private func title(_ text: String, subtitle: String) -> some View {
@@ -115,6 +131,7 @@ struct HomeView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     Label("\(pending.offer.name) хочет подключиться", systemImage: "person.crop.circle.badge.questionmark").font(.headline)
                     Text("Имя указано на другом устройстве. Подтвердите, только если ожидаете это подключение.").font(.callout).foregroundStyle(.secondary)
+                    Text("Управление включает клавиатуру, мышь и обмен текстом, изображениями и файлами через буфер.").font(.caption).foregroundStyle(.secondary)
                     HStack {
                         Button("Отклонить") { host.reject() }
                         Spacer()
@@ -124,12 +141,18 @@ struct HomeView: View {
                 }.padding(20).background(accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
             }
             if host.sharing {
+                if let name = host.sharedWindowName {
+                    Label(name, systemImage: "macwindow").font(.callout)
+                    Text("Передаётся только это окно. Буфер обмена общий.").font(.caption).foregroundStyle(.secondary)
+                }
                 if let name = host.connectedName {
                     Label(name, systemImage: "desktopcomputer").font(.headline)
                     Text(host.status).foregroundStyle(.secondary)
                     HStack {
-                        Button(host.localDrawing ? "Закончить рисование" : "Рисовать вместе") { host.toggleLocalDraw() }
-                        Button("Очистить рисунки") { host.clearInk() }
+                        if host.sharedWindowName == nil {
+                            Button(host.localDrawing ? "Закончить рисование" : "Рисовать вместе") { host.toggleLocalDraw() }
+                            Button("Очистить рисунки") { host.clearInk() }
+                        }
                         Spacer()
                         Button("Отключить устройство") { host.disconnectViewer() }
                     }
@@ -156,6 +179,10 @@ struct HomeView: View {
                 Button { host.start(lab: false) } label: {
                     HStack { if host.starting { ProgressView().controlSize(.small) }; Text(host.starting ? "Открываем доступ…" : "Открыть доступ к экрану") }
                 }.buttonStyle(.borderedProminent).controlSize(.large).disabled(host.starting || !host.screenAllowed)
+                if WindowInputTarget.isSupported {
+                    Button("Работать в отдельном окне…") { choosingWindow = true }
+                        .disabled(host.starting || !host.screenAllowed)
+                }
                 if host.status != "Доступ закрыт" { Text(host.status).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
                 Text("Пока доступ закрыт, никто не может увидеть ваш экран.").font(.system(size: 11)).foregroundStyle(.secondary)
             }

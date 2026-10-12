@@ -5,6 +5,16 @@ import WebRTC
 enum PerformanceLog {
     static let enabled = UserDefaults.standard.bool(forKey: "performanceDiagnostics")
     static var tcpOnly: Bool { enabled && UserDefaults.standard.bool(forKey: "performanceTCPOnly") }
+    static func startNetworkTrace(_ connection: RTCPeerConnection, role: String) {
+        guard enabled, UserDefaults.standard.bool(forKey: "performanceNetworkTrace") else { return }
+        // This extra opt-in contains network metadata. Keep it private and separate
+        // from the content-free JSONL diagnostics; never upload it with a report.
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wai-remote-network-\(ProcessInfo.processInfo.processIdentifier)-\(role).rtc")
+        FileManager.default.createFile(atPath: path.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        let started = connection.startRtcEventLog(withFilePath: path.path, maxSizeInBytes: 20_000_000)
+        record("network-trace", ["started": started, "role": role])
+    }
     private static let queue = DispatchQueue(label: "is.wai.remote.performance", qos: .utility)
     private static let url = FileManager.default.temporaryDirectory.appendingPathComponent("wai-remote-performance-\(ProcessInfo.processInfo.processIdentifier).jsonl")
     private static var written = 0
@@ -12,7 +22,7 @@ enum PerformanceLog {
         "kind", "mimeType", "codecId", "frameWidth", "frameHeight", "framesPerSecond",
         "framesEncoded", "framesDecoded", "framesDropped", "framesReceived", "framesSent",
         "bytesSent", "bytesReceived", "packetsLost", "packetsReceived", "packetsSent",
-        "totalEncodeTime", "totalDecodeTime", "totalPacketSendDelay", "qpSum",
+        "totalEncodeTime", "totalDecodeTime", "totalPacketSendDelay", "qpSum", "targetBitrate",
         "qualityLimitationReason", "qualityLimitationDurations", "encoderImplementation", "decoderImplementation",
         "jitter", "jitterBufferDelay", "jitterBufferTargetDelay", "jitterBufferEmittedCount",
         "freezeCount", "totalFreezesDuration", "nackCount", "pliCount", "keyFramesDecoded",
@@ -42,5 +52,27 @@ enum PerformanceLog {
             ["id": stat.id, "type": stat.type, "values": stat.values.filter { fields.contains($0.key) }]
         }
         record("rtc", ["role": role, "bufferedBytes": buffered, "stats": stats])
+    }
+}
+
+/// Batch frame timestamps once a second, without retaining pixels or touching disk per frame.
+final class FrameTimingLog {
+    private let stage: String
+    private let lock = NSLock()
+    private var started: UInt64 = 0
+    private var samples: [[Int64]] = []
+    init(_ stage: String) { self.stage = stage }
+    func frame(_ timestamp: Int64, detail: Int64 = 0) {
+        guard PerformanceLog.enabled else { return }
+        let now = DispatchTime.now().uptimeNanoseconds
+        lock.lock()
+        if started == 0 { started = now }
+        samples.append([Int64(now / 1_000), timestamp, detail])
+        if now - started >= 1_000_000_000 || samples.count >= 120 {
+            let batch = samples
+            samples.removeAll(keepingCapacity: true); started = now
+            lock.unlock()
+            PerformanceLog.record("frame-timing", ["stage": stage, "samples": batch])
+        } else { lock.unlock() }
     }
 }

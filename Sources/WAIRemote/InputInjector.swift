@@ -9,13 +9,21 @@ final class InputInjector {
     private var clickCounts: [Int: Int] = [:]
     private let source = CGEventSource(stateID: .privateState)
     var bounds = CGDisplayBounds(CGMainDisplayID())
+    private(set) var windowTarget: WindowInputTarget?
+    func setWindowTarget(_ target: WindowInputTarget?) { releaseAll(); windowTarget = target }
     var allowed: Bool { CGPreflightPostEventAccess() }
     private func post(_ event: CGEvent?) {
         event?.setIntegerValueField(.eventSourceUserData, value: 0x574149)
-        event?.post(tap: .cghidEventTap)
+        guard let event else { return }
+        if let windowTarget { windowTarget.post(event) }
+        else { event.post(tap: .cghidEventTap) }
     }
     func apply(_ m: WireMessage) {
         guard allowed else { releaseAll(); return }
+        if let windowTarget {
+            guard let frame = windowTarget.frame else { releaseAll(); return }
+            bounds = frame
+        }
         if m.type == "pointer", let x = m.x, let y = m.y, let action = m.action {
             let p = CGPoint(x: bounds.minX + x * max(1, bounds.width - 1), y: bounds.minY + y * max(1, bounds.height - 1))
             let previousPoint = lastPoint

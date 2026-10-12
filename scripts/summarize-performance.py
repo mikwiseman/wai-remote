@@ -10,6 +10,7 @@ from pathlib import Path
 def summarize(path):
     rows = [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
     samples, previous = defaultdict(list), {}
+    frame_times = defaultdict(list)
     video = defaultdict(float)
     formats, routes, codecs = set(), set(), set()
     for row in rows:
@@ -29,6 +30,9 @@ def summarize(path):
             for field, name in [("fps", "renderer_fps"), ("gapP95Ms", "renderer_gap_p95_ms"),
                                 ("gapMaxMs", "renderer_gap_max_ms"), ("gapsOver100Ms", "renderer_gaps_over_100ms")]:
                 samples[name].append(row[field])
+        elif event == "frame-timing":
+            # These are delivery/draw-submission times, not physical presentation.
+            frame_times[row["stage"]].extend(sample[0] for sample in row["samples"])
         elif event == "rtc":
             samples["buffered_bytes"].append(row["bufferedBytes"])
             stats = {s["id"]: s for s in row["stats"]}
@@ -85,6 +89,15 @@ def summarize(path):
                     change = delta(field)
                     if change is not None:
                         samples[name].append(change / elapsed)
+    frame_cadence = {}
+    for stage, timestamps in frame_times.items():
+        timestamps.sort()
+        if len(timestamps) < 2 or timestamps[-1] <= timestamps[0]:
+            continue
+        duration = (timestamps[-1] - timestamps[0]) / 1e6
+        frame_cadence[stage] = {"frames": len(timestamps), "duration_s": round(duration, 3),
+                                "fps": round((len(timestamps) - 1) / duration, 3)}
+        samples[f"{stage}_gap_ms"].extend((b - a) / 1000 for a, b in zip(timestamps, timestamps[1:]))
     def distribution(values):
         values = sorted(x for x in values if math.isfinite(x))
         if not values:
@@ -95,6 +108,7 @@ def summarize(path):
         video["freeze_fraction"] = video["freeze_duration_s"] / video["measured_s"]
     return {"file": str(path), "duration_s": round(rows[-1]["time"] - rows[0]["time"], 1) if rows else 0,
             "formats": sorted(formats), "codecs": sorted(codecs), "routes": sorted(routes),
+            "frame_cadence": frame_cadence,
             "video_totals": {key: round(value, 4) for key, value in sorted(video.items())},
             "measurements": {key: distribution(value) for key, value in sorted(samples.items())}}
 

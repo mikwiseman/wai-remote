@@ -5,6 +5,8 @@ import RemoteCore
 final class PeerTransport: NSObject, RTCPeerConnectionDelegate, RTCDataChannelDelegate {
     private var pc: RTCPeerConnection!
     private var channel: RTCDataChannel?
+    private var clipboardChannel: RTCDataChannel?
+    let clipboard: ClipboardSync
     private var answerCompletion: ((Result<String, Error>) -> Void)?
     private let gathering: ICEGatheringDeadline
     var onOpen: (() -> Void)?
@@ -14,14 +16,21 @@ final class PeerTransport: NSObject, RTCPeerConnectionDelegate, RTCDataChannelDe
     private var statisticsTimer: Timer?
     private var opened = false
     var isReady: Bool { !closed && channel?.readyState == .open }
-    init(factory: RTCPeerConnectionFactory, source: RTCVideoSource, ice: ICEConfiguration) {
+    init(factory: RTCPeerConnectionFactory, source: RTCVideoSource, ice: ICEConfiguration, clipboard: ClipboardSync = .init()) {
+        self.clipboard = clipboard
         gathering = ICEGatheringDeadline(ice: ice)
         super.init()
+        clipboard.send = { [weak self] data in
+            guard let self, !self.closed, let channel = self.clipboardChannel,
+                  channel.readyState == .open, channel.bufferedAmount < 32_768 else { return false }
+            return channel.sendData(RTCDataBuffer(data: data, isBinary: true))
+        }
         let config = RTCConfiguration(); config.sdpSemantics = .unifiedPlan
         config.iceServers = ice.iceServers.map { RTCIceServer(urlStrings: $0.urls, username: $0.username, credential: $0.credential) }
         config.iceTransportPolicy = ice.iceTransportPolicy == "relay" ? .relay : .all
         config.bundlePolicy = .maxBundle; config.rtcpMuxPolicy = .require
         pc = factory.peerConnection(with: config, constraints: RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil), delegate: self)
+        PerformanceLog.startNetworkTrace(pc, role: "host")
         let track = factory.videoTrack(with: source, trackId: "screen")
         if let sender = pc.add(track, streamIds: ["wai-screen"]) { ScreenVideoPolicy.configure(sender) }
         for transceiver in pc.transceivers where transceiver.mediaType == .video {
@@ -67,7 +76,7 @@ final class PeerTransport: NSObject, RTCPeerConnectionDelegate, RTCDataChannelDe
               let data = try? JSONSerialization.data(withJSONObject: object), data.count <= 60_000 else { return false }
         return channel.sendData(RTCDataBuffer(data: data, isBinary: false))
     }
-    func close() { closed = true; statisticsTimer?.invalidate(); statisticsTimer = nil; gathering.cancel(); answerCompletion = nil; channel?.delegate = nil; channel?.close(); pc.delegate = nil; pc.close() }
+    func close() { closed = true; clipboard.close(); clipboardChannel?.delegate = nil; clipboardChannel?.close(); statisticsTimer?.invalidate(); statisticsTimer = nil; gathering.cancel(); answerCompletion = nil; channel?.delegate = nil; channel?.close(); pc.delegate = nil; pc.close() }
     private func notifyOpen() { guard !closed, !opened else { return }; opened = true; onOpen?() }
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange stateChanged: RTCSignalingState) {}
     func peerConnection(_ peerConnection: RTCPeerConnection, didAdd stream: RTCMediaStream) {}
@@ -84,6 +93,11 @@ final class PeerTransport: NSObject, RTCPeerConnectionDelegate, RTCDataChannelDe
     }
     func peerConnection(_ peerConnection: RTCPeerConnection, didOpen dataChannel: RTCDataChannel) {
         DispatchQueue.main.async { [weak self] in
+            if let self, !self.closed, self.clipboardChannel == nil, dataChannel.label == ClipboardSync.label,
+               dataChannel.isOrdered {
+                self.clipboardChannel = dataChannel; dataChannel.delegate = self
+                self.clipboard.setOpen(dataChannel.readyState == .open); return
+            }
             guard let self, !self.closed, self.channel == nil, dataChannel.label == "interaction", dataChannel.isOrdered else { dataChannel.close(); return }
             self.channel = dataChannel; dataChannel.delegate = self
             if dataChannel.readyState == .open { self.notifyOpen() }
@@ -92,11 +106,19 @@ final class PeerTransport: NSObject, RTCPeerConnectionDelegate, RTCDataChannelDe
     func dataChannelDidChangeState(_ dataChannel: RTCDataChannel) {
         DispatchQueue.main.async { [weak self] in
             guard let self, !self.closed else { return }
+            if dataChannel === self.clipboardChannel { self.clipboard.setOpen(dataChannel.readyState == .open); return }
             if dataChannel.readyState == .open { self.notifyOpen() }
             if dataChannel.readyState == .closed { self.onState?(.closed) }
         }
     }
     func dataChannel(_ dataChannel: RTCDataChannel, didReceiveMessageWith buffer: RTCDataBuffer) {
+        if dataChannel.label == ClipboardSync.label {
+            guard buffer.isBinary, buffer.data.count <= ClipboardSync.messageLimit else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, !self.closed, dataChannel === self.clipboardChannel else { return }
+                self.clipboard.receive(buffer.data)
+            }; return
+        }
         guard !buffer.isBinary, buffer.data.count <= 32_768 else { return }
         let received = ProcessInfo.processInfo.systemUptime
         // A nested AppKit tracking loop can block another main-queue task.
@@ -105,6 +127,13 @@ final class PeerTransport: NSObject, RTCPeerConnectionDelegate, RTCDataChannelDe
             guard let self, !self.closed else { return }
             PerformanceLog.record("input-dispatch", ["queueMs": (ProcessInfo.processInfo.systemUptime - received) * 1000])
             self.onMessage?(buffer.data)
+        }
+    }
+    func dataChannel(_ dataChannel: RTCDataChannel, didChangeBufferedAmount amount: UInt64) {
+        guard dataChannel.label == ClipboardSync.label else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.closed, dataChannel === self.clipboardChannel else { return }
+            self.clipboard.pump()
         }
     }
 }

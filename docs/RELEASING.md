@@ -33,7 +33,7 @@ The public relay uses coturn 4.18.0, UDP and TCP 3478, and a bounded UDP relay r
 
 After changing nginx, validate its configuration and reload it. If an edge proxy mirrors the origin configuration, wait for or trigger that sync before checking the public URL. Confirm `/remote/connect/healthz`, real device authentication, the remote session, download responses and update feed through the public hostname.
 
-The host must remain awake, unlocked and explicitly sharing. This release does not provide login-screen access, audio, file transfer or a service availability guarantee.
+The host must remain awake, unlocked and explicitly sharing. The stable release does not provide login-screen access, audio, file transfer or a service availability guarantee. Candidate 28 adds native clipboard files up to 100 MiB; it has not been promoted to stable.
 
 ## Native input regression
 

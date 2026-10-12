@@ -18,6 +18,7 @@ final class MacViewerModel: ObservableObject {
     @Published var connecting = false
     @Published var connected = false
     @Published var receivedFrame = false
+    @Published var clipboardStatus = ""
     @Published var track: RTCVideoTrack? {
         didSet { if track !== oldValue { receivedFrame = false } }
     }
@@ -122,7 +123,7 @@ final class MacViewerModel: ObservableObject {
         peer.onState = { [weak self] state in
             guard let self, self.attempt == token else { return }
             if state == .failed || state == .closed { self.disconnect(message: "Соединение закрыто. Доступ на Mac можно открыть снова.") }
-            if state == .disconnected { self.cancelGesture(notify: false); self.session.interrupt(); self.status = "Связь прервалась · ввод остановлен" }
+            if state == .disconnected { self.transport?.clipboard.setEnabled(false); self.cancelGesture(notify: false); self.session.interrupt(); self.status = "Связь прервалась · ввод остановлен" }
         }
         peer.offer { [weak self] result in
             guard let self, self.attempt == token else { return }
@@ -211,6 +212,8 @@ final class MacViewerModel: ObservableObject {
                     heartbeat = Timer.connectionTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in _ = self?.send("heartbeat") }
                 }
                 status = mode == .paused ? "Владелец Mac приостановил управление" : m["lab"] as? Bool == true ? "Проверочный экран" : "Ваш Mac · защищённое соединение"
+                transport?.clipboard.onStatus = { [weak self] status in self?.clipboardStatus = status }
+                transport?.clipboard.setEnabled(state.permissions.control && state.mode != .paused && m["lab"] as? Bool != true)
             case "ink":
                 let op = try decode(m["op"] ?? [:], as: WireMessage.self)
                 guard let id = op.strokeID else { return }
@@ -257,6 +260,16 @@ final class MacViewerModel: ObservableObject {
     func text(_ text: String) {
         guard canControl, !text.isEmpty, text.utf16.count <= 4096, !text.contains("\0") else { return }
         send("text") { $0.text = text }
+    }
+    func paste() {
+        guard canControl else { return }
+        if let clipboard = transport?.clipboard, clipboard.available {
+            let epoch = session.state?.inputEpoch
+            clipboard.pushCurrent { [weak self] in
+                guard let self, self.canControl, self.session.state?.inputEpoch == epoch else { return }
+                self.key("KeyV", modifiers: ["Meta"])
+            }
+        } else if let text = NSPasteboard.general.string(forType: .string) { self.text(text) }
     }
     func beginStroke(at point: InkPoint) {
         guard canDraw, let identity, let inkTool = InkTool(rawValue: tool.rawValue) else { return }

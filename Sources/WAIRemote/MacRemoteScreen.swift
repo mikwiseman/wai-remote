@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import WebRTC
 import RemoteCore
+import MetalKit
 
 struct MacRemoteScreen: NSViewRepresentable {
     @ObservedObject var model: MacViewerModel
@@ -10,7 +11,7 @@ struct MacRemoteScreen: NSViewRepresentable {
     static func dismantleNSView(_ view: RemoteScreenView, coordinator: ()) { view.detach() }
 }
 
-private final class FrameRenderer: NSObject, RTCVideoRenderer {
+private final class FrameRenderer: NSObject, RTCVideoRenderer, MTKViewDelegate {
     let video: RTCMTLNSVideoView
     var onFrame: (() -> Void)?
     private let lock = NSLock()
@@ -18,12 +19,38 @@ private final class FrameRenderer: NSObject, RTCVideoRenderer {
     private var previousFrameTime = 0.0
     private var reportTime = 0.0
     private var frameGaps: [Double] = []
+    private let timing = FrameTimingLog("render")
+    private let drawing = FrameTimingLog("draw")
+    private var displayDelegate: MTKViewDelegate?
+    private var latestTimestamp: Int64 = 0
+    private var drawnTimestamp: Int64 = 0
     init(video: RTCMTLNSVideoView) { self.video = video }
+    func measureDisplay(_ metal: MTKView) {
+        guard PerformanceLog.enabled else { return }
+        displayDelegate = metal.delegate
+        metal.delegate = self
+    }
+    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
+        displayDelegate?.mtkView(view, drawableSizeWillChange: size)
+    }
+    func draw(in view: MTKView) {
+        displayDelegate?.draw(in: view)
+        lock.lock()
+        let timestamp = latestTimestamp
+        lock.unlock()
+        if timestamp != drawnTimestamp {
+            drawnTimestamp = timestamp
+            // Draw submissions, not a physical click-to-photon measurement.
+            drawing.frame(timestamp)
+        }
+    }
     func setSize(_ size: CGSize) { video.setSize(size) }
     func renderFrame(_ frame: RTCVideoFrame?) {
         video.renderFrame(frame)
-        guard frame != nil else { return }
+        guard let frame else { return }
+        timing.frame(frame.timeStampNs)
         lock.lock()
+        latestTimestamp = frame.timeStampNs
         let first = !delivered; delivered = true
         if PerformanceLog.enabled {
             let now = ProcessInfo.processInfo.systemUptime
@@ -87,9 +114,17 @@ final class RemoteScreenView: NSView, NSTextInputClient {
             if let track = model.track {
                 // Metal keeps its last texture, so each track needs a fresh surface.
                 let video = RTCMTLNSVideoView(frame: .zero)
+                // The macOS WebRTC renderer defaults to 30 Hz, independently
+                // of the incoming track's 60 fps capture and decode cadence.
+                for metal in video.subviews.compactMap({ $0 as? MTKView }) {
+                    metal.preferredFramesPerSecond = 60
+                }
                 self.video = video; self.track = track
                 addSubview(video, positioned: .below, relativeTo: ink)
                 let renderer = FrameRenderer(video: video)
+                for metal in video.subviews.compactMap({ $0 as? MTKView }) {
+                    renderer.measureDisplay(metal)
+                }
                 renderer.onFrame = { [weak self, weak model, weak track] in
                     guard let self, let model, let track,
                           self.track === track, model.track === track else { return }
@@ -158,10 +193,10 @@ final class RemoteScreenView: NSView, NSTextInputClient {
         keyDown(with: event); return true
     }
     @objc func paste(_ sender: Any?) {
-        let text = NSPasteboard.general.string(forType: .string)
-        guard model.canControl, let text else { return }
-        model.text(text)
+        model.paste()
     }
+    @objc func copy(_ sender: Any?) { model.key("KeyC", modifiers: ["Meta"]) }
+    @objc func cut(_ sender: Any?) { model.key("KeyX", modifiers: ["Meta"]) }
     override func keyDown(with event: NSEvent) {
         guard model.canControl else { return }
         if event.modifierFlags.intersection([.command, .control]).isEmpty,
@@ -249,6 +284,15 @@ struct ViewerWindowView: View {
             }
             HStack {
                 Label(model.session.state?.permissions.control == true ? "Клавиатура и мышь" : "Просмотр экрана", systemImage: "lock.shield")
+                if model.session.state?.surface.id.hasPrefix("window:") == true {
+                    Text("· Отдельное окно").help("Ввод направлен в выбранное окно. Курсор другого Mac остаётся на месте. Буфер обмена общий.")
+                }
+                if !model.clipboardStatus.isEmpty {
+                    Text("·")
+                    Label(model.clipboardStatus, systemImage: "doc.on.clipboard")
+                        .lineLimit(1)
+                        .help("Текст, изображения и файлы копируются между этими Mac во время подключения.")
+                }
                 Spacer()
                 Text("⌘⌥Esc — освободить клавиатуру")
             }.font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 20).padding(.vertical, 9)
