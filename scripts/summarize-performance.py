@@ -22,6 +22,9 @@ def summarize(path):
             samples["host_input_handler_ms"].append(row["handlingMs"])
         elif event == "input-dispatch":
             samples["host_input_queue_ms"].append(row["queueMs"])
+        elif event == "input-delivery":
+            samples["host_delivery_queue_ms"].append(row["queueMs"])
+            samples["host_native_input_ms"].append(row["handlingMs"])
         elif event == "capture":
             for field, name in [("fps", "capture_fps"), ("sampleOffsetMs", "capture_sample_offset_ms"), ("gapMaxMs", "capture_gap_max_ms")]:
                 if field in row:

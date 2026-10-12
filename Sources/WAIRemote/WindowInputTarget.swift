@@ -6,6 +6,23 @@ import Darwin
 struct WindowInputTarget: Equatable {
     let pid: pid_t
     let windowID: CGWindowID
+    struct Button {
+        let frame: CGRect
+        let requiresMainThread: Bool
+        let action: () -> Bool
+        func press(if current: @escaping () -> Bool) -> Bool {
+            let perform = { current() && action() }
+            // AX short-circuits same-process calls onto the caller's thread.
+            // SwiftUI actions must execute on MainActor, also through AX.
+            if requiresMainThread && !Thread.isMainThread { return DispatchQueue.main.sync(execute: perform) }
+            return perform()
+        }
+    }
+    private typealias WindowNumber = @convention(c) (AXUIElement, UnsafeMutablePointer<CGWindowID>) -> AXError
+    private static let windowNumber: WindowNumber? = {
+        guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "_AXUIElementGetWindow") else { return nil }
+        return unsafeBitCast(symbol, to: WindowNumber.self)
+    }()
     private typealias SetLocation = @convention(c) (CGEvent, CGPoint) -> Void
     private static let setWindowLocation: SetLocation? = {
         _ = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_LAZY)
@@ -38,5 +55,49 @@ struct WindowInputTarget: Equatable {
     func post(_ event: CGEvent) {
         guard let frame, address(event, frame: frame) else { return }
         event.postToPid(pid)
+    }
+    /// Native buttons can track the real desktop pointer and cancel a synthetic
+    /// background click. Their standard Press action does not need that pointer.
+    /// Foreign-app AX runs on the input queue. Same-process AX calls bypass IPC,
+    /// so inspect our own AppKit/SwiftUI views on their main thread.
+    func button(at point: CGPoint) -> Button? {
+        if pid == ProcessInfo.processInfo.processIdentifier && !Thread.isMainThread {
+            return DispatchQueue.main.sync { button(at: point) }
+        }
+        guard let frame, frame.contains(point) else { return nil }
+        guard let windowNumber = Self.windowNumber else { return nil }
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.05)
+        var windows: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &windows) == .success,
+              let list = windows as? [AXUIElement],
+              let window = list.first(where: { var id: CGWindowID = 0; return windowNumber($0, &id) == .success && id == windowID }) else { return nil }
+        // App-level hit testing can be unimplemented and may follow occlusion.
+        // Inspect only the selected window, with bounded work on a background queue.
+        let deadline = ProcessInfo.processInfo.systemUptime + 0.05
+        let names = [kAXRoleAttribute, kAXPositionAttribute, kAXSizeAttribute, kAXChildrenAttribute, kAXEnabledAttribute] as CFArray
+        var pending = [window], visited = 0
+        while let element = pending.popLast(), visited < 128, ProcessInfo.processInfo.systemUptime < deadline {
+            visited += 1
+            AXUIElementSetMessagingTimeout(element, 0.05)
+            var raw: CFArray?
+            guard AXUIElementCopyMultipleAttributeValues(element, names, [], &raw) == .success,
+                  let values = raw as? [AnyObject], values.count == 5 else { continue }
+            var origin = CGPoint.zero, size = CGSize.zero
+            let positioned = CFGetTypeID(values[1]) == AXValueGetTypeID() && CFGetTypeID(values[2]) == AXValueGetTypeID() &&
+                AXValueGetValue(values[1] as! AXValue, .cgPoint, &origin) && AXValueGetValue(values[2] as! AXValue, .cgSize, &size)
+            let bounds = CGRect(origin: origin, size: size)
+            if positioned, size.width > 0, size.height > 0, !bounds.contains(point) { continue }
+            if values[0] as? String == kAXButtonRole, positioned, bounds.contains(point), values[4] as? Bool == true {
+                var actions: CFArray?
+                guard AXUIElementCopyActionNames(element, &actions) == .success,
+                      (actions as? [String])?.contains(kAXPressAction) == true else { continue }
+                return Button(frame: bounds, requiresMainThread: pid == ProcessInfo.processInfo.processIdentifier, action: {
+                    AXUIElementPerformAction(element, kAXPressAction as CFString) == .success
+                })
+            }
+            if let children = values[3] as? [AXUIElement] { pending.append(contentsOf: children.reversed()) }
+        }
+        return nil
     }
 }

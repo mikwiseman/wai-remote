@@ -257,11 +257,13 @@ struct ViewerWindowView: View {
                 }
                 Spacer()
                 if model.connected {
-                    Button { model.changeMode(model.mode == .draw ? .control : .draw) } label: {
-                        Label(model.mode == .draw ? "Управлять" : "Рисовать", systemImage: model.mode == .draw ? "cursorarrow" : "pencil.tip")
-                    }.disabled(model.mode == .paused || (model.mode == .draw && model.session.state?.permissions.control != true))
-                    if model.mode == .draw {
-                        Button("Отменить рисунок") { model.editInk("undo") }
+                    if model.session.state?.permissions.annotate == true {
+                        Button { model.changeMode(model.mode == .draw ? .control : .draw) } label: {
+                            Label(model.mode == .draw ? "Управлять" : "Рисовать", systemImage: model.mode == .draw ? "cursorarrow" : "pencil.tip")
+                        }.disabled(model.mode == .paused || (model.mode == .draw && model.session.state?.permissions.control != true))
+                        if model.mode == .draw {
+                            Button("Отменить рисунок") { model.editInk("undo") }
+                        }
                     }
                     Button { fullScreen() } label: { Image(systemName: "arrow.up.left.and.arrow.down.right") }.help("На весь экран")
                 }

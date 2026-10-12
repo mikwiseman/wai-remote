@@ -6,6 +6,26 @@ import WebRTC
 final class ClipboardTests: XCTestCase {
     private func board() -> NSPasteboard { NSPasteboard.withUniqueName() }
 
+    @MainActor
+    func testUniversalClipboardContentIsNotSentBackAsANewCopy() async throws {
+        let board = board(); defer { board.releaseGlobally() }
+        let sync = ClipboardSync(pasteboard: board)
+        var packets: [ClipboardSync.Packet] = []
+        sync.send = { if let p = try? JSONDecoder().decode(ClipboardSync.Packet.self, from: $0) { packets.append(p) }; return true }
+        sync.setEnabled(true); sync.setOpen(true)
+        defer { sync.close() }
+        sync.receive(try JSONEncoder().encode(ClipboardSync.Packet(type: "hello")))
+        let remote = NSPasteboard.PasteboardType("com.apple.is-remote-clipboard")
+        board.clearContents()
+        board.setString("already copied from the other Mac", forType: .string)
+        board.setData(Data(), forType: remote)
+        sync.poll()
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertFalse(packets.contains { $0.type == "begin" })
+        let explicitPaste = try XCTUnwrap(ClipboardContent.read(from: board))
+        XCTAssertEqual(explicitPaste.items.first?.representations.map(\.type), [NSPasteboard.PasteboardType.string.rawValue])
+    }
+
     func testClipboardPreservesTextFormattingAndImageBytesTogether() throws {
         let source = board(), destination = board()
         defer { source.releaseGlobally(); destination.releaseGlobally() }
@@ -237,7 +257,7 @@ final class ClipboardTests: XCTestCase {
     }
 
     @MainActor
-    func testAnotherSessionDoesNotRelayAReceivedClipboardAutomatically() throws {
+    func testAnotherSessionDoesNotRelayAReceivedClipboardAutomatically() async throws {
         let board = board(); defer { board.releaseGlobally() }
         let sync = ClipboardSync(pasteboard: board)
         var packets: [ClipboardSync.Packet] = []
@@ -248,6 +268,7 @@ final class ClipboardTests: XCTestCase {
         let content = ClipboardContent(items: [.init(representations: [.init(type: "public.utf8-plain-text", data: Data("from third Mac".utf8))], files: nil)])
         let objects = try content.objects(directory: FileManager.default.temporaryDirectory, markReceived: true)
         board.clearContents(); board.writeObjects(objects); sync.poll()
+        try await Task.sleep(for: .milliseconds(100))
         XCTAssertFalse(packets.contains { $0.type == "begin" })
         let snapshot = try XCTUnwrap(ClipboardContent.read(from: board))
         XCTAssertEqual(snapshot.items.first?.representations.count, 1, "Local origin markers must never leave this Mac.")

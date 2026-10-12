@@ -10,6 +10,10 @@ struct ClipboardContent: Codable {
     static let entryLimit = 2048
     static let concealed = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
     static let received = NSPasteboard.PasteboardType("is.wai.remote.clipboard-origin")
+    static let handoff = NSPasteboard.PasteboardType("com.apple.is-remote-clipboard")
+    static func isReceived(_ board: NSPasteboard) -> Bool {
+        (board.types ?? []).contains { $0 == received || $0 == handoff }
+    }
     struct Snapshot {
         struct Item { var representations: [Representation]; var file: URL? }
         var items: [Item]
@@ -34,13 +38,18 @@ struct ClipboardContent: Codable {
         guard !(board.types ?? []).contains(concealed),
               let source = board.pasteboardItems, !source.isEmpty else { return nil }
         guard source.count <= 256 else { throw Failure.tooLarge }
+        // Let AppKit carry the copied file's access grant with its native URL.
+        // Rebuilding a URL from the text representation loses that context.
+        let fileURLs = source.contains(where: { $0.types.contains(.fileURL) })
+            ? (board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []) : []
         var items: [Snapshot.Item] = [], bytes = 0
         for item in source {
-            if let value = item.string(forType: .fileURL), let url = URL(string: value), url.isFileURL {
+            if let value = item.string(forType: .fileURL), let reference = URL(string: value), reference.isFileURL {
+                guard let url = fileURLs.first(where: { $0 == reference }) else { throw Failure.invalid }
                 items.append(.init(representations: [], file: url)); continue
             }
             let types = item.types.filter { !$0.rawValue.hasPrefix("org.nspasteboard.") &&
-                !$0.rawValue.hasPrefix("com.apple.pasteboard.") && $0.rawValue != "NSFilenamesPboardType" && $0 != received }
+                !$0.rawValue.hasPrefix("com.apple.pasteboard.") && $0.rawValue != "NSFilenamesPboardType" && $0 != received && $0 != handoff }
             guard types.count <= 64 else { throw Failure.tooLarge }
             var representations: [Representation] = []
             for type in types {
@@ -73,6 +82,8 @@ struct ClipboardContent: Codable {
         }
         for item in snapshot.items {
             if let url = item.file {
+                let scoped = url.startAccessingSecurityScopedResource()
+                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
                 let top = try file(url, path: [url.lastPathComponent])
                 var files = [top]
                 if top.data == nil {

@@ -96,8 +96,8 @@ final class ClipboardSync {
     func poll() {
         guard available, enabled, open, board.changeCount != observedChange else { return }
         guard !preparingPaste, outgoing?.completion == nil else { return }
-        // Another session in this app may have written this clipboard. Do not relay it again.
-        if board.types?.contains(ClipboardContent.received) == true { observedChange = board.changeCount; return }
+        // Another WAI session or Universal Clipboard may have delivered this copy.
+        if ClipboardContent.isReceived(board) { observedChange = board.changeCount; return }
         pushCurrent()
     }
     func pushCurrent(completion: (() -> Void)? = nil) {
@@ -146,6 +146,7 @@ final class ClipboardSync {
         if !transfer.started {
             guard transmit(Packet(type: "begin", id: transfer.id, revision: revision, size: transfer.data.count)) else { return }
             transfer.started = true
+            PerformanceLog.record("clipboard", ["operation": "send", "id": transfer.id, "bytes": transfer.data.count])
         }
         // Small messages and bounded SCTP buffering let input pass during file copies.
         for _ in 0..<2 where transfer.offset < transfer.data.count {
@@ -173,7 +174,7 @@ final class ClipboardSync {
                   next > revision || next == revision && id > latestID else { return }
             // A local copy always gets a new logical revision, even if its poll is pending.
             if board.changeCount != observedChange {
-                if board.types?.contains(ClipboardContent.received) == true { observedChange = board.changeCount }
+                if ClipboardContent.isReceived(board) { observedChange = board.changeCount }
                 else { revision = max(revision, next); pushCurrent(); return }
             }
             revision = next; latestID = id; generation = UUID(); outgoing = nil
@@ -189,6 +190,7 @@ final class ClipboardSync {
             if transfer.data.count == transfer.size { incoming = nil; finish(transfer) }
         case "ack":
             guard let transfer = outgoing, transfer.id == id, transfer.offset == transfer.data.count else { return }
+            PerformanceLog.record("clipboard", ["operation": "ack", "id": id, "bytes": transfer.data.count])
             outgoing = nil; deliveredChange = transfer.change
             updateStatus("Буфер обмена"); transfer.completion?()
         default: break
@@ -205,8 +207,11 @@ final class ClipboardSync {
                 switch result {
                 case .success(let objects):
                     guard !objects.isEmpty else { return }
-                    self.board.clearContents()
+                    // This copy has already crossed devices. Do not send it again
+                    // through Universal Clipboard; the next ordinary Copy resets this.
+                    self.board.prepareForNewContents(with: .currentHostOnly)
                     if self.board.writeObjects(objects) {
+                        PerformanceLog.record("clipboard", ["operation": "receive", "id": transfer.id, "bytes": transfer.data.count])
                         self.observedChange = self.board.changeCount; self.deliveredChange = self.observedChange
                         self.pendingAck = transfer.id; self.updateStatus("Буфер обмена"); self.tick()
                         self.worker.async { Self.trimCache(self.directory, keeping: root) }

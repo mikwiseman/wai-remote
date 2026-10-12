@@ -5,6 +5,43 @@ import XCTest
 
 @MainActor
 final class InputDispatchTests: XCTestCase {
+    func testAccessibilityActionForOurWindowRunsOnMainAndRechecksCancellation() async {
+        let finished = expectation(description: "Press returned")
+        let button = WindowInputTarget.Button(frame: .zero, requiresMainThread: true, action: {
+            XCTAssertTrue(Thread.isMainThread, "SwiftUI accessibility actions require MainActor")
+            return true
+        })
+        DispatchQueue.global().async {
+            XCTAssertTrue(button.press(if: { true }))
+            let cancelled = WindowInputTarget.Button(frame: .zero, requiresMainThread: true, action: {
+                XCTFail("A cancelled session must not perform its pending button action"); return true
+            })
+            XCTAssertFalse(cancelled.press(if: { false }))
+            finished.fulfill()
+        }
+        await fulfillment(of: [finished], timeout: 2)
+    }
+
+    func testReleaseCancelsWaitingAndInFlightInputBeforeTheNextSession() async {
+        let delivery = InputDeliveryQueue()
+        let entered = expectation(description: "Lookup started")
+        let finished = expectation(description: "New input delivered")
+        let resume = DispatchSemaphore(value: 0)
+        var delivered: [String] = []
+        delivery.submit { current in
+            entered.fulfill()
+            _ = resume.wait(timeout: .now() + 2)
+            if current() { delivered.append("stale lookup") }
+        }
+        await fulfillment(of: [entered], timeout: 1)
+        delivery.submit { _ in delivered.append("stale queued input") }
+        delivery.cancel { delivered.append("release") }
+        delivery.submit { _ in delivered.append("new input"); finished.fulfill() }
+        resume.signal()
+        await fulfillment(of: [finished], timeout: 2)
+        XCTAssertEqual(delivered, ["release", "new input"])
+    }
+
     func testMouseUpCanArriveWhileAppKitTracksTheMouseDown() throws {
         _ = NSApplication.shared
         let factory = RTCPeerConnectionFactory()

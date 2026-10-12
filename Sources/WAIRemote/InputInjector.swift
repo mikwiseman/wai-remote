@@ -2,17 +2,44 @@ import AppKit
 import RemoteCore
 
 final class InputInjector {
+    var bounds = CGDisplayBounds(CGMainDisplayID())
+    private(set) var windowTarget: WindowInputTarget?
+    var allowed: Bool { CGPreflightPostEventAccess() }
+    private let delivery = InputDeliveryQueue()
+    private let events = InjectedEvents()
+    func setWindowTarget(_ target: WindowInputTarget?) { releaseAll(); windowTarget = target }
+    func releaseAll() { delivery.cancel { [events] in events.releaseAll() } }
+    func apply(_ message: WireMessage) {
+        let target = windowTarget, bounds = bounds
+        let received = ProcessInfo.processInfo.systemUptime
+        delivery.submit { [events] current in
+            events.windowTarget = target; events.bounds = bounds; events.isCurrent = current
+            let started = ProcessInfo.processInfo.systemUptime
+            events.apply(message)
+            if message.type == "text" || message.type == "pointer" && message.action != "move" {
+                PerformanceLog.record("input-delivery", ["kind": message.type, "action": message.action ?? "",
+                    "textUnits": message.text?.utf16.count ?? 0, "queueMs": (started - received) * 1000,
+                    "handlingMs": (ProcessInfo.processInfo.systemUptime - started) * 1000])
+            }
+        }
+    }
+    static let keyCodes = InjectedEvents.keyCodes
+}
+
+private final class InjectedEvents {
     private var buttons = Set<Int>()
     private var keys = Set<CGKeyCode>()
     private var lastPoint = CGPoint.zero
     private var clickSequence = ClickSequence()
     private var clickCounts: [Int: Int] = [:]
+    private var windowButton: WindowInputTarget.Button?
     private let source = CGEventSource(stateID: .privateState)
     var bounds = CGDisplayBounds(CGMainDisplayID())
-    private(set) var windowTarget: WindowInputTarget?
-    func setWindowTarget(_ target: WindowInputTarget?) { releaseAll(); windowTarget = target }
+    var windowTarget: WindowInputTarget?
+    var isCurrent: () -> Bool = { true }
     var allowed: Bool { CGPreflightPostEventAccess() }
-    private func post(_ event: CGEvent?) {
+    private func post(_ event: CGEvent?, releasing: Bool = false) {
+        guard releasing || isCurrent() else { return }
         event?.setIntegerValueField(.eventSourceUserData, value: 0x574149)
         guard let event else { return }
         if let windowTarget { windowTarget.post(event) }
@@ -29,6 +56,19 @@ final class InputInjector {
             let previousPoint = lastPoint
             lastPoint = p
             let b = m.button ?? buttons.sorted().first ?? 0
+            if action == "up", b == 0, let pressed = windowButton {
+                windowButton = nil
+                if pressed.frame.contains(p) { _ = pressed.press(if: isCurrent) }
+                return
+            }
+            if action == "down", b == 0, keys.isEmpty, buttons.isEmpty,
+               let pressed = windowTarget?.button(at: p) {
+                windowButton = pressed; return
+            }
+            if windowButton != nil {
+                if action == "move" { return }
+                windowButton = nil
+            }
             let button: CGMouseButton = b == 2 ? .right : b == 1 ? .center : .left
             let down: CGEventType = b == 2 ? .rightMouseDown : b == 1 ? .otherMouseDown : .leftMouseDown
             let up: CGEventType = b == 2 ? .rightMouseUp : b == 1 ? .otherMouseUp : .leftMouseUp
@@ -79,12 +119,13 @@ final class InputInjector {
         }
     }
     func releaseAll() {
+        windowButton = nil
         for b in buttons {
             let type: CGEventType = b == 2 ? .rightMouseUp : b == 1 ? .otherMouseUp : .leftMouseUp
             post(CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: lastPoint,
-                         mouseButton: b == 2 ? .right : b == 1 ? .center : .left))
+                         mouseButton: b == 2 ? .right : b == 1 ? .center : .left), releasing: true)
         }
-        for code in keys { let event = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: false); event?.flags = []; post(event) }
+        for code in keys { let event = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: false); event?.flags = []; post(event, releasing: true) }
         buttons.removeAll(); keys.removeAll(); clickCounts.removeAll(); clickSequence.reset()
     }
     private static func flags(_ modifiers: [String]) -> CGEventFlags {

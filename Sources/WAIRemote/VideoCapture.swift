@@ -38,8 +38,8 @@ final class VideoCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         try await start(filter)
     }
     private func start(_ filter: SCContentFilter) async throws {
-        let config = Self.configuration(size: filter.contentRect.size, pixelScale: CGFloat(filter.pointPixelScale))
-        if windowPixelScale != nil { config.showsCursor = false; config.ignoreShadowsSingleWindow = true }
+        let config = windowPixelScale.map { Self.windowConfiguration(size: filter.contentRect.size, pixelScale: $0) }
+            ?? Self.configuration(size: filter.contentRect.size, pixelScale: CGFloat(filter.pointPixelScale))
         PerformanceLog.record("capture-config", ["width": config.width, "height": config.height, "fps": 60, "format": "NV12", "queueDepth": config.queueDepth])
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
@@ -48,9 +48,16 @@ final class VideoCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     }
     func resizeWindow(_ size: CGSize) async throws {
         guard let windowPixelScale, let stream else { return }
-        let config = Self.configuration(size: size, pixelScale: windowPixelScale)
-        config.showsCursor = false; config.ignoreShadowsSingleWindow = true
+        let config = Self.windowConfiguration(size: size, pixelScale: windowPixelScale)
         try await stream.updateConfiguration(config)
+    }
+    static func windowConfiguration(size: CGSize, pixelScale: CGFloat) -> SCStreamConfiguration {
+        // Desktop-independent filters can report nominal 1x on a Retina Mac.
+        // Apple's window-capture sample requests 2x; .best retains that detail.
+        let config = configuration(size: size, pixelScale: max(2, pixelScale))
+        config.captureResolution = .best
+        config.showsCursor = false; config.ignoreShadowsSingleWindow = true
+        return config
     }
     static func configuration(size: CGSize, pixelScale: CGFloat) -> SCStreamConfiguration {
         let config = SCStreamConfiguration()

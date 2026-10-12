@@ -148,7 +148,13 @@ MainActor.assumeIsolated {
     // Keep a small 60–70 ms playout budget on variable-latency routes.
     // A ceiling alone lets the jitter estimator remove needed frame pacing.
     // Input stays on its independent data channel. Configure before RTC objects.
-    RTCInitFieldTrialDictionary(["WebRTC-ForcePlayoutDelay": "min_ms:60,max_ms:70"])
+    RTCInitFieldTrialDictionary([
+        "WebRTC-ForcePlayoutDelay": "min_ms:60,max_ms:70",
+        // Screen sharing defaults to a 2875 ms pacer queue in WebRTC M153.
+        // Interactive control needs fresh frames. Retain its congestion/probing
+        // policy, but start draining queued video at 100 ms instead of seconds.
+        "WebRTC-ProbingScreenshareBwe": "1.0,100,80,40,-60,3"
+    ])
     let app = NSApplication.shared
     let delegate = AppDelegate()
     app.setActivationPolicy(.regular)

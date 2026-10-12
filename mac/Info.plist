@@ -30,7 +30,7 @@
 		</dict>
 	</array>
 	<key>CFBundleVersion</key>
-	<string>29</string>
+	<string>33</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>15.0</string>
 	<key>NSAppTransportSecurity</key>
@@ -42,6 +42,12 @@
 	<true/>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Подключение к другим устройствам в вашей локальной сети.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>Передача скопированных файлов из «Документов» на подключённый Mac через буфер обмена.</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>Передача скопированных файлов с рабочего стола на подключённый Mac через буфер обмена.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>Передача скопированных файлов из «Загрузок» на подключённый Mac через буфер обмена.</string>
 	<key>SUAllowsAutomaticUpdates</key>
 	<false/>
 	<key>SUEnableAutomaticChecks</key>

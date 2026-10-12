@@ -259,6 +259,7 @@ final class MacViewerModel: ObservableObject {
     }
     func text(_ text: String) {
         guard canControl, !text.isEmpty, text.utf16.count <= 4096, !text.contains("\0") else { return }
+        PerformanceLog.record("text-submit", ["units": text.utf16.count])
         send("text") { $0.text = text }
     }
     func paste() {
