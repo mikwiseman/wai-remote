@@ -7,6 +7,70 @@ final class ClipboardTests: XCTestCase {
     private func board() -> NSPasteboard { NSPasteboard.withUniqueName() }
 
     @MainActor
+    func testClipboardContinuationStopsAtBackpressureAndPermissionLoss() async throws {
+        let board = board(); defer { board.releaseGlobally() }
+        let sync = ClipboardSync(pasteboard: board)
+        let blocked = expectation(description: "Channel applies backpressure")
+        var chunks = 0, rejected = 0, writable = true
+        sync.send = { data in
+            guard let packet = try? JSONDecoder().decode(ClipboardSync.Packet.self, from: data) else { return false }
+            guard packet.type == "chunk" else { return true }
+            if !writable { rejected += 1; if rejected == 1 { blocked.fulfill() }; return false }
+            chunks += 1
+            if chunks == 2 { writable = false }
+            return true
+        }
+        sync.setEnabled(true); sync.setOpen(true)
+        defer { sync.close() }
+        sync.receive(try JSONEncoder().encode(ClipboardSync.Packet(type: "hello")))
+        board.clearContents(); board.setData(Data(repeating: 1, count: 100_000), forType: .png)
+        sync.pushCurrent()
+        await fulfillment(of: [blocked], timeout: 2)
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertLessThanOrEqual(rejected, 2, "A full channel must wait for drain or the bounded poll, not spin.")
+        XCTAssertEqual(chunks, 2)
+        writable = true
+        sync.pump() // Sends one bounded batch and schedules the remaining bytes.
+        let beforePause = chunks
+        sync.setEnabled(false)
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(chunks, beforePause, "Queued bulk work must stop when control permission is lost.")
+    }
+
+    @MainActor
+    func testWritableClipboardDrainsWithoutWaitingForPollAndYieldsToInput() async throws {
+        let board = board(); defer { board.releaseGlobally() }
+        let sync = ClipboardSync(pasteboard: board)
+        let complete = expectation(description: "Writable transfer completes without polling it")
+        var bytes = Data(), expectedSize = 0, chunks = 0, inputAtChunk: Int?
+        sync.send = { data in
+            guard let packet = try? JSONDecoder().decode(ClipboardSync.Packet.self, from: data) else { return false }
+            if packet.type == "begin" { expectedSize = packet.size ?? 0 }
+            if packet.type == "chunk", let part = packet.data {
+                XCTAssertEqual(packet.offset, bytes.count)
+                bytes.append(part); chunks += 1
+                if chunks == 1 { DispatchQueue.main.async { inputAtChunk = chunks } }
+                if bytes.count == expectedSize { complete.fulfill() }
+            }
+            return true
+        }
+        sync.setEnabled(true); sync.setOpen(true)
+        defer { sync.close() }
+        sync.receive(try JSONEncoder().encode(ClipboardSync.Packet(type: "hello")))
+        let content = Data(repeating: 0x5a, count: 2 * 1024 * 1024)
+        board.clearContents(); board.setData(content, forType: .png)
+        sync.pushCurrent()
+        // No buffered-amount callback: SCTP may accept each small send immediately.
+        await fulfillment(of: [complete], timeout: 3)
+        XCTAssertNotNil(inputAtChunk)
+        XCTAssertLessThan(inputAtChunk ?? chunks, chunks, "Bulk sends must yield the main queue to input.")
+        if bytes.count == expectedSize {
+            let received = try PropertyListDecoder().decode(ClipboardContent.self, from: bytes)
+            XCTAssertEqual(received.items.first?.representations.first?.data, content)
+        }
+    }
+
+    @MainActor
     func testUniversalClipboardContentIsNotSentBackAsANewCopy() async throws {
         let board = board(); defer { board.releaseGlobally() }
         let sync = ClipboardSync(pasteboard: board)

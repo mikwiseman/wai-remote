@@ -33,6 +33,7 @@ private final class InjectedEvents {
     private var clickSequence = ClickSequence()
     private var clickCounts: [Int: Int] = [:]
     private var windowButton: WindowInputTarget.Button?
+    private var windowGesture: Int64 = 1
     private let source = CGEventSource(stateID: .privateState)
     var bounds = CGDisplayBounds(CGMainDisplayID())
     var windowTarget: WindowInputTarget?
@@ -42,7 +43,7 @@ private final class InjectedEvents {
         guard releasing || isCurrent() else { return }
         event?.setIntegerValueField(.eventSourceUserData, value: 0x574149)
         guard let event else { return }
-        if let windowTarget { windowTarget.post(event) }
+        if let windowTarget { windowTarget.post(event, permitted: { releasing || isCurrent() }) }
         else { event.post(tap: .cghidEventTap) }
     }
     func apply(_ m: WireMessage) {
@@ -81,6 +82,7 @@ private final class InjectedEvents {
                 if action == "down" {
                     guard !buttons.contains(b) else { return }
                     buttons.insert(b)
+                    windowGesture = Int64(DispatchTime.now().uptimeNanoseconds)
                     clickCounts[b] = clickSequence.down(x: p.x, y: p.y, button: b,
                         now: ProcessInfo.processInfo.systemUptime, interval: NSEvent.doubleClickInterval)
                 }
@@ -88,6 +90,10 @@ private final class InjectedEvents {
                 let type: CGEventType = action == "down" ? down : action == "up" ? up : buttons.isEmpty ? .mouseMoved : drag
                 let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: p, mouseButton: button)
                 event?.setIntegerValueField(.mouseEventClickState, value: Int64(clickCounts[b] ?? 0))
+                if windowTarget != nil {
+                    event?.setIntegerValueField(CGEventField(rawValue: 58)!, value: windowGesture)
+                }
+                event?.setDoubleValueField(.mouseEventPressure, value: buttons.isEmpty || action == "up" ? 0 : 1)
                 if action == "move" {
                     event?.setIntegerValueField(.mouseEventDeltaX, value: Int64((p.x - previousPoint.x).rounded()))
                     event?.setIntegerValueField(.mouseEventDeltaY, value: Int64((p.y - previousPoint.y).rounded()))

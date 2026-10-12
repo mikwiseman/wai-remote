@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 import WebRTC
 import RemoteCore
-import MetalKit
+import AVFoundation
 
 struct MacRemoteScreen: NSViewRepresentable {
     @ObservedObject var model: MacViewerModel
@@ -11,8 +11,8 @@ struct MacRemoteScreen: NSViewRepresentable {
     static func dismantleNSView(_ view: RemoteScreenView, coordinator: ()) { view.detach() }
 }
 
-private final class FrameRenderer: NSObject, RTCVideoRenderer, MTKViewDelegate {
-    let video: RTCMTLNSVideoView
+private final class FrameRenderer: NSObject, RTCVideoRenderer {
+    private let display: AVSampleBufferVideoRenderer
     var onFrame: (() -> Void)?
     private let lock = NSLock()
     private var delivered = false
@@ -20,37 +20,31 @@ private final class FrameRenderer: NSObject, RTCVideoRenderer, MTKViewDelegate {
     private var reportTime = 0.0
     private var frameGaps: [Double] = []
     private let timing = FrameTimingLog("render")
-    private let drawing = FrameTimingLog("draw")
-    private var displayDelegate: MTKViewDelegate?
-    private var latestTimestamp: Int64 = 0
-    private var drawnTimestamp: Int64 = 0
-    init(video: RTCMTLNSVideoView) { self.video = video }
-    func measureDisplay(_ metal: MTKView) {
-        guard PerformanceLog.enabled else { return }
-        displayDelegate = metal.delegate
-        metal.delegate = self
-    }
-    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
-        displayDelegate?.mtkView(view, drawableSizeWillChange: size)
-    }
-    func draw(in view: MTKView) {
-        displayDelegate?.draw(in: view)
+    private let enqueuing = FrameTimingLog("display-enqueue")
+    private var active = true
+    init(display: AVSampleBufferDisplayLayer) { self.display = display.sampleBufferRenderer }
+    func stop() {
         lock.lock()
-        let timestamp = latestTimestamp
+        active = false
+        display.flush(removingDisplayedImage: true)
         lock.unlock()
-        if timestamp != drawnTimestamp {
-            drawnTimestamp = timestamp
-            // Draw submissions, not a physical click-to-photon measurement.
-            drawing.frame(timestamp)
-        }
     }
-    func setSize(_ size: CGSize) { video.setSize(size) }
+    func setSize(_ size: CGSize) {} // RemoteViewport owns the aspect-fit geometry.
     func renderFrame(_ frame: RTCVideoFrame?) {
-        video.renderFrame(frame)
         guard let frame else { return }
         timing.frame(frame.timeStampNs)
         lock.lock()
-        latestTimestamp = frame.timeStampNs
+        defer { lock.unlock() }
+        guard active else { return }
+        if display.status == .failed { display.flush() }
+        // Never create an application-side video queue or block the UI waiting
+        // for a drawable. The next decoded frame supersedes a congested frame.
+        guard display.isReadyForMoreMediaData, let sample = VideoSampleBuffer.make(frame) else {
+            PerformanceLog.record("display-skipped")
+            return
+        }
+        display.enqueue(sample)
+        enqueuing.frame(frame.timeStampNs)
         let first = !delivered; delivered = true
         if PerformanceLog.enabled {
             let now = ProcessInfo.processInfo.systemUptime
@@ -62,17 +56,22 @@ private final class FrameRenderer: NSObject, RTCVideoRenderer, MTKViewDelegate {
                 PerformanceLog.record("renderer", ["fps": Double(gaps.count) / (now - reportTime),
                     "gapP95Ms": gaps[Int(ceil(Double(gaps.count) * 0.95)) - 1],
                     "gapMaxMs": gaps.last!, "gapsOver100Ms": gaps.filter { $0 > 100 }.count])
+                display.loadVideoPerformanceMetrics { metrics in
+                    guard let metrics else { return }
+                    PerformanceLog.record("display-metrics", ["frames": metrics.totalNumberOfFrames,
+                        "dropped": metrics.numberOfDroppedFrames, "corrupted": metrics.numberOfCorruptedFrames,
+                        "delaySeconds": metrics.totalAccumulatedFrameDelay])
+                }
                 frameGaps.removeAll(keepingCapacity: true); reportTime = now
             }
         }
-        lock.unlock()
         if first { DispatchQueue.main.async { [weak self] in self?.onFrame?() } }
     }
 }
 
 final class RemoteScreenView: NSView, NSTextInputClient {
     private let model: MacViewerModel
-    private var video: RTCMTLNSVideoView?
+    private var video: DecodedVideoView?
     private let ink = InkView()
     private var renderer: FrameRenderer?
     private var track: RTCVideoTrack?
@@ -112,19 +111,12 @@ final class RemoteScreenView: NSView, NSTextInputClient {
         if track !== model.track {
             detach()
             if let track = model.track {
-                // Metal keeps its last texture, so each track needs a fresh surface.
-                let video = RTCMTLNSVideoView(frame: .zero)
-                // The macOS WebRTC renderer defaults to 30 Hz, independently
-                // of the incoming track's 60 fps capture and decode cadence.
-                for metal in video.subviews.compactMap({ $0 as? MTKView }) {
-                    metal.preferredFramesPerSecond = 60
-                }
+                // Each track gets a fresh layer, so a disconnected Mac cannot
+                // leave its last frame behind the next connection's status.
+                let video = DecodedVideoView(frame: .zero)
                 self.video = video; self.track = track
                 addSubview(video, positioned: .below, relativeTo: ink)
-                let renderer = FrameRenderer(video: video)
-                for metal in video.subviews.compactMap({ $0 as? MTKView }) {
-                    renderer.measureDisplay(metal)
-                }
+                let renderer = FrameRenderer(display: video.display)
                 renderer.onFrame = { [weak self, weak model, weak track] in
                     guard let self, let model, let track,
                           self.track === track, model.track === track else { return }
@@ -142,6 +134,7 @@ final class RemoteScreenView: NSView, NSTextInputClient {
     func detach() {
         renderer?.onFrame = nil
         if let renderer { track?.remove(renderer) }
+        renderer?.stop()
         renderer = nil; track = nil
         video?.removeFromSuperview(); video = nil
         pressedKeys.removeAll(); pointerDown = false
@@ -197,6 +190,7 @@ final class RemoteScreenView: NSView, NSTextInputClient {
     }
     @objc func copy(_ sender: Any?) { model.key("KeyC", modifiers: ["Meta"]) }
     @objc func cut(_ sender: Any?) { model.key("KeyX", modifiers: ["Meta"]) }
+    override func selectAll(_ sender: Any?) { model.key("KeyA", modifiers: ["Meta"]) }
     override func keyDown(with event: NSEvent) {
         guard model.canControl else { return }
         if event.modifierFlags.intersection([.command, .control]).isEmpty,

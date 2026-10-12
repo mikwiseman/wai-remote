@@ -3,23 +3,73 @@ import WebRTC
 import XCTest
 import RemoteCore
 import Combine
-import MetalKit
+import AVFoundation
 @testable import WAIRemote
 
 @MainActor
 final class RemoteScreenTests: XCTestCase {
-    func testMetalDisplayDoesNotHalveTheSixtyFPSScreenStream() throws {
-        guard MTLCreateSystemDefaultDevice() != nil else { throw XCTSkip("Metal hardware required") }
+    func testDecodedVideoUsesTheNativePixelBufferDisplay() throws {
         let model = MacViewerModel(identity: DeviceIdentity())
         let factory = RTCPeerConnectionFactory()
         model.track = factory.videoTrack(with: factory.videoSource(), trackId: "screen")
         let screen = RemoteScreenView(model: model)
         screen.update()
-        let video = try XCTUnwrap(screen.subviews.first { $0 is RTCMTLNSVideoView })
-        let metal = try XCTUnwrap(video.subviews.compactMap { $0 as? MTKView }.first)
 
-        XCTAssertEqual(metal.preferredFramesPerSecond, 60,
-                       "Received FPS does not prove displayed FPS: WebRTC defaults the Metal view to 30 Hz.")
+        XCTAssertTrue(screen.subviews.contains { $0.layer is AVSampleBufferDisplayLayer },
+                      "4K hardware-decoded buffers must reach native display without I420 conversion and three CPU texture uploads.")
+    }
+
+    func testRemoteViewOffersTheStandardSelectAllMenuAction() {
+        let screen = RemoteScreenView(model: MacViewerModel(identity: DeviceIdentity()))
+        XCTAssertTrue(screen.responds(to: #selector(NSText.selectAll(_:))),
+                      "Edit > Select All must reach the remote field like Copy, Cut and Paste.")
+    }
+
+    func testHardwareFrameReusesPixelsAndDisplaysImmediately() throws {
+        let pixel = try pixels()
+        let frame = RTCVideoFrame(buffer: RTCCVPixelBuffer(pixelBuffer: pixel), rotation: ._0, timeStampNs: 123456789)
+        let sample = try XCTUnwrap(VideoSampleBuffer.make(frame))
+        XCTAssertTrue(CMSampleBufferGetImageBuffer(sample) === pixel, "The decoder's IOSurface must not be copied.")
+        XCTAssertEqual(CMSampleBufferGetPresentationTimeStamp(sample), CMTime(value: 123456789, timescale: 1_000_000_000))
+        let properties = try XCTUnwrap(CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: false) as? [[String: Any]])
+        XCTAssertEqual(properties.first?[kCMSampleAttachmentKey_DisplayImmediately as String] as? Bool, true)
+    }
+
+    func testSoftwareDecodedFramePreservesAllThreeColorPlanes() throws {
+        let planar = RTCCVPixelBuffer(pixelBuffer: try pixels()).toI420()
+        let frame = RTCVideoFrame(buffer: planar, rotation: ._0, timeStampNs: 1)
+        let sample = try XCTUnwrap(VideoSampleBuffer.make(frame))
+        let pixel = try XCTUnwrap(CMSampleBufferGetImageBuffer(sample))
+        XCTAssertEqual(CVPixelBufferGetWidth(pixel), 8)
+        XCTAssertEqual(CVPixelBufferGetHeight(pixel), 6)
+        let received = RTCCVPixelBuffer(pixelBuffer: pixel).toI420()
+        for row in 0..<6 {
+            for column in 0..<8 { XCTAssertEqual(received.dataY[row * Int(received.strideY) + column], 72) }
+        }
+        for row in 0..<3 {
+            for column in 0..<4 {
+                XCTAssertEqual(received.dataU[row * Int(received.strideU) + column], 96)
+                XCTAssertEqual(received.dataV[row * Int(received.strideV) + column], 180)
+            }
+        }
+    }
+
+    private func pixels() throws -> CVPixelBuffer {
+        var result: CVPixelBuffer?
+        XCTAssertEqual(CVPixelBufferCreate(kCFAllocatorDefault, 8, 6, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+            [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary, &result), kCVReturnSuccess)
+        let pixel = try XCTUnwrap(result)
+        CVPixelBufferLockBaseAddress(pixel, [])
+        defer { CVPixelBufferUnlockBaseAddress(pixel, []) }
+        memset(CVPixelBufferGetBaseAddressOfPlane(pixel, 0), 72, CVPixelBufferGetBytesPerRowOfPlane(pixel, 0) * 6)
+        let uv = try XCTUnwrap(CVPixelBufferGetBaseAddressOfPlane(pixel, 1)?.assumingMemoryBound(to: UInt8.self))
+        for row in 0..<3 {
+            for column in 0..<4 {
+                uv[row * CVPixelBufferGetBytesPerRowOfPlane(pixel, 1) + column * 2] = 96
+                uv[row * CVPixelBufferGetBytesPerRowOfPlane(pixel, 1) + column * 2 + 1] = 180
+            }
+        }
+        return pixel
     }
 
     func testViewerOpensAtReadableSizeInsteadOfItsMinimum() throws {
@@ -60,7 +110,7 @@ final class RemoteScreenTests: XCTestCase {
         XCTAssertEqual(invalidations, 0)
     }
 
-    func testUnchangedScreenDoesNotScheduleAnotherMetalLayout() {
+    func testUnchangedScreenDoesNotScheduleAnotherVideoLayout() {
         let model = MacViewerModel(identity: DeviceIdentity())
         let factory = RTCPeerConnectionFactory()
         model.track = factory.videoTrack(with: factory.videoSource(), trackId: "screen")
@@ -80,13 +130,13 @@ final class RemoteScreenTests: XCTestCase {
         model.track = factory.videoTrack(with: factory.videoSource(), trackId: "previous")
         let screen = RemoteScreenView(model: model)
         screen.update()
-        let previous = try XCTUnwrap(screen.subviews.first { $0 is RTCMTLNSVideoView })
+        let previous = try XCTUnwrap(screen.subviews.first { $0 is DecodedVideoView })
 
         model.disconnect()
         screen.update()
 
         XCTAssertFalse(screen.subviews.contains { $0 === previous }, "The disconnected Mac's last frame must leave the view hierarchy.")
-        XCTAssertFalse(screen.subviews.contains { $0 is RTCMTLNSVideoView })
+        XCTAssertFalse(screen.subviews.contains { $0 is DecodedVideoView })
     }
 
     func testAnotherTrackGetsAFreshVideoSurface() throws {
@@ -95,14 +145,14 @@ final class RemoteScreenTests: XCTestCase {
         model.track = factory.videoTrack(with: factory.videoSource(), trackId: "first")
         let screen = RemoteScreenView(model: model)
         screen.update()
-        let previous = try XCTUnwrap(screen.subviews.first { $0 is RTCMTLNSVideoView })
+        let previous = try XCTUnwrap(screen.subviews.first { $0 is DecodedVideoView })
 
         model.track = factory.videoTrack(with: factory.videoSource(), trackId: "second")
         screen.update()
-        let current = try XCTUnwrap(screen.subviews.first { $0 is RTCMTLNSVideoView })
+        let current = try XCTUnwrap(screen.subviews.first { $0 is DecodedVideoView })
 
-        XCTAssertFalse(current === previous, "A new Mac must not inherit a Metal surface with the previous Mac's frame.")
-        XCTAssertEqual(screen.subviews.filter { $0 is RTCMTLNSVideoView }.count, 1)
+        XCTAssertFalse(current === previous, "A new Mac must not inherit a surface with the previous Mac's frame.")
+        XCTAssertEqual(screen.subviews.filter { $0 is DecodedVideoView }.count, 1)
     }
 
     func testAnotherTrackWaitsForItsOwnFirstFrame() {

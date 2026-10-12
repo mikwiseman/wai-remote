@@ -29,7 +29,25 @@ struct WindowInputTarget: Equatable {
         guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CGEventSetWindowLocation") else { return nil }
         return unsafeBitCast(symbol, to: SetLocation.self)
     }()
-    static var isSupported: Bool { setWindowLocation != nil }
+    private typealias PostPointer = @convention(c) (pid_t, CGEvent) -> Void
+    private static let postPointer: PostPointer? = {
+        _ = setWindowLocation
+        guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "SLEventPostToPid") else { return nil }
+        return unsafeBitCast(symbol, to: PostPointer.self)
+    }()
+    private typealias ProcessNumber = @convention(c) (pid_t, UnsafeMutableRawPointer) -> Int32
+    private typealias FocusRecord = @convention(c) (UnsafeRawPointer, UnsafeRawPointer) -> Int32
+    private static let processNumber: ProcessNumber? = {
+        _ = dlopen("/System/Library/Frameworks/Carbon.framework/Carbon", RTLD_LAZY | RTLD_GLOBAL)
+        guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "GetProcessForPID") else { return nil }
+        return unsafeBitCast(symbol, to: ProcessNumber.self)
+    }()
+    private static let focusRecord: FocusRecord? = {
+        _ = setWindowLocation
+        guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "SLPSPostEventRecordTo") else { return nil }
+        return unsafeBitCast(symbol, to: FocusRecord.self)
+    }()
+    static var isSupported: Bool { setWindowLocation != nil && postPointer != nil && processNumber != nil && focusRecord != nil }
     var frame: CGRect? {
         guard let list = CGWindowListCopyWindowInfo(.optionIncludingWindow, windowID) as? [[String: Any]] else { return nil }
         return frame(in: list)
@@ -45,16 +63,77 @@ struct WindowInputTarget: Equatable {
     func address(_ event: CGEvent, frame: CGRect) -> Bool {
         guard let setLocation = Self.setWindowLocation, pid > 0, windowID > 0 else { return false }
         event.setIntegerValueField(.eventTargetUnixProcessID, value: Int64(pid))
-        event.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(windowID))
-        event.setIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent, value: Int64(windowID))
         event.setIntegerValueField(CGEventField(rawValue: 51)!, value: Int64(windowID))
-        event.setIntegerValueField(CGEventField(rawValue: 58)!, value: 1)
-        setLocation(event, CGPoint(x: event.location.x - frame.minX, y: frame.maxY - event.location.y))
+        if event.getIntegerValueField(CGEventField(rawValue: 58)!) == 0 {
+            event.setIntegerValueField(CGEventField(rawValue: 58)!, value: 1)
+        }
+        switch event.type {
+        case .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp, .mouseMoved,
+             .leftMouseDragged, .rightMouseDragged, .otherMouseDown, .otherMouseUp,
+             .otherMouseDragged, .scrollWheel:
+            event.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(windowID))
+            event.setIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent, value: Int64(windowID))
+            // Keep CGEvent.location in screen space and stamp the top-left
+            // window point separately. The native Chrome fixture verifies that
+            // screen coordinates here would add the window origin twice.
+            setLocation(event, CGPoint(x: event.location.x - frame.minX,
+                                       y: event.location.y - frame.minY))
+            switch event.type {
+            case .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp,
+                 .otherMouseDown, .otherMouseUp, .mouseMoved:
+                event.setIntegerValueField(.mouseEventSubtype, value: 3)
+                event.setIntegerValueField(.mouseEventNumber, value: event.type == .mouseMoved ? 2 : 3)
+            default: break
+            }
+        default: break
+        }
         return true
     }
-    func post(_ event: CGEvent) {
-        guard let frame, address(event, frame: frame) else { return }
-        event.postToPid(pid)
+    func post(_ event: CGEvent, permitted: () -> Bool) {
+        guard permitted(), let frame, address(event, frame: frame) else { return }
+        if event.type == .leftMouseDown || event.type == .rightMouseDown || event.type == .otherMouseDown {
+            prepareWindow()
+            // Chromium also requires a complete background activation gesture.
+            // The primer stays outside the window, so it hits no real control.
+            // Its group is shared with the actual down/up; never post globally.
+            let group = event.getIntegerValueField(CGEventField(rawValue: 58)!)
+            let steps: [(CGEventType, CGPoint, Int64, TimeInterval)] = [
+                (.mouseMoved, event.location, 2, 0.015),
+                (.leftMouseDown, CGPoint(x: -1, y: -1), 1, 0.001),
+                (.leftMouseUp, CGPoint(x: -1, y: -1), 2, 0.1)
+            ]
+            for (type, point, phase, delay) in steps {
+                guard permitted(), self.frame != nil,
+                      let primer = CGEvent(mouseEventSource: nil, mouseType: type,
+                                           mouseCursorPosition: point, mouseButton: .left) else { return }
+                primer.flags = event.flags
+                primer.setIntegerValueField(CGEventField(rawValue: 58)!, value: group)
+                guard address(primer, frame: frame) else { return }
+                primer.setIntegerValueField(.mouseEventNumber, value: phase)
+                primer.setIntegerValueField(.mouseEventClickState, value: type == .mouseMoved ? 0 : 1)
+                Self.postPointer?(pid, primer)
+                Thread.sleep(forTimeInterval: delay)
+            }
+        }
+        guard permitted(), self.frame != nil else { return }
+        switch event.type {
+        case .keyDown, .keyUp, .flagsChanged: event.postToPid(pid)
+        default:
+            // The public PID path misses Chromium's background mouse handler.
+            // Deliver once through SkyLight, never through global HID.
+            Self.postPointer?(pid, event)
+        }
+    }
+    private func prepareWindow() {
+        guard let processNumber = Self.processNumber, let focusRecord = Self.focusRecord else { return }
+        var process = [UInt32](repeating: 0, count: 2)
+        guard processNumber(pid, &process) == 0 else { return }
+        // cua-driver's target-only focus record. Do not send a defocus record
+        // to the owner's app or change WindowServer's front/key process.
+        var record = [UInt8](repeating: 0, count: 0xF8)
+        record[0x04] = 0xF8; record[0x08] = 0x0D; record[0x8A] = 0x01
+        for byte in 0..<4 { record[0x3C + byte] = UInt8(truncatingIfNeeded: windowID >> (byte * 8)) }
+        if focusRecord(&process, &record) == 0 { Thread.sleep(forTimeInterval: 0.05) }
     }
     /// Native buttons can track the real desktop pointer and cancel a synthetic
     /// background click. Their standard Press action does not need that pointer.

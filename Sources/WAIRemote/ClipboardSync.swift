@@ -33,6 +33,7 @@ final class ClipboardSync {
     private var latestID = ""
     private var generation = UUID()
     private var outgoing: Outgoing?
+    private var pumpScheduled = false
     private var preparingPaste = false
     private var incoming: Incoming?
     private var pendingAck: String?
@@ -149,13 +150,24 @@ final class ClipboardSync {
             PerformanceLog.record("clipboard", ["operation": "send", "id": transfer.id, "bytes": transfer.data.count])
         }
         // Small messages and bounded SCTP buffering let input pass during file copies.
+        var sent = 0
         for _ in 0..<2 where transfer.offset < transfer.data.count {
             let end = min(transfer.offset + Self.chunkSize, transfer.data.count)
             guard transmit(Packet(type: "chunk", id: transfer.id, offset: transfer.offset,
                                   data: transfer.data.subdata(in: transfer.offset..<end))) else { break }
             transfer.offset = end; lastProgress = ProcessInfo.processInfo.systemUptime
+            sent += 1
         }
         outgoing = transfer
+        // An immediately writable channel may never report a buffer decrease.
+        // Continue after yielding to input instead of waiting for the 250-ms poll.
+        if sent == 2, transfer.offset < transfer.data.count, !pumpScheduled {
+            pumpScheduled = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.pumpScheduled = false; self.pump()
+            }
+        }
     }
     func receive(_ data: Data) {
         guard enabled, open, data.count <= Self.messageLimit,

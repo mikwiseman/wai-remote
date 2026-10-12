@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import XCTest
 @testable import WAIRemote
 
@@ -10,10 +11,28 @@ final class WindowInputTests: XCTestCase {
                                         mouseCursorPosition: CGPoint(x: 250, y: 420), mouseButton: .left))
         let cursor = CGEvent(source: nil)?.location
         try XCTSkipUnless(WindowInputTarget.isSupported)
+        event.setIntegerValueField(CGEventField(rawValue: 58)!, value: 987)
         XCTAssertTrue(target.address(event, frame: frame))
         XCTAssertEqual(event.getIntegerValueField(.eventTargetUnixProcessID), 123)
         XCTAssertEqual(event.getIntegerValueField(.mouseEventWindowUnderMousePointer), 456)
         XCTAssertEqual(event.getIntegerValueField(CGEventField(rawValue: 51)!), 456)
+        XCTAssertEqual(event.getIntegerValueField(.mouseEventSubtype), 3,
+                       "Background pointer delivery must carry Chromium's accepted touch subtype.")
+        XCTAssertEqual(event.getIntegerValueField(CGEventField(rawValue: 58)!), 987,
+                       "The target down/up pair must keep the same gesture as its background primer.")
+        XCTAssertEqual(event.getIntegerValueField(.mouseEventNumber), 3)
+        typealias GetLocation = @convention(c) (CGEvent) -> CGPoint
+        let symbol = try XCTUnwrap(dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CGEventGetWindowLocation"))
+        let location = unsafeBitCast(symbol, to: GetLocation.self)(event)
+        XCTAssertEqual(location, CGPoint(x: 150, y: 220),
+                       "The target window origin must be subtracted exactly once; Chrome otherwise receives the origin twice.")
+        XCTAssertEqual(event.location, CGPoint(x: 250, y: 420), "Global event location stays in screen coordinates.")
+        let key = try XCTUnwrap(CGEvent(keyboardEventSource: nil, virtualKey: 9, keyDown: true))
+        key.flags = .maskCommand
+        let keyLocation = unsafeBitCast(symbol, to: GetLocation.self)(key)
+        XCTAssertTrue(target.address(key, frame: frame))
+        XCTAssertEqual(unsafeBitCast(symbol, to: GetLocation.self)(key), keyLocation,
+                       "Keyboard events are window-addressed, but must not receive mouse coordinates.")
         XCTAssertEqual(CGEvent(source: nil)?.location, cursor, "Addressing a background event must not warp the desktop cursor.")
     }
 
