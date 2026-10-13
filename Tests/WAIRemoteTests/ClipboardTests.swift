@@ -412,10 +412,54 @@ final class ClipboardTests: XCTestCase {
     }
 
     @MainActor
-    func testPasteUsesTheClipboardAtTheTimeOfTheCommand() async throws {
+    func testSlowPasteboardProviderDoesNotBlockInputAndKeepsExplicitPaste() async throws {
         let a = board(), b = board()
         defer { a.releaseGlobally(); b.releaseGlobally() }
-        let left = ClipboardSync(pasteboard: a), right = ClipboardSync(pasteboard: b)
+        let readStarted = expectation(description: "Pasteboard read started")
+        let release = DispatchSemaphore(value: 0)
+        let left = ClipboardSync(pasteboard: a, readSnapshot: { board, change in
+            readStarted.fulfill()
+            _ = release.wait(timeout: .now() + 0.5)
+            return try ClipboardContent.snapshot(from: board, expectedChange: change)
+        })
+        let right = ClipboardSync(pasteboard: b)
+        var toLeft: [Data] = [], toRight: [Data] = []
+        left.send = { toRight.append($0); return true }
+        right.send = { toLeft.append($0); return true }
+        left.setEnabled(true); right.setEnabled(true); left.setOpen(true); right.setOpen(true)
+        defer { release.signal(); left.close(); right.close() }
+        func drain() {
+            let l = toLeft, r = toRight; toLeft = []; toRight = []
+            l.forEach(left.receive); r.forEach(right.receive)
+        }
+        for _ in 0..<4 { drain() }
+        a.clearContents(); a.setString("Медленный источник, точная вставка 👋", forType: .string)
+        var pasted: String?
+        let start = ProcessInfo.processInfo.systemUptime
+        left.pushCurrent { pasted = b.string(forType: .string) }
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - start, 0.1,
+                          "A lazy pasteboard provider must not stop video, input and heartbeats on the main thread.")
+        await fulfillment(of: [readStarted], timeout: 1)
+        release.signal()
+        for _ in 0..<200 {
+            drain()
+            if pasted != nil { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(pasted, "Медленный источник, точная вставка 👋")
+    }
+
+    @MainActor
+    func testPasteKeepsCapturedContentsWhenAnotherCopyFollows() async throws {
+        let a = board(), b = board()
+        defer { a.releaseGlobally(); b.releaseGlobally() }
+        let captured = expectation(description: "Original copy captured")
+        let left = ClipboardSync(pasteboard: a, readSnapshot: { board, change in
+            let snapshot = try ClipboardContent.snapshot(from: board, expectedChange: change)
+            if board.string(forType: .string) == "paste this" { captured.fulfill() }
+            return snapshot
+        })
+        let right = ClipboardSync(pasteboard: b)
         var toLeft: [Data] = [], toRight: [Data] = []
         left.send = { toRight.append($0); return true }
         right.send = { toLeft.append($0); return true }
@@ -429,6 +473,7 @@ final class ClipboardTests: XCTestCase {
         a.clearContents(); a.setString("paste this", forType: .string)
         var pasted: String?
         left.pushCurrent { pasted = b.string(forType: .string) }
+        await fulfillment(of: [captured], timeout: 2)
         a.clearContents(); a.setString("copied afterwards", forType: .string)
         for _ in 0..<200 {
             drain()
@@ -443,6 +488,38 @@ final class ClipboardTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(10))
         }
         XCTAssertEqual(b.string(forType: .string), "copied afterwards")
+    }
+
+    @MainActor
+    func testPasteDoesNotSubstituteACopyMadeBeforeTheProviderResponds() async throws {
+        let source = board(); defer { source.releaseGlobally() }
+        let started = expectation(description: "Lazy read started")
+        let failed = expectation(description: "Replaced copy is reported")
+        let release = DispatchSemaphore(value: 0)
+        let sync = ClipboardSync(pasteboard: source, readSnapshot: { board, change in
+            started.fulfill()
+            _ = release.wait(timeout: .now() + 2)
+            return try ClipboardContent.snapshot(from: board, expectedChange: change)
+        })
+        var beganTransfer = false
+        sync.send = {
+            if let packet = try? JSONDecoder().decode(ClipboardSync.Packet.self, from: $0), packet.type == "begin" { beganTransfer = true }
+            return true
+        }
+        sync.onPasteFailure = { message in
+            XCTAssertEqual(message, "Содержимое буфера изменилось. Повторите вставку.")
+            failed.fulfill()
+        }
+        sync.setEnabled(true); sync.setOpen(true)
+        defer { release.signal(); sync.close() }
+        sync.receive(try JSONEncoder().encode(ClipboardSync.Packet(type: "hello")))
+        source.clearContents(); source.setString("original", forType: .string)
+        sync.pushCurrent { XCTFail("Never paste another copy under the original command.") }
+        await fulfillment(of: [started], timeout: 1)
+        source.clearContents(); source.setString("newer copy", forType: .string)
+        release.signal()
+        await fulfillment(of: [failed], timeout: 1)
+        XCTAssertFalse(beganTransfer)
     }
 
     func testReceivedFilesCacheIsBoundedAndKeepsCurrentPasteboardFiles() throws {

@@ -28,6 +28,7 @@ final class ClipboardSync {
     private(set) var available = false
     private let board: NSPasteboard
     private let directory: URL
+    private let readSnapshot: (NSPasteboard, Int) throws -> ClipboardContent.Snapshot?
     private let worker = DispatchQueue(label: "is.wai.remote.clipboard", qos: .utility)
     private var enabled = false, open = false, helloSent = false
     private var timer: Timer?
@@ -45,8 +46,12 @@ final class ClipboardSync {
     private var peerWindow = 0
     private var lastPoll = 0.0, lastHello = 0.0, lastProgress = 0.0
 
-    init(pasteboard: NSPasteboard = .general, directory: URL? = nil) {
+    init(pasteboard: NSPasteboard = .general, directory: URL? = nil,
+         readSnapshot: @escaping (NSPasteboard, Int) throws -> ClipboardContent.Snapshot? = {
+             try ClipboardContent.snapshot(from: $0, expectedChange: $1)
+         }) {
         board = pasteboard
+        self.readSnapshot = readSnapshot
         self.directory = directory ?? FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("is.wai.remote/Clipboard", isDirectory: true)
     }
@@ -124,14 +129,11 @@ final class ClipboardSync {
         guard revision < UInt64.max else { return }
         revision += 1; latestID = UUID().uuidString
         let id = latestID
-        let snapshot: Result<ClipboardContent.Snapshot?, Error>? = completion == nil ? nil : Result { try ClipboardContent.snapshot(from: board) }
         preparingPaste = completion != nil
         worker.async { [weak self] in
             guard let self else { return }
             let result = Result { () throws -> Data? in
-                let content: ClipboardContent?
-                if let snapshot { content = try snapshot.get().map(ClipboardContent.read) }
-                else { content = try ClipboardContent.read(from: self.board) }
+                let content = try self.readSnapshot(self.board, change).map(ClipboardContent.read)
                 guard let content else { return nil }
                 let encoder = PropertyListEncoder(); encoder.outputFormat = .binary
                 let data = try encoder.encode(content)

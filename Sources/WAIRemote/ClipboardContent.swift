@@ -26,12 +26,13 @@ struct ClipboardContent: Codable {
         var items: [Item]
     }
     enum Failure: LocalizedError {
-        case tooLarge, unsupportedFile, invalid
+        case tooLarge, unsupportedFile, invalid, changed
         var errorDescription: String? {
             switch self {
             case .tooLarge: "Буфер больше 100 МБ или содержит слишком много файлов."
             case .unsupportedFile: "Ссылки на файлы и специальные файлы не передаются. Скопируйте сам файл."
             case .invalid: "Не удалось прочитать буфер обмена."
+            case .changed: "Содержимое буфера изменилось. Повторите вставку."
             }
         }
     }
@@ -49,8 +50,11 @@ struct ClipboardContent: Codable {
         try snapshot(from: board).flatMap(read)
     }
 
-    /// Capture representations now; reading copied files can then happen off the UI thread.
-    static func snapshot(from board: NSPasteboard) throws -> Snapshot? {
+    /// Lazy representations can wait on another process. Read them off the UI
+    /// thread and reject a replaced owner rather than combining different copies.
+    static func snapshot(from board: NSPasteboard, expectedChange: Int? = nil) throws -> Snapshot? {
+        let change = expectedChange ?? board.changeCount
+        guard board.changeCount == change else { throw Failure.changed }
         guard !(board.types ?? []).contains(concealed),
               let source = board.pasteboardItems, !source.isEmpty else { return nil }
         guard source.count <= 256 else { throw Failure.tooLarge }
@@ -76,6 +80,7 @@ struct ClipboardContent: Codable {
             }
             if !representations.isEmpty { items.append(.init(representations: representations, file: nil)) }
         }
+        guard board.changeCount == change else { throw Failure.changed }
         return items.isEmpty ? nil : Snapshot(items: items)
     }
 
