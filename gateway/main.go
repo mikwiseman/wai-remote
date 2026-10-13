@@ -85,17 +85,23 @@ func (h *hub) serve(w http.ResponseWriter, r *http.Request) {
 	current := &client{hello: hello, conn: c}
 	h.mu.Lock()
 	registered := false
+	hostUnavailable := hello.Role == "viewer" && h.relay != nil && h.hosts[hello.HostID] == nil
 	if hello.Role == "host" {
 		if h.hosts[hello.HostID] == nil && len(h.hosts) < 100 {
 			h.hosts[hello.HostID] = current
 			registered = true
 		}
-	} else if (h.relay == nil || h.hosts[hello.HostID] != nil) && h.viewers[viewerKey(hello.HostID, hello.PeerID)] == nil && len(h.viewers) < 400 {
+	} else if !hostUnavailable && h.viewers[viewerKey(hello.HostID, hello.PeerID)] == nil && len(h.viewers) < 400 {
 		h.viewers[viewerKey(hello.HostID, hello.PeerID)] = current
 		registered = true
 	}
 	h.mu.Unlock()
 	if !registered {
+		if hostUnavailable {
+			_ = current.send(map[string]string{"type": "unavailable"})
+			c.Close(websocket.StatusNormalClosure, "host unavailable")
+			return
+		}
 		c.Close(websocket.StatusPolicyViolation, "identity already connected or capacity reached")
 		return
 	}

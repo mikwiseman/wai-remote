@@ -129,3 +129,38 @@ func TestHostCannotRouteToViewerPairedWithAnotherHost(t *testing.T) {
 		t.Fatal("cross-host routing accepted")
 	}
 }
+
+func TestOfflineHostReportsUnavailableWithoutIssuingRelayCredentials(t *testing.T) {
+	h := newHub()
+	h.relay = &relayIssuer{secret: []byte(strings.Repeat("s", 32)), urls: []string{"turn:203.0.113.1:3478?transport=udp"}}
+	server := httptest.NewServer(httpHandler(h))
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	c, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.CloseNow()
+	var challenge map[string]string
+	if err = wsjson.Read(ctx, c, &challenge); err != nil {
+		t.Fatal(err)
+	}
+	hello := signedHello(t, "viewer", challenge["nonce"], strings.Repeat("a", 64))
+	if err = wsjson.Write(ctx, c, hello); err != nil {
+		t.Fatal(err)
+	}
+	var response map[string]any
+	if err = wsjson.Read(ctx, c, &response); err != nil {
+		t.Fatalf("offline host must report its state before closing: %v", err)
+	}
+	if len(response) != 1 || response["type"] != "unavailable" {
+		t.Fatalf("offline response must not include relay credentials: %v", response)
+	}
+	h.mu.Lock()
+	registered := len(h.viewers)
+	h.mu.Unlock()
+	if registered != 0 {
+		t.Fatal("offline connection occupied a viewer slot")
+	}
+}
