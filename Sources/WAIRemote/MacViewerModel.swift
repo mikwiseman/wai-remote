@@ -41,6 +41,8 @@ class MacViewerModel: ObservableObject {
     private var heartbeat: Timer?
     private var timeout: Timer?
     private var activity: NSObjectProtocol?
+    private var workspaceObservers: [NSObjectProtocol] = []
+    private var resumeInvitation: String?
     private var attempt = UUID()
     private var snapshot: [InkStroke]?
     private var activeStroke: String?
@@ -66,6 +68,28 @@ class MacViewerModel: ObservableObject {
            let saved = try? JSONDecoder().decode([SavedComputer].self, from: data) {
             computers = saved.compactMap { try? SavedComputer(invitation: $0.invitation, name: $0.name) }
         }
+        let center = NSWorkspace.shared.notificationCenter
+        workspaceObservers = [
+            center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in self?.suspendForSleep() },
+            center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in self?.resumeAfterSleep() }
+        ]
+    }
+    deinit { workspaceObservers.forEach(NSWorkspace.shared.notificationCenter.removeObserver) }
+
+    private func suspendForSleep() {
+        guard connected || connecting else { return }
+        // Only an established session may resume. A pairing request must not
+        // reappear without a fresh user action, and input is never replayed.
+        let saved = connected ? currentInvite?.savedURL.absoluteString : nil
+        disconnect(message: saved == nil ? "Подключение прервано" : "Соединение приостановлено")
+        resumeInvitation = saved
+        connectionInterrupted = saved != nil
+    }
+    private func resumeAfterSleep() {
+        guard let saved = resumeInvitation else { return }
+        resumeInvitation = nil
+        invitation = saved
+        connect()
     }
     func forget(_ id: String) { computers.removeAll { $0.id == id }; saveComputers() }
     func rename(_ id: String, name: String) {
@@ -169,6 +193,7 @@ class MacViewerModel: ObservableObject {
         }
     }
     func disconnect(message: String = "Вы отключились") {
+        resumeInvitation = nil
         if connected, let release = session.release(), let data = try? JSONEncoder().encode(release) { _ = transport?.send(data) }
         attempt = UUID(); heartbeat?.invalidate(); heartbeat = nil; timeout?.invalidate(); timeout = nil
         signaling?.close(); signaling = nil; transport?.close(); transport = nil
