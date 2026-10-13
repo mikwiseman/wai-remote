@@ -182,18 +182,22 @@ final class RemoteScreenTests: XCTestCase {
         window.contentView?.layoutSubtreeIfNeeded()
 
         // AppKit constrains large windows to the available display (including
-        // the small CI display). A plain window supplies that native size
-        // without allowing the hosting controller to shrink it to its minimum.
+        // the small CI display). Match its toolbar as well, since the toolbar
+        // reduces the content height when the screen constrains the window.
         let reference = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1200, height: 780),
                                  styleMask: window.styleMask, backing: .buffered, defer: false)
         reference.isReleasedWhenClosed = false
         defer { reference.close() }
-        reference.center()
-        reference.orderFront(nil)
-        let expected = try XCTUnwrap(reference.contentView).bounds.size
-        let content = try XCTUnwrap(window.contentView)
-        XCTAssertEqual(content.bounds.width, expected.width, accuracy: 1)
-        XCTAssertEqual(content.bounds.height, expected.height, accuracy: 1)
+        let referenceToolbar = ViewerToolbar(model: delegate.viewer, window: reference)
+        try withExtendedLifetime(referenceToolbar) {
+            reference.setContentSize(NSSize(width: 1200, height: 780))
+            reference.center()
+            reference.orderFront(nil)
+            let expected = try XCTUnwrap(reference.contentView).bounds.size
+            let content = try XCTUnwrap(window.contentView)
+            XCTAssertEqual(content.bounds.width, expected.width, accuracy: 1)
+            XCTAssertEqual(content.bounds.height, expected.height, accuracy: 1)
+        }
     }
 
     func testHeartbeatDoesNotInvalidateTheVideoView() {
