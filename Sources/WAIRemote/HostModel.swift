@@ -211,7 +211,8 @@ final class HostModel: ObservableObject {
                 signal.connect(url: components.url!)
             } catch {
                 guard connectionGeneration == generation else { video.stop(); return }
-                stop(reason: "Не удалось начать захват: \(error.localizedDescription)", cause: "capture-start")
+                PerformanceLog.record("capture-error", ["domain": (error as NSError).domain, "code": (error as NSError).code])
+                stop(reason: "Не удалось начать показ экрана. Попробуйте открыть доступ ещё раз.", cause: "capture-start")
             }
         }
     }
@@ -295,7 +296,8 @@ final class HostModel: ObservableObject {
                         else if let display { try await capture.startDisplay(display, excluding: excluded) }
                     } catch {
                         guard let self, self.capture === capture, self.transport === peer else { return }
-                        self.stop(reason: "Не удалось начать захват: \(error.localizedDescription)", cause: "capture-start")
+                        PerformanceLog.record("capture-error", ["domain": (error as NSError).domain, "code": (error as NSError).code])
+                        self.stop(reason: "Не удалось начать показ экрана. Попробуйте открыть доступ ещё раз.", cause: "capture-start")
                     }
                 }
             }

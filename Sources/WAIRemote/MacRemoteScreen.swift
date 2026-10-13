@@ -155,7 +155,7 @@ final class RemoteScreenView: NSView, NSTextInputClient {
         if action == "down" { window?.makeFirstResponder(self); pointerDown = true }
         if model.canDraw, button == 0 {
             switch action { case "down": model.beginStroke(at: point); case "move" where pointerDown: model.appendStroke(at: point); case "up": model.endStroke(); default: break }
-        } else { model.pointer(action, at: point, button: button) }
+        } else { model.pointer(action, at: point, button: button, modifiers: modifiers(event)) }
         if action == "up" { pointerDown = false }
     }
     override func mouseDown(with event: NSEvent) { pointer("down", event) }
@@ -167,7 +167,7 @@ final class RemoteScreenView: NSView, NSTextInputClient {
     override func rightMouseDragged(with event: NSEvent) { pointer("move", event, button: 2) }
     override func scrollWheel(with event: NSEvent) {
         guard let point = point(event) else { return }
-        model.pointer("scroll", at: point, dx: -Double(event.scrollingDeltaX), dy: -Double(event.scrollingDeltaY))
+        model.pointer("scroll", at: point, dx: -Double(event.scrollingDeltaX), dy: -Double(event.scrollingDeltaY), modifiers: modifiers(event))
     }
     private func modifiers(_ event: NSEvent) -> [String] {
         [(.command, "Meta"), (.control, "Control"), (.option, "Alt"), (.shift, "Shift")]
@@ -179,6 +179,12 @@ final class RemoteScreenView: NSView, NSTextInputClient {
         if (event.keyCode == 53 && event.modifierFlags.contains(.option)) || event.keyCode == 12 {
             model.releaseInput(); window?.makeFirstResponder(nil)
             return event.keyCode != 12
+        }
+        let flags = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        if (flags == .command && [4, 46, 43, 29].contains(event.keyCode)) ||
+            (flags == [.command, .option] && event.keyCode == 4) {
+            model.releaseInput(); pressedKeys.removeAll()
+            return false
         }
         if event.keyCode == 9 && !event.modifierFlags.contains(.shift) {
             paste(nil); return true
@@ -205,6 +211,22 @@ final class RemoteScreenView: NSView, NSTextInputClient {
         guard pressedKeys.remove(event.keyCode) != nil,
               let code = InputInjector.keyCodes.first(where: { $0.value == event.keyCode })?.key else { return }
         model.keyEvent(code, action: "up", modifiers: modifiers(event))
+    }
+    override func flagsChanged(with event: NSEvent) {
+        guard model.canControl else { return }
+        let flag: NSEvent.ModifierFlags
+        switch event.keyCode {
+        case 54, 55: flag = .command
+        case 56, 60: flag = .shift
+        case 58, 61: flag = .option
+        case 59, 62: flag = .control
+        default: return
+        }
+        guard let code = InputInjector.keyCodes.first(where: { $0.value == event.keyCode })?.key else { return }
+        // Aggregate flags can remain set while the other side is still held.
+        let down = event.modifierFlags.contains(flag) && !pressedKeys.contains(event.keyCode)
+        if down { pressedKeys.insert(event.keyCode) } else { pressedKeys.remove(event.keyCode) }
+        model.keyEvent(code, action: down ? "down" : "up", modifiers: modifiers(event))
     }
     override func resignFirstResponder() -> Bool {
         model.releaseInput(); pressedKeys.removeAll(); pointerDown = false; unmarkText()
@@ -240,58 +262,25 @@ final class RemoteScreenView: NSView, NSTextInputClient {
 
 struct ViewerWindowView: View {
     @ObservedObject var model: MacViewerModel
-    let fullScreen: () -> Void
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 16) {
-                Image(systemName: "desktopcomputer").foregroundStyle(.secondary)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(model.computerName).font(.system(size: 13, weight: .semibold))
-                    Text(model.status).font(.system(size: 11)).foregroundStyle(.secondary)
-                }
-                Spacer()
-                if model.connected {
-                    if model.session.state?.permissions.annotate == true {
-                        Button { model.changeMode(model.mode == .draw ? .control : .draw) } label: {
-                            Label(model.mode == .draw ? "Управлять" : "Рисовать", systemImage: model.mode == .draw ? "cursorarrow" : "pencil.tip")
-                        }.disabled(model.mode == .paused || (model.mode == .draw && model.session.state?.permissions.control != true))
-                        if model.mode == .draw {
-                            Button("Отменить рисунок") { model.editInk("undo") }
-                        }
+        ZStack {
+            Color.black
+            MacRemoteScreen(model: model)
+            if !model.connected || !model.receivedFrame {
+                Color(nsColor: .windowBackgroundColor)
+                VStack(spacing: 16) {
+                    if model.connecting || model.connected { ProgressView() }
+                    Text(model.status).font(.title2.weight(.semibold))
+                    if !model.detail.isEmpty { Text(model.detail).foregroundStyle(.secondary).multilineTextAlignment(.center) }
+                    if !model.connecting && !model.connected {
+                        Button("Подключиться снова") { model.connect() }.buttonStyle(.borderedProminent).controlSize(.large)
                     }
-                    Button { fullScreen() } label: { Image(systemName: "arrow.up.left.and.arrow.down.right") }.help("На весь экран")
-                }
-                Button("Отключиться") { model.disconnect() }
-            }.buttonStyle(.borderless).padding(.horizontal, 20).padding(.vertical, 13)
-            Divider()
-            ZStack {
-                Color.black
-                MacRemoteScreen(model: model)
-                if !model.connected || !model.receivedFrame {
-                    Color.black
-                    VStack(spacing: 16) {
-                        if model.connecting || model.connected { ProgressView().tint(.white) }
-                        Image(systemName: model.connecting ? "desktopcomputer" : "display.trianglebadge.exclamationmark").font(.system(size: 40)).foregroundStyle(.white.opacity(0.6))
-                        Text(model.status).font(.title2.weight(.medium))
-                        Text(model.detail).foregroundStyle(.white.opacity(0.65)).multilineTextAlignment(.center).frame(maxWidth: 410)
-                        if !model.connecting && !model.connected { Button("Подключиться снова") { model.connect() }.controlSize(.large) }
-                    }.foregroundStyle(.white).padding(40)
-                }
+                }.frame(maxWidth: 420).padding(32)
             }
-            HStack {
-                Label(model.session.state?.permissions.control == true ? "Клавиатура и мышь" : "Просмотр экрана", systemImage: "lock.shield")
-                if model.session.state?.surface.id.hasPrefix("window:") == true {
-                    Text("· Отдельное окно").help("Ввод направлен в выбранное окно. Курсор другого Mac остаётся на месте. Буфер обмена общий.")
-                }
-                if !model.clipboardStatus.isEmpty {
-                    Text("·")
-                    Label(model.clipboardStatus, systemImage: "doc.on.clipboard")
-                        .lineLimit(1)
-                        .help("Текст, изображения и файлы копируются между этими Mac во время подключения.")
-                }
-                Spacer()
-                Text("⌘⌥Esc — освободить клавиатуру")
-            }.font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 20).padding(.vertical, 9)
-        }.frame(minWidth: 720, minHeight: 480)
+        }
+        .frame(minWidth: 640, minHeight: 420)
+        .alert("Не удалось вставить", isPresented: Binding(get: { model.pasteFailure != nil }, set: { if !$0 { model.pasteFailure = nil } })) {
+            Button("OK") { model.pasteFailure = nil }
+        } message: { Text(model.pasteFailure ?? "") }
     }
 }

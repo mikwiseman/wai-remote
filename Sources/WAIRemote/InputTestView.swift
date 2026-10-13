@@ -6,14 +6,14 @@ struct InputTestView: View {
     @State private var text = ""
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            Text("WAI REMOTE / ПРОВЕРКА ВВОДА MACOS").font(.system(size: 12, weight: .semibold, design: .monospaced)).tracking(2).foregroundStyle(.secondary)
-            Text("Настоящие кнопки.\nНастоящий ввод.").font(.system(size: 36, weight: .semibold)).tracking(-1).fixedSize(horizontal: false, vertical: true)
+            Text("WAI Remote").font(.system(size: 12, weight: .semibold, design: .monospaced)).tracking(2).foregroundStyle(.secondary)
+            Text("Проверка управления").font(.system(size: 36, weight: .semibold)).tracking(-1).fixedSize(horizontal: false, vertical: true)
             Text("Проверьте клик, текст и рисунки поверх экрана.").font(.system(size: 16)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 28) {
                 Button("Нажать для проверки") { clicks += 1; PerformanceLog.record("test-click", ["count": clicks]) }.buttonStyle(.borderedProminent).controlSize(.large).tint(Color(red:0.23,green:0.38,blue:0.31))
                 Text("Нажатий: \(clicks)").font(.system(size: 28, weight: .medium)).monospacedDigit()
             }
-            TextField("Введите текст с пульта", text: $text).textFieldStyle(.roundedBorder).font(.system(size: 16)).controlSize(.large).accessibilityLabel("Тестовый текст")
+            TextField("Введите текст с другого устройства", text: $text).textFieldStyle(.roundedBorder).font(.system(size: 16)).controlSize(.large).accessibilityLabel("Тестовый текст")
             if PerformanceLog.enabled {
                 TimelineView(.animation(minimumInterval: 1.0 / 60)) { context in
                     VStack(alignment: .leading, spacing: 6) {

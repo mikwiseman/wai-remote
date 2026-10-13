@@ -26,6 +26,7 @@ enum PerformanceLog {
         "qualityLimitationReason", "qualityLimitationDurations", "encoderImplementation", "decoderImplementation",
         "jitter", "jitterBufferDelay", "jitterBufferTargetDelay", "jitterBufferEmittedCount",
         "freezeCount", "totalFreezesDuration", "nackCount", "pliCount", "keyFramesDecoded",
+        "fecPacketsReceived", "fecPacketsDiscarded",
         "currentRoundTripTime", "roundTripTime", "availableOutgoingBitrate", "availableIncomingBitrate",
         "state", "nominated", "candidateType", "protocol", "relayProtocol", "networkType",
         "selectedCandidatePairId", "localCandidateId", "remoteCandidateId", "powerEfficientEncoder", "powerEfficientDecoder"

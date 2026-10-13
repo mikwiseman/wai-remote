@@ -62,7 +62,7 @@ private final class InjectedEvents {
                 if pressed.frame.contains(p) { _ = pressed.press(if: isCurrent) }
                 return
             }
-            if action == "down", b == 0, keys.isEmpty, buttons.isEmpty,
+            if action == "down", b == 0, keys.isEmpty, buttons.isEmpty, (m.modifiers ?? []).isEmpty,
                let pressed = windowTarget?.button(at: p) {
                 windowButton = pressed; return
             }
@@ -77,7 +77,7 @@ private final class InjectedEvents {
             if action == "scroll" {
                 let event = CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 2,
                                     wheel1: Int32(-(m.deltaY ?? 0)), wheel2: Int32(-(m.deltaX ?? 0)), wheel3: 0)
-                event?.location = p; post(event)
+                event?.location = p; event?.flags = Self.flags(m.modifiers ?? []); post(event)
             } else {
                 if action == "down" {
                     guard !buttons.contains(b) else { return }
@@ -89,6 +89,7 @@ private final class InjectedEvents {
                 if action == "up" && !buttons.contains(b) { return }
                 let type: CGEventType = action == "down" ? down : action == "up" ? up : buttons.isEmpty ? .mouseMoved : drag
                 let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: p, mouseButton: button)
+                event?.flags = Self.flags(m.modifiers ?? [])
                 event?.setIntegerValueField(.mouseEventClickState, value: Int64(clickCounts[b] ?? 0))
                 if windowTarget != nil {
                     event?.setIntegerValueField(CGEventField(rawValue: 58)!, value: windowGesture)
@@ -128,8 +129,9 @@ private final class InjectedEvents {
         windowButton = nil
         for b in buttons {
             let type: CGEventType = b == 2 ? .rightMouseUp : b == 1 ? .otherMouseUp : .leftMouseUp
-            post(CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: lastPoint,
-                         mouseButton: b == 2 ? .right : b == 1 ? .center : .left), releasing: true)
+            let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: lastPoint,
+                                mouseButton: b == 2 ? .right : b == 1 ? .center : .left)
+            event?.flags = []; post(event, releasing: true)
         }
         for code in keys { let event = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: false); event?.flags = []; post(event, releasing: true) }
         buttons.removeAll(); keys.removeAll(); clickCounts.removeAll(); clickSequence.reset()

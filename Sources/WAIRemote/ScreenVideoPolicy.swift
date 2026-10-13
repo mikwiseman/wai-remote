@@ -1,6 +1,19 @@
 import WebRTC
 
 enum ScreenVideoPolicy {
+    /// Call once, before creating any WebRTC object.
+    static func initializeWebRTC() {
+        RTCInitFieldTrialDictionary([
+            // A ceiling alone lets the jitter estimator remove frame pacing.
+            "WebRTC-ForcePlayoutDelay": "min_ms:60,max_ms:70",
+            // Drain the screen-sharing pacer at 100 ms instead of 2875 ms.
+            "WebRTC-ProbingScreenshareBwe": "1.0,100,80,40,-60,3",
+            // H264 with NACK disables ULPFEC. Negotiate the supported repair
+            // stream so isolated losses need not wait a network round trip.
+            kRTCFieldTrialFlexFec03AdvertisedKey: kRTCFieldTrialEnabledValue,
+            kRTCFieldTrialFlexFec03Key: kRTCFieldTrialEnabledValue
+        ])
+    }
     static func screenCodecs(_ supported: [RTCVideoCodecInfo]) -> [RTCVideoCodecInfo] {
         supported.map { codec in
             guard codec.name == "H264", let profile = codec.parameters["profile-level-id"], profile.count == 6 else { return codec }

@@ -42,7 +42,8 @@ public final class SessionMachine {
             e.releaseInput = true; e.stateChanged = true; e.inkChanged = true
         case "pointer":
             guard canControl(m), let action = m.action, ["move", "down", "up", "scroll"].contains(action),
-                  let x = m.x, let y = m.y, InkPoint(x, y).isValid else { return e }
+                  let x = m.x, let y = m.y, InkPoint(x, y).isValid,
+                  (m.modifiers ?? []).allSatisfy({ ["Meta", "Control", "Alt", "Shift"].contains($0) }) else { return e }
             if action == "scroll" {
                 guard let dx = m.deltaX, let dy = m.deltaY, dx.isFinite, dy.isFinite,
                       abs(dx) <= 2000, abs(dy) <= 2000 else { return e }

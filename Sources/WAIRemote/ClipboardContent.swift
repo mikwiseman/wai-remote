@@ -14,6 +14,13 @@ struct ClipboardContent: Codable {
     static func isReceived(_ board: NSPasteboard) -> Bool {
         (board.types ?? []).contains { $0 == received || $0 == handoff }
     }
+    /// Dictation apps temporarily conceal text to keep it out of clipboard
+    /// history. An explicit Paste inserts that text through the input channel,
+    /// without exporting it to the remote clipboard or a clipboard cache.
+    static func textForExplicitInsertion(from board: NSPasteboard) -> String? {
+        guard (board.types ?? []).contains(concealed) else { return nil }
+        return board.string(forType: .string)
+    }
     struct Snapshot {
         struct Item { var representations: [Representation]; var file: URL? }
         var items: [Item]
@@ -27,6 +34,15 @@ struct ClipboardContent: Codable {
             case .invalid: "Не удалось прочитать буфер обмена."
             }
         }
+    }
+
+    static func pasteFailureDescription(_ error: Error) -> String {
+        if let failure = error as? Failure { return failure.localizedDescription }
+        let cocoa = error as NSError
+        if cocoa.domain == NSCocoaErrorDomain && cocoa.code == NSFileReadNoPermissionError {
+            return "Нет доступа к скопированному файлу. Разрешите WAI Remote доступ к его папке в настройках macOS и повторите вставку."
+        }
+        return "Не удалось прочитать содержимое буфера обмена. Скопируйте его и повторите вставку."
     }
 
     static func read(from board: NSPasteboard) throws -> Self? {

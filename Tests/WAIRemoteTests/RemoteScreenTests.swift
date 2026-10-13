@@ -8,6 +8,104 @@ import AVFoundation
 
 @MainActor
 final class RemoteScreenTests: XCTestCase {
+    private final class InputRecorder: MacViewerModel {
+        var input: [(key: String, action: String, modifiers: [String])] = []
+        var operations: [WireMessage] = []
+        let host = SessionMachine(surface: Surface(id: "test", width: 1920, height: 1080))
+        override var canControl: Bool { true }
+        override func keyEvent(_ key: String, action: String, modifiers: [String] = []) {
+            input.append((key, action, modifiers))
+        }
+        override func send(_ type: String, edit: (inout WireMessage) -> Void = { _ in }) -> Bool {
+            var message = WireMessage(type: type, state: host.state)
+            message.sequence = operations.count
+            edit(&message)
+            operations.append(message)
+            return true
+        }
+    }
+
+    func testLongDictationIsDeliveredCompletelyInValidTextPackets() {
+        let model = InputRecorder(identity: DeviceIdentity())
+        let screen = RemoteScreenView(model: model)
+        let text = String(repeating: "Надиктованный текст 👨‍👩‍👧‍👦 café.\n", count: 400)
+        screen.insertText(NSAttributedString(string: text), replacementRange: NSRange(location: NSNotFound, length: 0))
+        XCTAssertEqual(model.operations.compactMap(\.text).joined(), text)
+        XCTAssertGreaterThan(model.operations.count, 1)
+        for (index, message) in model.operations.enumerated() {
+            XCTAssertLessThanOrEqual(message.text?.utf16.count ?? 0, 4096)
+            XCTAssertEqual(model.host.handle(message, now: Double(index)).input?.text, message.text)
+        }
+    }
+
+    func testLocalWindowShortcutsAreNotSentToTheRemoteMac() throws {
+        _ = NSApplication.shared
+        let model = InputRecorder(identity: DeviceIdentity())
+        let screen = RemoteScreenView(model: model)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 480),
+            styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = screen
+        defer { window.close() }
+        window.makeFirstResponder(screen)
+        for (code, character): (UInt16, String) in [(4, "h"), (46, "m"), (43, ","), (29, "0")] {
+            let event = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command,
+                timestamp: 0, windowNumber: window.windowNumber, context: nil, characters: character,
+                charactersIgnoringModifiers: character, isARepeat: false, keyCode: code))
+            XCTAssertFalse(screen.performKeyEquivalent(with: event))
+        }
+        XCTAssertTrue(model.input.isEmpty, "Hide, minimize, settings and home belong to the local app.")
+    }
+
+    func testPointerCarriesCurrentModifiersAfterAShortcut() throws {
+        let model = InputRecorder(identity: DeviceIdentity())
+        let screen = RemoteScreenView(model: model)
+        screen.frame = NSRect(x: 0, y: 0, width: 1920, height: 1080)
+        for flags: NSEvent.ModifierFlags in [.shift, []] {
+            let event = try XCTUnwrap(NSEvent.mouseEvent(with: .leftMouseDown, location: NSPoint(x: 100, y: 100),
+                modifierFlags: flags, timestamp: 0, windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+            screen.mouseDown(with: event)
+        }
+        XCTAssertEqual(model.operations.map(\.modifiers), [["Shift"], []])
+    }
+
+    func testMenuShortcutDoesNotLeaveCommandHeld() {
+        let model = InputRecorder(identity: DeviceIdentity())
+        model.key("KeyC", modifiers: ["Meta"])
+        XCTAssertEqual(model.input.map(\.modifiers), [["Meta"], []])
+    }
+
+    func testControlArrowShortcutReleasesControlBeforeTheNextClick() throws {
+        let model = InputRecorder(identity: DeviceIdentity())
+        let screen = RemoteScreenView(model: model)
+        func event(_ type: NSEvent.EventType, _ code: UInt16, _ flags: NSEvent.ModifierFlags) throws -> NSEvent {
+            try XCTUnwrap(NSEvent.keyEvent(with: type, location: .zero, modifierFlags: flags,
+                timestamp: 0, windowNumber: 0, context: nil, characters: "", charactersIgnoringModifiers: "",
+                isARepeat: false, keyCode: code))
+        }
+        screen.flagsChanged(with: try event(.flagsChanged, 59, .control))
+        screen.keyDown(with: try event(.keyDown, 126, .control))
+        screen.keyUp(with: try event(.keyUp, 126, .control))
+        screen.flagsChanged(with: try event(.flagsChanged, 59, []))
+
+        XCTAssertEqual(model.input.map(\.key), ["ControlLeft", "ArrowUp", "ArrowUp", "ControlLeft"])
+        XCTAssertEqual(model.input.map(\.action), ["down", "down", "up", "up"])
+        XCTAssertEqual(model.input.last?.modifiers, [], "A later click must not inherit Control from Mission Control.")
+    }
+
+    func testReleasingOneShiftDoesNotReleaseTheOtherShift() throws {
+        let model = InputRecorder(identity: DeviceIdentity())
+        let screen = RemoteScreenView(model: model)
+        for (code, flags): (UInt16, NSEvent.ModifierFlags) in [(56, .shift), (60, .shift), (56, .shift), (60, [])] {
+            let event = try XCTUnwrap(NSEvent.keyEvent(with: .flagsChanged, location: .zero, modifierFlags: flags,
+                timestamp: 0, windowNumber: 0, context: nil, characters: "", charactersIgnoringModifiers: "",
+                isARepeat: false, keyCode: code))
+            screen.flagsChanged(with: event)
+        }
+        XCTAssertEqual(model.input.map(\.key), ["ShiftLeft", "ShiftRight", "ShiftLeft", "ShiftRight"])
+        XCTAssertEqual(model.input.map(\.action), ["down", "down", "up", "up"])
+        XCTAssertEqual(model.input.map(\.modifiers), [["Shift"], ["Shift"], ["Shift"], []])
+    }
+
     func testDecodedVideoUsesTheNativePixelBufferDisplay() throws {
         let model = MacViewerModel(identity: DeviceIdentity())
         let factory = RTCPeerConnectionFactory()

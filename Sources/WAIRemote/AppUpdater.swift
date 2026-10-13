@@ -22,7 +22,10 @@ final class AppUpdater: ObservableObject {
             MainActor.assumeIsolated { self?.canCheckForUpdates = updater.canCheckForUpdates }
         }
         do { try controller.updater.start() }
-        catch { startupFailure = "Не удалось запустить обновления: " + error.localizedDescription }
+        catch {
+            PerformanceLog.record("updater-error", ["domain": (error as NSError).domain, "code": (error as NSError).code])
+            startupFailure = "Не удалось запустить проверку обновлений. Закройте WAI Remote и откройте снова."
+        }
     }
     var automaticChecksEnabled: Bool {
         get { controller.updater.automaticallyChecksForUpdates }
