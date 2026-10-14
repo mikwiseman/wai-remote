@@ -34,10 +34,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     self.model = HostModel(identity: identity)
                     self.viewer = MacViewerModel(identity: identity)
                     if UserDefaults.standard.bool(forKey: "continueSharingAfterPermissionRestart") {
+                        _ = SharingRelaunch.take()
                         UserDefaults.standard.removeObject(forKey: "continueSharingAfterPermissionRestart")
                         self.model.permissionRequested = true
                         self.model.start(lab: false)
-                    }
+                    } else { self.model.resumeAfterUpdate() }
                     self.window.contentViewController = NSHostingController(rootView: HomeView(host: self.model, viewer: self.viewer, connect: self.connect))
                     self.window.setContentSize(NSSize(width: 640, height: 600))
                     self.model.$pending.sink { [weak self] value in if value != nil { self?.showHome() } }.store(in: &self.subscriptions)
@@ -148,7 +149,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             if viewer.connected || viewer.connecting { showWindow() } else { showHome() }
         } else { pendingURL = url }
     }
-    func applicationWillTerminate(_ notification: Notification) { viewer?.disconnect(); model?.stop() }
+    func applicationWillTerminate(_ notification: Notification) {
+        if updater.relaunchingForUpdate { model?.prepareForUpdateRelaunch() }
+        viewer?.disconnect(); model?.stop()
+    }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { showWindow(); return false }
 }

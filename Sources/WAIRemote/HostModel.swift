@@ -124,6 +124,40 @@ final class HostModel: ObservableObject {
     private func openPermissionSettings(_ pane: String) {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?" + pane) { NSWorkspace.shared.open(url) }
     }
+    func prepareForUpdateRelaunch() {
+        var target: SharingRelaunch.Target?
+        if sharing, !isLab, SharingRelaunch.sessionActive {
+            if let window = capturedWindow, let pid = window.owningApplication?.processID,
+               let launchedAt = NSRunningApplication(processIdentifier: pid)?.launchDate {
+                target = .window(pid: pid, id: window.windowID, launchedAt: launchedAt)
+            } else if capturedWindow == nil, let display = capturedDisplay {
+                target = .display(display.displayID)
+            }
+        }
+        SharingRelaunch.save(target)
+    }
+    @MainActor func resumeAfterUpdate() {
+        guard let target = SharingRelaunch.take() else { return }
+        permissionRequested = true
+        switch target {
+        case .display(let id):
+            guard id == CGMainDisplayID() else {
+                status = "Общий экран изменился. Откройте доступ ещё раз."; return
+            }
+            start(lab: false)
+        case .window(let pid, let id, let launchedAt):
+            let generation = connectionGeneration
+            Task { @MainActor in
+                let content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false)
+                guard connectionGeneration == generation, !sharing, !starting, SharingRelaunch.sessionActive else { return }
+                guard NSRunningApplication(processIdentifier: pid)?.launchDate == launchedAt,
+                      let window = content?.windows.first(where: { $0.windowID == id && $0.owningApplication?.processID == pid }) else {
+                    status = "Общее окно закрыто. Выберите другое окно."; return
+                }
+                start(lab: false, window: window)
+            }
+        }
+    }
     func restartForPermissions() {
         let resumeKey = "continueSharingAfterPermissionRestart"
         UserDefaults.standard.set(true, forKey: resumeKey)

@@ -1,6 +1,44 @@
 # Responsiveness verification
 
-Work in progress, 13 October 2026. Target: the user's MacBook and **waiMini**, not Mark's Mac.
+Work in progress, 14 October 2026. Target: the user's MacBook and **waiMini**, not Mark's Mac.
+
+## Update handoff, candidate 48
+
+The updater now saves an already-open sharing target at Sparkle's actual relaunch termination. The next higher build consumes that intent once, within five minutes and in the same unlocked login session. A selected window retains its process, launch date and window identity; it cannot turn into whole-screen sharing. Closed access, an unchanged/downgraded build, a reboot or login-session change, and an expired intent do not reopen access. Ordinary app launches remain unchanged. This is an update handoff, not unattended access or login-screen support.
+
+Validation before packaging: **102 Swift tests, 101 passed, one explicit network-integration skip**, zero failures; Go race tests and the web production build passed. Five new tests cover the handoff and Sparkle delegate lifecycle. Actual **48→49** installation is required to verify the old process writes the handoff and the new process restores it; installing 48 from 47 alone cannot prove that behavior. The web build's transitive development dependency `source-map-js` was updated from 1.2.1 to 1.2.2 after npm audit reported GHSA-68fv-2mgg-jv7q; the rebuilt viewer passes and the new audit reports zero vulnerabilities.
+
+## Mini recovery and both-device build 47 verification, 14 October
+
+SSH and the existing Mini Codex task became reachable again. WAI Remote 46 was installed but not running. The reason it had stopped is unconfirmed; Mini had rebooted earlier that day, which alone does not establish the cause. Starting its existing application and opening screen access restored the MacBook connection. The application is in the Mini user's Applications folder, not the system Applications folder.
+
+Mini then completed the actual Sparkle **46→47** download, installation and relaunch. The installed executable matches the notarized candidate, strict code-signature and Gatekeeper checks pass, and its temporary preview-feed override was removed. Identity, trusted devices and macOS permissions were retained. Screen access was reopened manually after installation. This exposed an updater lifecycle gap in build 47: it does not restore that previously open access. Evidence: `.runtime/build47-mini-installed.json`.
+
+With both devices on 47, three remote clicks advanced the owned native counter exactly 0→3. An ordinary local TextEdit copy containing Cyrillic, Latin, emoji and punctuation pasted into the Mini field. After adding ` 47` on Mini, Copy and native Paste into a new MacBook TextEdit document preserved all **169 UTF-8 bytes**, SHA-256 `72f2ae671c1f4b606a34232121549a7c6cce7c79887492ca72dc145a3ea690a8`. Matching WAI send/receive/acknowledgement IDs at both endpoints establish that these transfers traversed WAI. Send-to-ACK took **254 ms forward and 234 ms back**, measured on each sender's own clock. They are not optical latency measurements. Evidence: `.runtime/build47-both-roundtrip.{txt,json}` and `.runtime/mini47-clipboard.jsonl`. The earlier user-confirmed OpenRamble test remains the live microphone evidence; it was not repeated on 47.
+
+Today's devices share an IPv4 subnet, while the actual WAI sessions use the public TURN service through their existing VPN interfaces. This is not a fresh separate-network test. The opt-in same-machine WebRTC clipboard integration test was also retried and still failed to establish ICE; it is not counted as passed or attributed conclusively to the firewall. Log: `.runtime/build47-network-retest.log`.
+
+## Build 47: sustained native 4K UDP observation
+
+The **13:22:34.401–13:27:34.401 UTC** observation used the built-in native clock/moving-bar fixture in macOS full screen. This is a sparse animation, not motion across the whole screen. Both endpoints independently reported **relay/UDP** and native 3840×2160 H.264/VideoToolbox. AnyDesk was disconnected, other workloads were unchanged, and no test GUI actions, builds, installs or uploads ran during the interval.
+
+| Measurement | Result |
+| --- | --- |
+| Received fps median / decoded frames | 58 / 17,212 |
+| Decoder drops | 0 |
+| Input ACK p50 / p95 / max | 224.766 / 370.450 / 862.118 ms, 599 heartbeats |
+| Network RTT p50 / p95 / max | 222 / 355 / 435 ms |
+| Video-buffer p50 / p95 / max | 31.992 / 80.829 / 85.678 ms |
+| Completed freezes | 49, 10.571 / 299.003 seconds (**3.54%**) |
+| Decode-input / display-enqueue largest gap | 741.896 / 726.072 ms |
+| Host capture median / largest gap | 57.595 fps / 34.443 ms |
+| Host input queue p95 / max | 1.536 / 2.884 ms |
+
+The unchanged smoothness gates **failed**. AVFoundation separately counted 17,221 displayed frames over 299.614 seconds (57.477 fps), with zero dropped/corrupted frames. Interval RTP counters recorded 18,341 received packets, no net packet loss and no additional NACK, FEC or PLI packets. Capture remained substantially steadier than receiver delivery. These observations locate the large gaps downstream of capture but do not isolate network delivery from WebRTC timing. No packet loss does not imply steady packet arrival. Median video traffic was about 0.194 Mbit/s for this sparse scene. Evidence: `.runtime/build47-native-udp{,-observation}.json`, `.runtime/build47-native-udp.jsonl`, and `.runtime/mini47-native-udp.{jsonl,json}`. Frame-timing batches can include samples just before the exact observation boundary; RTC interval totals and native display deltas are reported separately.
+
+The matching **13:44:32.441–13:49:32.441 UTC** run verified **relay/TCP at both endpoints** and kept the same 4K clock/bar scene. It received median 58 fps and decoded 16,617 frames without drops. There were 24 completed freezes totaling **5.512 / 299.004 seconds (1.84%)**. ACK p50/p95/max was **181.300 / 534.757 / 854.797 ms**, with 600 samples; video-buffer p50/p95/max was **89.589 / 121.456 / 233.987 ms**. Network RTT p95 was 533 ms. Native display deltas counted 16,617 frames over 299.446 seconds (55.492 fps), without drops or corruption. RTP counters showed no additional lost packets, NACKs or PLIs. Host capture median was 57.740 fps, its largest source gap was 148.941 ms, and input-queue p95 was 1.035 ms.
+
+TCP reduced completed-freeze time in this observation but increased buffer residence and the upper input-latency tail. It also **failed** the unchanged gates and does not justify forcing TCP in production. Both diagnostic overrides were removed after measurement. Evidence: `.runtime/build47-native-tcp{,-observation}.json`, `.runtime/build47-native-tcp.jsonl`, and `.runtime/mini47-native-tcp.{jsonl,json}`. No test actions, builds, installs or uploads ran during the interval; local source edits did not change the installed applications.
 
 ## Build 46: pasteboard stalls and actual clipboard round trip
 

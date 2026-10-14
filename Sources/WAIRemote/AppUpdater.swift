@@ -3,14 +3,15 @@ import Combine
 import Sparkle
 
 @MainActor
-final class AppUpdater: ObservableObject {
+final class AppUpdater: NSObject, ObservableObject, SPUUpdaterDelegate {
     @Published private(set) var canCheckForUpdates = false
     @Published private(set) var startupFailure: String?
-    private let controller: SPUStandardUpdaterController
+    private(set) var relaunchingForUpdate = false
+    private lazy var controller = SPUStandardUpdaterController(startingUpdater: false, updaterDelegate: self, userDriverDelegate: nil)
     private var observation: NSKeyValueObservation?
 
-    init() {
-        controller = SPUStandardUpdaterController(startingUpdater: false, updaterDelegate: nil, userDriverDelegate: nil)
+    override init() {
+        super.init()
         let key = Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") as? String
         let feed = (Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") as? String).flatMap(URL.init(string:))
         guard let key, Data(base64Encoded: key)?.count == 32,
@@ -27,6 +28,8 @@ final class AppUpdater: ObservableObject {
             startupFailure = "Не удалось запустить проверку обновлений. Закройте WAI Remote и откройте снова."
         }
     }
+    func updaterWillRelaunchApplication(_ updater: SPUUpdater) { relaunchingForUpdate = true }
+    func updater(_ updater: SPUUpdater, didAbortWithError error: Error) { relaunchingForUpdate = false }
     var automaticChecksEnabled: Bool {
         get { controller.updater.automaticallyChecksForUpdates }
         set { objectWillChange.send(); controller.updater.automaticallyChecksForUpdates = newValue }
