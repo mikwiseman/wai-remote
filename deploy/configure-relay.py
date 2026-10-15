@@ -24,7 +24,6 @@ server-name=WAI-Remote
 fingerprint
 use-auth-secret
 static-auth-secret=''' + key.read_text().strip() + '''
-no-udp
 no-tls
 no-dtls
 no-tcp-relay
@@ -36,7 +35,7 @@ denied-peer-ip=::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
 allowed-peer-ip=65.108.215.2
 user-quota=4
 total-quota=64
-max-bps=2500000
+max-bps=5000000
 bps-capacity=20000000
 max-allocate-lifetime=3600
 stale-nonce=600

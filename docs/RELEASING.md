@@ -29,11 +29,11 @@ The current deployment uses HTTPS at `waiwai.is/remote/connect/` with a loopback
 
 The files under `deploy/` are the actual service templates. Their domain, IP and paths are deployment-specific: replace them for another installation. Run the gateway and coturn as a dedicated unprivileged user. Generate the shared REST secret once using `deploy/configure-relay.py`; restrict the resulting files to root and the service group. Never put the secret into source, a browser bundle, command output or a release.
 
-The public relay uses coturn 4.18.0, TCP 3478 and a bounded UDP relay range. Peer addresses are restricted to the relay itself, because both endpoints use relay-only ICE. Allow the relay range only between the relay's own public address and itself. Keep allocation, bandwidth and gateway admission limits enabled. A deployment test must connect two devices on different networks and verify fresh video and input, not just a successful WebSocket or TURN allocation. Networks that block this TURN transport need separate validation.
+The public relay uses coturn 4.18.0, UDP and TCP 3478, and a bounded UDP relay range. Updated native clients advertise `iceVersion: 2` and use UDP relay with TCP fallback. Direct VPN routes are disabled after measured multi-second SCTP stalls; see `PERFORMANCE.md`. Older clients retain their TCP relay configuration until their gathering logic is updated. Relay peer addresses remain restricted to the relay itself. Allow UDP/TCP 3478 publicly, and allow the relay range only between the relay's own public address and itself. Keep allocation, bandwidth and gateway admission limits enabled. A deployment test must connect two devices on different networks and verify fresh video and input, not just a successful WebSocket or TURN allocation. Networks that block this TURN transport need separate validation.
 
 After changing nginx, validate its configuration and reload it. If an edge proxy mirrors the origin configuration, wait for or trigger that sync before checking the public URL. Confirm `/remote/connect/healthz`, real device authentication, the remote session, download responses and update feed through the public hostname.
 
-The host must remain awake, unlocked and explicitly sharing. This release does not provide login-screen access, audio, file transfer or a service availability guarantee.
+The host must remain awake, unlocked and explicitly sharing. The stable release does not provide login-screen access, audio, file transfer or a service availability guarantee. Candidate 28 adds native clipboard files up to 100 MiB; it has not been promoted to stable.
 
 ## Native input regression
 

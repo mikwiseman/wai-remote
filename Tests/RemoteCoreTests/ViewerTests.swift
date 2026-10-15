@@ -66,4 +66,20 @@ final class ViewerTests: XCTestCase {
         XCTAssertNil(viewer.make("pointer"))
         XCTAssertNotNil(viewer.make("heartbeat"))
     }
+
+    func testViewOnlyGuestCanFinishDrawingWithoutGainingControl() throws {
+        let host = SessionMachine(surface: .init(id: "s", width: 1280, height: 800),
+                                  permissions: .init(control: false, annotate: true))
+        var viewer = ViewerSession()
+        try viewer.accept(host.state)
+        XCTAssertTrue(host.handle(try XCTUnwrap(viewer.changeMode(.draw)), now: 0).accepted)
+        let finish = try XCTUnwrap(viewer.changeMode(.control), "Finishing a drawing must return to viewing.")
+        XCTAssertTrue(host.handle(finish, now: 1).accepted)
+        try viewer.accept(host.state)
+        XCTAssertEqual(viewer.mode, .control)
+        XCTAssertFalse(host.state.permissions.control)
+        var pointer = try XCTUnwrap(viewer.make("pointer"))
+        pointer.action = "down"; pointer.x = 0.5; pointer.y = 0.5; pointer.button = 0
+        XCTAssertNil(host.handle(pointer, now: 2).input, "Leaving Draw must never grant input permission.")
+    }
 }

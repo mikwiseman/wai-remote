@@ -33,7 +33,7 @@ public struct ViewerSession {
     }
     public mutating func changeMode(_ next: RemoteMode) -> WireMessage? {
         guard let state, !invalidated, mode != .paused, next != .paused,
-              next == .draw ? state.permissions.annotate : state.permissions.control else { return nil }
+              next != .draw || state.permissions.annotate else { return nil }
         generation += 1; mode = next
         var message = make("mode"); message?.mode = next; return message
     }

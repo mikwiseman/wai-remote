@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import WebRTC
 import RemoteCore
+import AVFoundation
 
 struct MacRemoteScreen: NSViewRepresentable {
     @ObservedObject var model: MacViewerModel
@@ -11,23 +12,66 @@ struct MacRemoteScreen: NSViewRepresentable {
 }
 
 private final class FrameRenderer: NSObject, RTCVideoRenderer {
-    let video: RTCMTLNSVideoView
+    private let display: AVSampleBufferVideoRenderer
     var onFrame: (() -> Void)?
     private let lock = NSLock()
     private var delivered = false
-    init(video: RTCMTLNSVideoView) { self.video = video }
-    func setSize(_ size: CGSize) { video.setSize(size) }
+    private var previousFrameTime = 0.0
+    private var reportTime = 0.0
+    private var frameGaps: [Double] = []
+    private let timing = FrameTimingLog("render")
+    private let enqueuing = FrameTimingLog("display-enqueue")
+    private var active = true
+    init(display: AVSampleBufferDisplayLayer) { self.display = display.sampleBufferRenderer }
+    func stop() {
+        lock.lock()
+        active = false
+        display.flush(removingDisplayedImage: true)
+        lock.unlock()
+    }
+    func setSize(_ size: CGSize) {} // RemoteViewport owns the aspect-fit geometry.
     func renderFrame(_ frame: RTCVideoFrame?) {
-        video.renderFrame(frame)
-        guard frame != nil else { return }
-        lock.lock(); let first = !delivered; delivered = true; lock.unlock()
+        guard let frame else { return }
+        timing.frame(frame.timeStampNs)
+        lock.lock()
+        defer { lock.unlock() }
+        guard active else { return }
+        if display.status == .failed { display.flush() }
+        // Never create an application-side video queue or block the UI waiting
+        // for a drawable. The next decoded frame supersedes a congested frame.
+        guard display.isReadyForMoreMediaData, let sample = VideoSampleBuffer.make(frame) else {
+            PerformanceLog.record("display-skipped")
+            return
+        }
+        display.enqueue(sample)
+        enqueuing.frame(frame.timeStampNs)
+        let first = !delivered; delivered = true
+        if PerformanceLog.enabled {
+            let now = ProcessInfo.processInfo.systemUptime
+            if previousFrameTime > 0 { frameGaps.append((now - previousFrameTime) * 1000) }
+            previousFrameTime = now
+            if reportTime == 0 { reportTime = now }
+            if now - reportTime >= 1, !frameGaps.isEmpty {
+                let gaps = frameGaps.sorted()
+                PerformanceLog.record("renderer", ["fps": Double(gaps.count) / (now - reportTime),
+                    "gapP95Ms": gaps[Int(ceil(Double(gaps.count) * 0.95)) - 1],
+                    "gapMaxMs": gaps.last!, "gapsOver100Ms": gaps.filter { $0 > 100 }.count])
+                display.loadVideoPerformanceMetrics { metrics in
+                    guard let metrics else { return }
+                    PerformanceLog.record("display-metrics", ["frames": metrics.totalNumberOfFrames,
+                        "dropped": metrics.numberOfDroppedFrames, "corrupted": metrics.numberOfCorruptedFrames,
+                        "delaySeconds": metrics.totalAccumulatedFrameDelay])
+                }
+                frameGaps.removeAll(keepingCapacity: true); reportTime = now
+            }
+        }
         if first { DispatchQueue.main.async { [weak self] in self?.onFrame?() } }
     }
 }
 
 final class RemoteScreenView: NSView, NSTextInputClient {
     private let model: MacViewerModel
-    private var video: RTCMTLNSVideoView?
+    private var video: DecodedVideoView?
     private let ink = InkView()
     private var renderer: FrameRenderer?
     private var track: RTCVideoTrack?
@@ -55,20 +99,24 @@ final class RemoteScreenView: NSView, NSTextInputClient {
     }
     override func layout() {
         super.layout()
+        let frame = videoFrame
+        if let video, video.frame != frame { video.frame = frame }
+        if ink.frame != frame { ink.frame = frame }
+    }
+    private var videoFrame: NSRect {
         let fit = viewport
-        let frame = NSRect(x: fit.x, y: fit.y, width: fit.width, height: fit.height)
-        video?.frame = frame
-        ink.frame = frame
+        return NSRect(x: fit.x, y: fit.y, width: fit.width, height: fit.height)
     }
     func update() {
         if track !== model.track {
             detach()
             if let track = model.track {
-                // Metal keeps its last texture, so each track needs a fresh surface.
-                let video = RTCMTLNSVideoView(frame: .zero)
+                // Each track gets a fresh layer, so a disconnected Mac cannot
+                // leave its last frame behind the next connection's status.
+                let video = DecodedVideoView(frame: .zero)
                 self.video = video; self.track = track
                 addSubview(video, positioned: .below, relativeTo: ink)
-                let renderer = FrameRenderer(video: video)
+                let renderer = FrameRenderer(display: video.display)
                 renderer.onFrame = { [weak self, weak model, weak track] in
                     guard let self, let model, let track,
                           self.track === track, model.track === track else { return }
@@ -78,12 +126,15 @@ final class RemoteScreenView: NSView, NSTextInputClient {
             }
         }
         ink.referenceWidth = Double(model.session.state?.surface.width ?? 1920)
-        ink.strokes = model.visibleStrokes
-        needsLayout = true
+        let strokes = model.visibleStrokes
+        if ink.strokes != strokes { ink.strokes = strokes }
+        let frame = videoFrame
+        if ink.frame != frame || (video != nil && video?.frame != frame) { needsLayout = true }
     }
     func detach() {
         renderer?.onFrame = nil
         if let renderer { track?.remove(renderer) }
+        renderer?.stop()
         renderer = nil; track = nil
         video?.removeFromSuperview(); video = nil
         pressedKeys.removeAll(); pointerDown = false
@@ -104,7 +155,7 @@ final class RemoteScreenView: NSView, NSTextInputClient {
         if action == "down" { window?.makeFirstResponder(self); pointerDown = true }
         if model.canDraw, button == 0 {
             switch action { case "down": model.beginStroke(at: point); case "move" where pointerDown: model.appendStroke(at: point); case "up": model.endStroke(); default: break }
-        } else { model.pointer(action, at: point, button: button) }
+        } else { model.pointer(action, at: point, button: button, modifiers: modifiers(event)) }
         if action == "up" { pointerDown = false }
     }
     override func mouseDown(with event: NSEvent) { pointer("down", event) }
@@ -116,7 +167,7 @@ final class RemoteScreenView: NSView, NSTextInputClient {
     override func rightMouseDragged(with event: NSEvent) { pointer("move", event, button: 2) }
     override func scrollWheel(with event: NSEvent) {
         guard let point = point(event) else { return }
-        model.pointer("scroll", at: point, dx: -Double(event.scrollingDeltaX), dy: -Double(event.scrollingDeltaY))
+        model.pointer("scroll", at: point, dx: -Double(event.scrollingDeltaX), dy: -Double(event.scrollingDeltaY), modifiers: modifiers(event))
     }
     private func modifiers(_ event: NSEvent) -> [String] {
         [(.command, "Meta"), (.control, "Control"), (.option, "Alt"), (.shift, "Shift")]
@@ -129,16 +180,23 @@ final class RemoteScreenView: NSView, NSTextInputClient {
             model.releaseInput(); window?.makeFirstResponder(nil)
             return event.keyCode != 12
         }
+        let flags = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        if (flags == .command && [4, 46, 43, 29].contains(event.keyCode)) ||
+            (flags == [.command, .option] && event.keyCode == 4) {
+            model.releaseInput(); pressedKeys.removeAll()
+            return false
+        }
         if event.keyCode == 9 && !event.modifierFlags.contains(.shift) {
             paste(nil); return true
         }
         keyDown(with: event); return true
     }
     @objc func paste(_ sender: Any?) {
-        let text = NSPasteboard.general.string(forType: .string)
-        guard model.canControl, let text else { return }
-        model.text(text)
+        model.paste()
     }
+    @objc func copy(_ sender: Any?) { model.key("KeyC", modifiers: ["Meta"]) }
+    @objc func cut(_ sender: Any?) { model.key("KeyX", modifiers: ["Meta"]) }
+    override func selectAll(_ sender: Any?) { model.key("KeyA", modifiers: ["Meta"]) }
     override func keyDown(with event: NSEvent) {
         guard model.canControl else { return }
         if event.modifierFlags.intersection([.command, .control]).isEmpty,
@@ -153,6 +211,22 @@ final class RemoteScreenView: NSView, NSTextInputClient {
         guard pressedKeys.remove(event.keyCode) != nil,
               let code = InputInjector.keyCodes.first(where: { $0.value == event.keyCode })?.key else { return }
         model.keyEvent(code, action: "up", modifiers: modifiers(event))
+    }
+    override func flagsChanged(with event: NSEvent) {
+        guard model.canControl else { return }
+        let flag: NSEvent.ModifierFlags
+        switch event.keyCode {
+        case 54, 55: flag = .command
+        case 56, 60: flag = .shift
+        case 58, 61: flag = .option
+        case 59, 62: flag = .control
+        default: return
+        }
+        guard let code = InputInjector.keyCodes.first(where: { $0.value == event.keyCode })?.key else { return }
+        // Aggregate flags can remain set while the other side is still held.
+        let down = event.modifierFlags.contains(flag) && !pressedKeys.contains(event.keyCode)
+        if down { pressedKeys.insert(event.keyCode) } else { pressedKeys.remove(event.keyCode) }
+        model.keyEvent(code, action: down ? "down" : "up", modifiers: modifiers(event))
     }
     override func resignFirstResponder() -> Bool {
         model.releaseInput(); pressedKeys.removeAll(); pointerDown = false; unmarkText()
@@ -188,47 +262,25 @@ final class RemoteScreenView: NSView, NSTextInputClient {
 
 struct ViewerWindowView: View {
     @ObservedObject var model: MacViewerModel
-    let fullScreen: () -> Void
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 16) {
-                Image(systemName: "desktopcomputer").foregroundStyle(.secondary)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(model.computerName).font(.system(size: 13, weight: .semibold))
-                    Text(model.status).font(.system(size: 11)).foregroundStyle(.secondary)
-                }
-                Spacer()
-                if model.connected {
-                    Button { model.changeMode(model.mode == .draw ? .control : .draw) } label: {
-                        Label(model.mode == .draw ? "Управлять" : "Рисовать", systemImage: model.mode == .draw ? "cursorarrow" : "pencil.tip")
-                    }.disabled(model.mode == .paused || (model.mode == .draw && model.session.state?.permissions.control != true))
-                    if model.mode == .draw {
-                        Button("Отменить рисунок") { model.editInk("undo") }
+        ZStack {
+            Color.black
+            MacRemoteScreen(model: model)
+            if !model.connected || !model.receivedFrame {
+                Color(nsColor: .windowBackgroundColor)
+                VStack(spacing: 16) {
+                    if model.connecting || model.connected { ProgressView() }
+                    Text(model.status).font(.title2.weight(.semibold))
+                    if !model.detail.isEmpty { Text(model.detail).foregroundStyle(.secondary).multilineTextAlignment(.center) }
+                    if !model.connecting && !model.connected {
+                        Button("Подключиться снова") { model.connect() }.buttonStyle(.borderedProminent).controlSize(.large)
                     }
-                    Button { fullScreen() } label: { Image(systemName: "arrow.up.left.and.arrow.down.right") }.help("На весь экран")
-                }
-                Button("Отключиться") { model.disconnect() }
-            }.buttonStyle(.borderless).padding(.horizontal, 20).padding(.vertical, 13)
-            Divider()
-            ZStack {
-                Color.black
-                MacRemoteScreen(model: model)
-                if !model.connected || !model.receivedFrame {
-                    Color.black
-                    VStack(spacing: 16) {
-                        if model.connecting || model.connected { ProgressView().tint(.white) }
-                        Image(systemName: model.connecting ? "desktopcomputer" : "display.trianglebadge.exclamationmark").font(.system(size: 40)).foregroundStyle(.white.opacity(0.6))
-                        Text(model.status).font(.title2.weight(.medium))
-                        Text(model.detail).foregroundStyle(.white.opacity(0.65)).multilineTextAlignment(.center).frame(maxWidth: 410)
-                        if !model.connecting && !model.connected { Button("Подключиться снова") { model.connect() }.controlSize(.large) }
-                    }.foregroundStyle(.white).padding(40)
-                }
+                }.frame(maxWidth: 420).padding(32)
             }
-            HStack {
-                Label(model.session.state?.permissions.control == true ? "Клавиатура и мышь" : "Просмотр экрана", systemImage: "lock.shield")
-                Spacer()
-                Text("⌘⌥Esc — освободить клавиатуру")
-            }.font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 20).padding(.vertical, 9)
-        }.frame(minWidth: 720, minHeight: 480)
+        }
+        .frame(minWidth: 640, minHeight: 420)
+        .alert("Не удалось вставить", isPresented: Binding(get: { model.pasteFailure != nil }, set: { if !$0 { model.pasteFailure = nil } })) {
+            Button("OK") { model.pasteFailure = nil }
+        } message: { Text(model.pasteFailure ?? "") }
     }
 }

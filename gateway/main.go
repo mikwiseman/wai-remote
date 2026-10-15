@@ -85,17 +85,23 @@ func (h *hub) serve(w http.ResponseWriter, r *http.Request) {
 	current := &client{hello: hello, conn: c}
 	h.mu.Lock()
 	registered := false
+	hostUnavailable := hello.Role == "viewer" && h.relay != nil && h.hosts[hello.HostID] == nil
 	if hello.Role == "host" {
 		if h.hosts[hello.HostID] == nil && len(h.hosts) < 100 {
 			h.hosts[hello.HostID] = current
 			registered = true
 		}
-	} else if (h.relay == nil || h.hosts[hello.HostID] != nil) && h.viewers[viewerKey(hello.HostID, hello.PeerID)] == nil && len(h.viewers) < 400 {
+	} else if !hostUnavailable && h.viewers[viewerKey(hello.HostID, hello.PeerID)] == nil && len(h.viewers) < 400 {
 		h.viewers[viewerKey(hello.HostID, hello.PeerID)] = current
 		registered = true
 	}
 	h.mu.Unlock()
 	if !registered {
+		if hostUnavailable {
+			_ = current.send(map[string]string{"type": "unavailable"})
+			c.Close(websocket.StatusNormalClosure, "host unavailable")
+			return
+		}
 		c.Close(websocket.StatusPolicyViolation, "identity already connected or capacity reached")
 		return
 	}
@@ -111,7 +117,7 @@ func (h *hub) serve(w http.ResponseWriter, r *http.Request) {
 	ready := map[string]any{"type": "ready"}
 	lastRelay := time.Now()
 	if h.relay != nil {
-		ready["ice"] = h.relay.issue(hello.PeerID, lastRelay)
+		ready["ice"] = h.relay.forClient(hello, lastRelay)
 	}
 	if h.ice != nil {
 		if h.ice.ExpiresAt <= time.Now().Unix() {
@@ -145,7 +151,7 @@ func (h *hub) serve(w http.ResponseWriter, r *http.Request) {
 		if msg.Type == "ping" {
 			if h.relay != nil && hello.Role == "host" && time.Since(lastRelay) >= 30*time.Minute {
 				lastRelay = time.Now()
-				if current.send(map[string]any{"type": "relay", "ice": h.relay.issue(hello.PeerID, lastRelay)}) != nil {
+				if current.send(map[string]any{"type": "relay", "ice": h.relay.forClient(hello, lastRelay)}) != nil {
 					return
 				}
 			}

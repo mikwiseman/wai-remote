@@ -4,13 +4,34 @@ import (
 	"crypto/hmac"
 	"crypto/sha1"
 	"encoding/base64"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
 
+func TestPublicICEUsesUDPRelayWithTCPFallback(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(path, []byte(strings.Repeat("s", 32)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	r, err := loadRelay(path, "127.0.0.1:8790", "203.0.113.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ice := r.issue("peer", time.Now())
+	if ice.Policy != "relay" {
+		t.Fatal("public connections must use the verified relay route")
+	}
+	urls := ice.Servers[0].URLs
+	if len(urls) != 2 || urls[0] != "turn:203.0.113.1:3478?transport=udp" || urls[1] != "turn:203.0.113.1:3478?transport=tcp" {
+		t.Fatalf("want UDP relay with TCP fallback, got %v", urls)
+	}
+}
+
 func TestRelayCredentialsAreBoundedAndDistinct(t *testing.T) {
-	r := &relayIssuer{secret: []byte(strings.Repeat("s", 32)), url: "turn:203.0.113.1:3478?transport=tcp"}
+	r := &relayIssuer{secret: []byte(strings.Repeat("s", 32)), urls: []string{"turn:203.0.113.1:3478?transport=udp", "turn:203.0.113.1:3478?transport=tcp"}}
 	now := time.Unix(1700000000, 0)
 	a, b := r.issue("alice", now), r.issue("bob", now)
 	if a.Policy != "relay" || a.ExpiresAt != now.Add(time.Hour).Unix() || a.Servers[0].Username == b.Servers[0].Username {

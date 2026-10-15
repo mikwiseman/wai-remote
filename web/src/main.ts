@@ -6,19 +6,18 @@ import {iceConfiguration} from './ice';
 
 document.querySelector<HTMLDivElement>('#app')!.innerHTML=`
   <section id="welcome" class="welcome">
-    <header class="wordmark">WAI / REMOTE <span>ЛИЧНОЕ ПРОСТРАНСТВО</span></header>
-    <div class="intro"><div class="eyebrow">БЛИЖЕ, ЧЕМ КАЖЕТСЯ</div><h1>Ваш Mac.<br>Под рукой.</h1><p>Откройте экран. Сделайте нужное.<br>Нарисуйте то, что проще показать.</p></div>
+    <header class="wordmark">WAI Remote</header>
+    <div class="intro"><h1>Подключиться к Mac</h1><p>На другом Mac откройте WAI Remote и выберите «Поделиться экраном».</p></div>
     <form id="connectForm" class="connect-form">
-      <label for="invite">Ссылка с вашего Mac</label>
+      <label for="invite">Приглашение</label>
       <textarea id="invite" rows="2" placeholder="Вставьте приглашение из WAI Remote" spellcheck="false" autocomplete="off"></textarea>
-      <div class="form-row"><label for="deviceName">Это устройство</label><input id="deviceName" maxlength="50" value="Мой браузер" autocomplete="off"></div>
-      <button id="connect" class="primary" type="submit">Подключиться <span>↗</span></button>
-      <p id="connectStatus" class="status" role="status">Доступ начинается с вашего разрешения на Mac.</p>
+      <div class="form-row"><label for="deviceName">Название этого устройства</label><input id="deviceName" maxlength="50" value="Мой браузер" autocomplete="off"></div>
+      <button id="connect" class="primary" type="submit">Подключиться</button>
+      <p id="connectStatus" class="status" role="status"></p>
     </form>
-    <footer><span>Экран · управление · рисунки</span><span>Технический прототип / 0.1</span></footer>
   </section>
   <section id="session" class="session hidden">
-    <header class="session-header"><div class="brand">WAI <span>/ REMOTE</span></div><div id="connectionLabel" class="connection-label" role="status">Подключение…</div><button id="disconnect" class="quiet">Отключиться <span>↗</span></button></header>
+    <header class="session-header"><div class="brand">WAI Remote</div><div id="connectionLabel" class="connection-label" role="status">Подключение…</div><button id="disconnect" class="quiet">Отключиться</button></header>
     <main id="viewport" class="viewport">
       <div id="screen" class="screen" aria-label="Удалённый экран"><video id="video" autoplay muted playsinline></video><canvas id="ink" aria-label="Рисование и управление удалённым экраном" tabindex="0"></canvas><div id="pauseBanner" class="pause-banner hidden" role="status">Управление приостановлено на Mac</div></div>
       <div id="waiting" class="waiting">Ждём изображение…</div>
@@ -26,11 +25,11 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML=`
     <div id="typingPanel" class="typing-panel hidden"><label for="typing">Текст на Mac</label><textarea id="typing" rows="1" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Печатайте здесь…"></textarea><button id="hideKeyboard" class="quiet">Готово</button></div>
     <nav class="dock" aria-label="Пульт управления">
       <div class="mode-switch" role="group" aria-label="Режим"><button id="control" class="selected" aria-pressed="true">↖ <span>Управлять</span></button><button id="draw" aria-pressed="false">✎ <span>Рисовать</span></button></div>
-      <div id="drawTools" class="tools hidden" role="group" aria-label="Рисование"><select id="tool" aria-label="Инструмент"><option value="pen">Перо</option><option value="marker">Маркер</option><option value="arrow">Стрелка</option><option value="laser">Лазер</option><option value="eraser">Ластик</option><option value="select">Выделить</option></select><button id="color" class="color" aria-label="Цвет: коралловый" title="Следующий цвет"></button><select id="width" aria-label="Толщина"><option value="2">Тонко</option><option value="4" selected>Средне</option><option value="8">Толсто</option></select><button id="deleteObject" class="hidden" title="Удалить выбранный объект · Delete">Удалить</button><button id="undo" title="Отменить действие" aria-label="Отменить действие">↶</button><button id="redo" title="Повторить действие" aria-label="Повторить действие">↷</button><button id="clear" title="Удалить свои рисунки">Очистить</button></div>
+      <div id="drawTools" class="tools hidden" role="group" aria-label="Рисование"><select id="tool" aria-label="Инструмент"><option value="pen">Перо</option><option value="marker">Маркер</option><option value="arrow">Стрелка</option><option value="laser">Лазер</option><option value="eraser">Ластик</option><option value="select">Выделить</option></select><button id="color" class="color" aria-label="Цвет: коралловый" title="Следующий цвет"></button><select id="width" aria-label="Толщина"><option value="2">Тонко</option><option value="4" selected>Средне</option><option value="8">Толсто</option></select><button id="deleteObject" class="hidden" title="Удалить выбранный объект (Delete)">Удалить</button><button id="undo" title="Отменить действие" aria-label="Отменить действие">↶</button><button id="redo" title="Повторить действие" aria-label="Повторить действие">↷</button><button id="clear" title="Удалить свои рисунки">Очистить</button></div>
       <div id="controlTools" class="tools"><button id="keyboard" aria-label="Открыть клавиатуру">⌨ <span>Клавиатура</span></button><select id="touchMode" aria-label="Управление касанием"><option value="direct">Касание</option><option value="trackpad">Трекпад</option></select><button id="rightClick" title="Правый клик">Правый клик</button></div>
       <button id="fit" class="fit" title="Вписать экран">Вписать</button>
     </nav>
-    <div id="hint" class="session-hint">Один палец — курсор · два — прокрутка · удержание — перетаскивание</div>
+    <div id="hint" class="session-hint">Перемещайте курсор одним пальцем, прокручивайте двумя. Удерживайте палец для перетаскивания.</div>
   </section>`;
 
 function el<T extends HTMLElement=HTMLElement>(id:string){return document.getElementById(id) as T;}
@@ -57,15 +56,18 @@ let navigationGesture:'pending'|'pan'|'zoom'|undefined,navigationStart:Point|und
 let invalidated=false;
 const pressedPhysical=new Set<string>();
 
-function readInvitation(){if(location.hash){el<HTMLTextAreaElement>('invite').value=location.href;history.replaceState(null,'',location.pathname);}}
+function updateConnectButton(){el<HTMLButtonElement>('connect').disabled=!el<HTMLTextAreaElement>('invite').value.trim();}
+el('invite').addEventListener('input',updateConnectButton);
+function readInvitation(){if(location.hash){el<HTMLTextAreaElement>('invite').value=location.href;history.replaceState(null,'',location.pathname);updateConnectButton();}}
 const initialHash=location.hash;
 if(initialHash){readInvitation();}
 else {const saved=localStorage.getItem('wai-last-host');if(saved)el<HTMLTextAreaElement>('invite').value=saved;}
 window.addEventListener('hashchange',readInvitation);
+updateConnectButton();
 el<HTMLInputElement>('deviceName').value=localStorage.getItem('wai-device-name')||(matchMedia('(pointer:coarse)').matches?'Мой телефон':'Мой браузер');
 
 function status(text:string){el('connectStatus').textContent=text;el('connectionLabel').textContent=text;}
-function fail(error:unknown){cleanup();status(error instanceof Error?error.message:'Не удалось подключиться');el<HTMLButtonElement>('connect').disabled=false;}
+function fail(error:unknown){cleanup();status(error instanceof Error && !(error instanceof TypeError) && !(error instanceof DOMException) && !(error instanceof SyntaxError) && !(error instanceof RangeError)?error.message:'Не удалось подключиться. Проверьте приглашение и повторите попытку.');el<HTMLButtonElement>('connect').disabled=false;}
 function cleanup(){
   connectionToken++;live=false;host=undefined;invalidated=false;
   clearInterval(heartbeat);clearInterval(ping);clearTimeout(connectTimeout);clearTimeout(longPress);
@@ -81,12 +83,12 @@ el('connectForm').addEventListener('submit',async event=>{
   event.preventDefault();cleanup();const token=connectionToken;
   try{
     const url=new URL(el<HTMLTextAreaElement>('invite').value.trim());
-    if(url.origin!==location.origin)throw new Error('Откройте пульт по адресу из приглашения: '+url.origin);
+    if(url.origin!==location.origin)throw new Error('Откройте приглашение в браузере по указанному в нём адресу.');
     const fragment=new URLSearchParams(url.hash.slice(1));
     hostKey=fragment.get('key')??'';hostID=fragment.get('host')??'';pairSecret=fragment.get('secret')??'';
     if(!hostKey||await keyID(hostKey)!==hostID)throw new Error('Ссылка повреждена. Скопируйте новое приглашение на Mac.');
     if(pairSecret&&unb64(pairSecret).length!==32)throw new Error('Некорректное приглашение');
-    el<HTMLButtonElement>('connect').disabled=true;status('Готовим защищённое подключение…');
+    el<HTMLButtonElement>('connect').disabled=true;status('Подключаемся…');
     device=await identity();if(token!==connectionToken)return;
     const name=el<HTMLInputElement>('deviceName').value.trim()||'Моё устройство';localStorage.setItem('wai-device-name',name);
     const socket=new WebSocket(new URL('signal',location.href).href.replace(/^http/,'ws'));ws=socket;
@@ -108,11 +110,11 @@ el('connectForm').addEventListener('submit',async event=>{
           if(token!==connectionToken)return;
           if(answer.nonce!==nonce||answer.hostID!==hostID||answer.peerID!==device.id)throw new Error('Ответ не относится к этому подключению');
           await pc!.setRemoteDescription({type:'answer',sdp:answer.sdp});
-          status(answer.lab?'Проверочный экран · WebRTC':'Соединение с Mac');
+          status(answer.lab?'Проверка изображения':'Подключаемся…');
           const saved=new URL(location.pathname,location.origin);saved.hash=new URLSearchParams({host:hostID,key:hostKey}).toString();localStorage.setItem('wai-last-host',saved.href);
           el<HTMLTextAreaElement>('invite').value=saved.href;pairSecret='';
         }else if(m.type==='reject'){
-          throw new Error(m.body?.reason==='busy'?'На Mac уже подключено устройство. Отключите его в приложении.':m.body?.reason==='new-invite-required'?'Для настоящего экрана нужно новое приглашение с Mac.':'Mac отклонил подключение.');
+          throw new Error(m.body?.reason==='busy'?'На Mac уже подключено устройство. Отключите его в WAI Remote.':m.body?.reason==='new-invite-required'?'Создайте новое приглашение в WAI Remote на Mac.':'Mac отклонил подключение.');
         }else if(m.type==='unavailable')throw new Error('Mac недоступен. Откройте доступ в приложении.');
       }catch(error){if(token===connectionToken)fail(error);}
     };
@@ -131,12 +133,12 @@ async function createOffer(name:string,token:number,configuration:RTCConfigurati
   peer.onconnectionstatechange=()=>{
     if(token!==connectionToken)return;
     if(peer.connectionState==='failed')fail(new Error('Не удалось передать изображение. Проверьте сеть и откройте подключение заново.'));
-    if(peer.connectionState==='disconnected'){release();el('connectionLabel').textContent='Связь прервалась · ввод остановлен';}
+    if(peer.connectionState==='disconnected'){release();el('connectionLabel').textContent='Соединение прервано';}
   };
   await peer.setLocalDescription(await peer.createOffer());
   await new Promise<void>((resolve,reject)=>{
     if(peer.iceGatheringState==='complete'){resolve();return;}
-    const timer=setTimeout(()=>{peer.removeEventListener('icegatheringstatechange',change);reject(new Error('Не удалось найти сетевой маршрут'));},12000);
+    const timer=setTimeout(()=>{peer.removeEventListener('icegatheringstatechange',change);reject(new Error('Не удалось подключиться. Проверьте интернет на обоих устройствах.'));},12000);
     function change(){if(peer.iceGatheringState==='complete'){clearTimeout(timer);peer.removeEventListener('icegatheringstatechange',change);resolve();}}
     peer.addEventListener('icegatheringstatechange',change);
   });
@@ -169,8 +171,7 @@ function receive(raw:unknown){
       host=next;invalidated=false;
       if(!live){live=true;clearTimeout(connectTimeout);el('welcome').classList.add('hidden');el('session').classList.remove('hidden');heartbeat=window.setInterval(()=>{if(!document.hidden)send('heartbeat');},500);send('heartbeat');}
       updateMode();layout();
-      el('connectionLabel').textContent=m.lab?'Проверочный экран · WebRTC':'Ваш Mac · соединение защищено';
-      if(next.reason==='connection-stalled')el('connectionLabel').textContent='Связь восстановлена · ввод сброшен';
+      el('connectionLabel').textContent=m.lab?'Проверка изображения':next.permissions.control?'':'Только просмотр';
     }else if(m.type==='ink'){
       const op=m.op;const id=op.strokeID as string;
       if(op.type==='strokeBegin')strokes.set(id,{id,author:m.author,tool:op.tool,color:op.color,width:op.width,points:op.points,complete:false});
@@ -188,16 +189,17 @@ function receive(raw:unknown){
 
 function updateMode(){
   for(const value of ['control','draw'] as const){el(value).classList.toggle('selected',mode===value);el(value).setAttribute('aria-pressed',String(mode===value));}
-  el<HTMLButtonElement>('control').disabled=!host?.permissions.control||mode==='paused';
+  el('control').textContent=host?.permissions.control?'Управлять':'Смотреть';
+  el<HTMLButtonElement>('control').disabled=!host||mode==='paused';
   el<HTMLButtonElement>('draw').disabled=!host?.permissions.annotate||mode==='paused';
-  el('drawTools').classList.toggle('hidden',mode!=='draw');el('controlTools').classList.toggle('hidden',mode!=='control');
+  el('drawTools').classList.toggle('hidden',mode!=='draw');el('controlTools').classList.toggle('hidden',mode!=='control'||!host?.permissions.control);
   el('pauseBanner').classList.toggle('hidden',mode!=='paused');canvas.classList.toggle('drawing',mode==='draw');
-  el('hint').textContent=mode==='paused'?'Владелец Mac рисует или приостановил управление':'Касание — клик · два пальца — прокрутка · удержание — перетаскивание';
+  el('hint').textContent=mode==='paused'?'Управление приостановлено на Mac.':mode==='control'&&host?.permissions.control?'Коснитесь экрана для щелчка. Прокручивайте двумя пальцами, удерживайте палец для перетаскивания.':'';
   if(mode!=='draw')selectedID=undefined;updateTools();
   if(mode!=='control'){typing.blur();el('typingPanel').classList.add('hidden');}
 }
 function switchMode(next:Mode){
-  if(!host||mode==='paused'||(next==='control'&&!host.permissions.control)||(next==='draw'&&!host.permissions.annotate))return;
+  if(!host||mode==='paused'||(next==='draw'&&!host.permissions.annotate))return;
   cancelGesture(true);mode=next;generation++;send('mode',{mode:next});updateMode();
 }
 el('control').onclick=()=>switchMode('control');el('draw').onclick=()=>switchMode('draw');
@@ -205,7 +207,7 @@ el('tool').onchange=()=>{cancelGesture(true);selectedID=undefined;updateTools();
 el('deleteObject').onclick=()=>{if(selectedID)eraseObjects([selectedID]);};
 el('undo').onclick=()=>{cancelGesture(true);send('undo');};el('redo').onclick=()=>{cancelGesture(true);send('redo');};el('clear').onclick=()=>{cancelGesture(true);send('clear');};
 el('color').onclick=()=>{colorIndex=(colorIndex+1)%colors.length;el('color').style.backgroundColor=colors[colorIndex];el('color').setAttribute('aria-label','Цвет: '+['коралловый','синий','жёлтый','зелёный'][colorIndex]);};
-el('disconnect').onclick=()=>{release();cleanup();status('Вы отключились. Доступ на Mac остаётся открытым до его закрытия владельцем.');};
+el('disconnect').onclick=()=>{release();cleanup();status('');};
 el('fit').onclick=()=>{zoom=1;layout();};
 el('keyboard').onclick=()=>{if(mode==='control'){el('typingPanel').classList.remove('hidden');typing.focus();}};
 el('hideKeyboard').onclick=()=>{typing.blur();el('typingPanel').classList.add('hidden');};
@@ -242,7 +244,7 @@ function updateTools(){
   el('color').classList.toggle('hidden',!inkTool);el('width').classList.toggle('hidden',!inkTool);
   el('deleteObject').classList.toggle('hidden',!selectedID);
   canvas.classList.toggle('selecting',mode==='draw'&&tool==='select');
-  if(mode==='draw')el('hint').textContent=tool==='eraser'?'Проведите по своим рисункам · удаляется целый объект · ⌘Z — вернуть':tool==='select'?'Коснитесь своего рисунка · Delete или «Удалить» · Esc — снять выделение':'Рисунки видны на Mac · два пальца — масштаб · ⌘Z — отменить';
+  if(mode==='draw')el('hint').textContent=tool==='eraser'?'Проведите по рисунку, чтобы удалить его целиком. Для отмены нажмите ⌘Z.':tool==='select'?'Коснитесь рисунка и нажмите «Удалить». Нажмите Esc, чтобы снять выделение.':'Меняйте масштаб двумя пальцами. Для отмены рисунка нажмите ⌘Z.';
 }
 function segmentDistance(p:Point,a:Point,b:Point){
   const dx=b.x-a.x,dy=b.y-a.y,length=dx*dx+dy*dy;
@@ -310,7 +312,7 @@ canvas.addEventListener('pointerdown',event=>{
     longPress=window.setTimeout(()=>{if(touchPointers.size===1&&mode==='control'){dragging=true;send('pointer',{action:'down',...lastCursor,button:0});}},400);
   }else{
     if(!matchMedia('(pointer:coarse)').matches){el('typingPanel').classList.add('hidden');typing.focus({preventScroll:true});}
-    lastCursor=locationPoint(event);send('pointer',{action:'down',...lastCursor,button:event.button});dragging=true;
+    lastCursor=locationPoint(event);send('pointer',{action:'down',...lastCursor,button:event.button,modifiers:modifiers(event)});dragging=true;
   }
 });
 canvas.addEventListener('pointermove',event=>{
@@ -343,7 +345,7 @@ canvas.addEventListener('pointermove',event=>{
       if(el<HTMLSelectElement>('touchMode').value==='direct')lastCursor=locationPoint(event);
       else {const r=canvas.getBoundingClientRect();lastCursor={x:Math.min(1,Math.max(0,lastCursor.x+(event.clientX-old.x)/r.width)),y:Math.min(1,Math.max(0,lastCursor.y+(event.clientY-old.y)/r.height))};}
     }else if(event.pointerType!=='touch')lastCursor=locationPoint(event);else return;
-    send('pointer',{action:'move',...lastCursor});
+    send('pointer',{action:'move',...lastCursor,modifiers:modifiers(event)});
   }
 });
 canvas.addEventListener('pointerup',event=>{
@@ -354,29 +356,38 @@ canvas.addEventListener('pointerup',event=>{
     else if(preview){const stroke=preview;pendingStrokes.set(stroke.id,stroke);send('strokeEnd',{strokeID:stroke.id});preview=undefined;currentStrokeID=undefined;}
     else if(mode==='control'&&count<2){
       if(event.pointerType==='touch'&&!dragging&&!touchMoved&&touchStart&&performance.now()-touchStart.t<500){send('pointer',{action:'down',...lastCursor,button:0});send('pointer',{action:'up',...lastCursor,button:0});}
-      else if(dragging)send('pointer',{action:'up',...lastCursor,button:event.pointerType==='touch'?0:event.button});
+      else if(dragging)send('pointer',{action:'up',...lastCursor,button:event.pointerType==='touch'?0:event.button,modifiers:modifiers(event)});
     }
     activePointer=undefined;dragging=false;touchStart=undefined;
   }
   if(canvas.hasPointerCapture(event.pointerId))canvas.releasePointerCapture(event.pointerId);render();
 });
 canvas.addEventListener('pointercancel',()=>release());
-canvas.addEventListener('wheel',event=>{if(mode==='control'&&host){event.preventDefault();send('pointer',{action:'scroll',...locationPoint(event as unknown as PointerEvent),deltaX:Math.max(-2000,Math.min(2000,event.deltaX)),deltaY:Math.max(-2000,Math.min(2000,event.deltaY))});}},{passive:false});
+canvas.addEventListener('wheel',event=>{if(mode==='control'&&host){event.preventDefault();send('pointer',{action:'scroll',...locationPoint(event as unknown as PointerEvent),deltaX:Math.max(-2000,Math.min(2000,event.deltaX)),deltaY:Math.max(-2000,Math.min(2000,event.deltaY)),modifiers:modifiers(event)});}},{passive:false});
 
+function sendText(text:string){
+  if(text.includes('\0'))return;
+  let chunk='';
+  for(const scalar of text){
+    if(chunk.length+scalar.length>4096){if(!send('text',{text:chunk}))return;chunk='';}
+    chunk+=scalar;
+  }
+  if(chunk)send('text',{text:chunk});
+}
 let composing=false,skipComposition:string|undefined;
 typing.addEventListener('compositionstart',()=>{composing=true;});
-typing.addEventListener('compositionend',event=>{composing=false;if(mode==='control'&&event.data){send('text',{text:event.data});skipComposition=event.data;}typing.value='';});
+typing.addEventListener('compositionend',event=>{composing=false;if(mode==='control'&&event.data){sendText(event.data);skipComposition=event.data;}typing.value='';});
 typing.addEventListener('beforeinput',event=>{
   if(mode!=='control'||composing||event.isComposing)return;
   if(event.inputType==='insertText'||event.inputType==='insertFromPaste'||event.inputType==='insertCompositionText'){
-    event.preventDefault();if(event.data&&event.data!==skipComposition)send('text',{text:event.data});skipComposition=undefined;typing.value='';
+    event.preventDefault();if(event.data&&event.data!==skipComposition)sendText(event.data);skipComposition=undefined;typing.value='';
   }
   if(event.inputType==='deleteContentBackward'||event.inputType==='insertLineBreak'||event.inputType==='insertParagraph'){
     event.preventDefault();const key=event.inputType==='deleteContentBackward'?'Backspace':'Enter';send('key',{action:'down',key,modifiers:[]});send('key',{action:'up',key,modifiers:[]});
   }
 });
-typing.addEventListener('paste',event=>{event.preventDefault();const text=event.clipboardData?.getData('text/plain');if(mode==='control'&&text)send('text',{text:text.slice(0,4096)});});
-const modifiers=(event:KeyboardEvent)=>[event.metaKey?'Meta':'',event.ctrlKey?'Control':'',event.altKey?'Alt':'',event.shiftKey?'Shift':''].filter(Boolean);
+typing.addEventListener('paste',event=>{event.preventDefault();const text=event.clipboardData?.getData('text/plain');if(mode==='control'&&text)sendText(text);});
+const modifiers=(event:KeyboardEvent|MouseEvent)=>[event.metaKey?'Meta':'',event.ctrlKey?'Control':'',event.altKey?'Alt':'',event.shiftKey?'Shift':''].filter(Boolean);
 typing.addEventListener('keydown',event=>{
   if(mode!=='control'||composing||event.isComposing||event.key==='Dead'||event.key==='Unidentified')return;
   if(event.key.length>1||event.metaKey||event.ctrlKey||event.altKey){

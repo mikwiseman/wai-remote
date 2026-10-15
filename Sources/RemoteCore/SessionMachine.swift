@@ -10,9 +10,12 @@ public final class SessionMachine {
     private var lastActivity: Double?
     private var locallyPaused = false
     private var transportAvailable = true
+    private var approvedPermissions: Permissions
+    private var systemControlAllowed = true
 
     public init(surface: Surface, permissions: Permissions = .init(), author: String = "remote") {
         self.author = author
+        approvedPermissions = permissions
         state = HostState(sessionID: UUID().uuidString, controllerEpoch: 1, inputEpoch: 1,
                           modeGeneration: 0, mode: .control, permissions: permissions,
                           surface: surface, layerEpoch: 1, reason: "connected")
@@ -39,7 +42,8 @@ public final class SessionMachine {
             e.releaseInput = true; e.stateChanged = true; e.inkChanged = true
         case "pointer":
             guard canControl(m), let action = m.action, ["move", "down", "up", "scroll"].contains(action),
-                  let x = m.x, let y = m.y, InkPoint(x, y).isValid else { return e }
+                  let x = m.x, let y = m.y, InkPoint(x, y).isValid,
+                  (m.modifiers ?? []).allSatisfy({ ["Meta", "Control", "Alt", "Shift"].contains($0) }) else { return e }
             if action == "scroll" {
                 guard let dx = m.deltaX, let dy = m.deltaY, dx.isFinite, dy.isFinite,
                       abs(dx) <= 2000, abs(dy) <= 2000 else { return e }
@@ -111,9 +115,25 @@ public final class SessionMachine {
         locallyPaused = false; state.mode = transportAvailable ? .control : .paused
         return invalidate(reason: "host-resumed")
     }
+    @discardableResult public func resizeSurface(width: Int, height: Int) -> SessionEffects {
+        guard width > 0, height > 0, width != state.surface.width || height != state.surface.height else { return .init() }
+        state.surface.width = width; state.surface.height = height; state.surface.revision += 1
+        ink.clearAll(); state.layerEpoch = ink.epoch
+        return invalidate(reason: "surface-resized")
+    }
     @discardableResult public func setPermissions(_ permissions: Permissions) -> SessionEffects {
-        state.permissions = permissions
-        if !permissions.annotate { _ = ink.edit("clear", author: author); state.layerEpoch = ink.epoch }
+        approvedPermissions = permissions
+        return refreshEffectivePermissions()
+    }
+    @discardableResult public func setSystemControlAllowed(_ allowed: Bool) -> SessionEffects {
+        systemControlAllowed = allowed
+        return refreshEffectivePermissions()
+    }
+    private func refreshEffectivePermissions() -> SessionEffects {
+        let effective = Permissions(control: approvedPermissions.control && systemControlAllowed, annotate: approvedPermissions.annotate)
+        guard state.permissions != effective else { return .init() }
+        state.permissions = effective
+        if !effective.annotate { _ = ink.edit("clear", author: author); state.layerEpoch = ink.epoch }
         return invalidate(reason: "permissions-changed")
     }
     @discardableResult public func reconnect() -> SessionEffects {

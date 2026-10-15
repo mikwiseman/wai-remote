@@ -26,7 +26,7 @@ ditto .build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sp
 cp mac/Info.plist "$app_path/Contents/Info.plist"
 mkdir -p "$app_path/Contents/Resources/Licenses"
 cp LICENSE THIRD_PARTY.md "$app_path/Contents/Resources/Licenses/"
-cp licenses/*.txt "$app_path/Contents/Resources/Licenses/"
+cp -f licenses/*.txt "$app_path/Contents/Resources/Licenses/"
 swift scripts/export-menu-icon.swift
 cp mac/Resources/MenuTemplate*.png "$app_path/Contents/Resources/"
 xcrun actool mac/AppIcon.icon --compile "$app_path/Contents/Resources" --platform macosx --minimum-deployment-target 15.0 --app-icon AppIcon --output-partial-info-plist "$app_path/Contents/Resources/icon-info.plist" > /dev/null

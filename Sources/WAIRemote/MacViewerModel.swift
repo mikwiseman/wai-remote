@@ -10,18 +10,22 @@ enum DrawingTool: String, CaseIterable, Identifiable {
     var symbol: String { switch self { case .pen: "pencil.tip"; case .marker: "highlighter"; case .arrow: "arrow.up.right"; case .eraser: "eraser"; case .select: "cursorarrow" } }
 }
 
-final class MacViewerModel: ObservableObject {
+class MacViewerModel: ObservableObject {
     @Published var invitation = ""
     @Published var invitationDraft = ""
-    @Published var status = "Ваш Mac. Под рукой."
+    @Published var status = "Подключиться к Mac"
     @Published var detail = "Откройте доступ в WAI Remote на Mac и вставьте приглашение."
     @Published var connecting = false
     @Published var connected = false
+    @Published var connectionInterrupted = false
     @Published var receivedFrame = false
+    @Published var pasteFailure: String?
     @Published var track: RTCVideoTrack? {
         didSet { if track !== oldValue { receivedFrame = false } }
     }
-    @Published private(set) var session = ViewerSession()
+    // Packet sequence changes are not UI changes. Publishing every heartbeat
+    // or mouse move repeatedly invalidates the live Metal view.
+    private(set) var session = ViewerSession()
     @Published var tool: DrawingTool = .pen
     @Published var color = InkStore.colors[0]
     @Published var width = 4.0
@@ -36,10 +40,14 @@ final class MacViewerModel: ObservableObject {
     private var transport: ViewerTransport?
     private var heartbeat: Timer?
     private var timeout: Timer?
+    private var activity: NSObjectProtocol?
+    private var workspaceObservers: [NSObjectProtocol] = []
+    private var resumeInvitation: String?
     private var attempt = UUID()
     private var snapshot: [InkStroke]?
     private var activeStroke: String?
     private var erasedIDs = Set<String>()
+    private var pendingMeasurements: [String: (time: Double, kind: String)] = [:]
     private var nonce = ""
     private var answerAccepted = false
     private var offerStarted = false
@@ -60,6 +68,28 @@ final class MacViewerModel: ObservableObject {
            let saved = try? JSONDecoder().decode([SavedComputer].self, from: data) {
             computers = saved.compactMap { try? SavedComputer(invitation: $0.invitation, name: $0.name) }
         }
+        let center = NSWorkspace.shared.notificationCenter
+        workspaceObservers = [
+            center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in self?.suspendForSleep() },
+            center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in self?.resumeAfterSleep() }
+        ]
+    }
+    deinit { workspaceObservers.forEach(NSWorkspace.shared.notificationCenter.removeObserver) }
+
+    private func suspendForSleep() {
+        guard connected || connecting else { return }
+        // Only an established session may resume. A pairing request must not
+        // reappear without a fresh user action, and input is never replayed.
+        let saved = connected ? currentInvite?.savedURL.absoluteString : nil
+        disconnect(message: saved == nil ? "Подключение прервано" : "Соединение приостановлено")
+        resumeInvitation = saved
+        connectionInterrupted = saved != nil
+    }
+    private func resumeAfterSleep() {
+        guard let saved = resumeInvitation else { return }
+        resumeInvitation = nil
+        invitation = saved
+        connect()
     }
     func forget(_ id: String) { computers.removeAll { $0.id == id }; saveComputers() }
     func rename(_ id: String, name: String) {
@@ -95,7 +125,7 @@ final class MacViewerModel: ObservableObject {
             invitationDraft = ""
             currentInvite = invite
             computerName = computers.first(where: { $0.id == invite.hostID })?.name ?? "Другой Mac"
-            connecting = true; status = "Ищем ваш Mac…"; detail = "На другом Mac должны быть включены интернет и доступ к экрану."
+            connecting = true; status = "Подключаемся…"; detail = "На другом Mac должны быть включены интернет и доступ к экрану."
             let token = attempt
             let signal = ViewerSignaling(identity: identity, invite: invite); signaling = signal
             signal.onReady = { [weak self] configuration in guard let self, self.attempt == token, !self.offerStarted else { return }; self.offerStarted = true; self.createOffer(invite, token: token, ice: configuration) }
@@ -104,8 +134,8 @@ final class MacViewerModel: ObservableObject {
                 guard let self, self.attempt == token else { return }
                 if !self.connected { self.disconnect(message: "Не удалось связаться с Mac. Проверьте интернет и убедитесь, что на нём открыт доступ.") }
             }
-            timeout = Timer.scheduledTimer(withTimeInterval: 110, repeats: false) { [weak self] _ in
-                guard let self, self.attempt == token else { return }; self.disconnect(message: "Время подключения истекло. Создайте новое приглашение на другом Mac и повторите.")
+            timeout = Timer.connectionTimer(withTimeInterval: 110, repeats: false) { [weak self] _ in
+                guard let self, self.attempt == token else { return }; self.disconnect(message: "Время подключения истекло. Проверьте доступ на другом Mac и попробуйте снова.")
             }
             signal.connect()
         } catch { status = "Нужно приглашение с Mac"; detail = "Скопируйте ссылку целиком из WAI Remote. Для первого подключения нужна новая ссылка." }
@@ -118,7 +148,7 @@ final class MacViewerModel: ObservableObject {
         peer.onState = { [weak self] state in
             guard let self, self.attempt == token else { return }
             if state == .failed || state == .closed { self.disconnect(message: "Соединение закрыто. Доступ на Mac можно открыть снова.") }
-            if state == .disconnected { self.cancelGesture(notify: false); self.session.interrupt(); self.status = "Связь прервалась · ввод остановлен" }
+            if state == .disconnected { self.transport?.clipboard.setEnabled(false); self.cancelGesture(notify: false); self.session.interrupt(); self.connectionInterrupted = true; self.status = "Соединение прервано" }
         }
         peer.offer { [weak self] result in
             guard let self, self.attempt == token else { return }
@@ -159,26 +189,33 @@ final class MacViewerModel: ObservableObject {
         } else if message["type"] as? String == "unavailable" { disconnect(message: "Mac недоступен. Откройте доступ в WAI Remote на Mac.") }
         else if message["type"] as? String == "reject" {
             let reason = (message["body"] as? [String: Any])?["reason"] as? String
-            disconnect(message: reason == "busy" ? "К Mac уже подключено другое устройство." : reason == "new-invite-required" ? "Нужно новое приглашение для настоящего экрана Mac." : "Подключение отклонено на Mac.")
+            disconnect(message: reason == "busy" ? "К Mac уже подключено другое устройство." : reason == "network" ? "Не удалось установить соединение через интернет. Попробуйте подключиться снова." : reason == "new-invite-required" ? "Откройте доступ к экрану Mac и создайте новое приглашение." : "Подключение отклонено на Mac.")
         }
     }
     func disconnect(message: String = "Вы отключились") {
+        resumeInvitation = nil
         if connected, let release = session.release(), let data = try? JSONEncoder().encode(release) { _ = transport?.send(data) }
         attempt = UUID(); heartbeat?.invalidate(); heartbeat = nil; timeout?.invalidate(); timeout = nil
         signaling?.close(); signaling = nil; transport?.close(); transport = nil
-        connecting = false; connected = false; receivedFrame = false; track = nil; session = ViewerSession()
+        if let activity { ProcessInfo.processInfo.endActivity(activity); self.activity = nil }
+        connecting = false; connected = false; connectionInterrupted = false; receivedFrame = false; track = nil; session = ViewerSession()
         strokes = []; previews = [:]; snapshot = nil; hiddenIDs = []; erasedIDs = []; activeStroke = nil; selectedID = nil
         answerAccepted = false; offerStarted = false; gestureRevision += 1
-        currentInvite = nil
-        if !message.isEmpty { status = message; detail = "Подключитесь снова, когда доступ на Mac открыт." }
+        currentInvite = nil; pendingMeasurements.removeAll(); pasteFailure = nil
+        if !message.isEmpty { status = message; detail = "" }
     }
     func releaseInput() { cancelGesture(notify: true); _ = transmit(session.release()) }
     @discardableResult private func transmit(_ operation: WireMessage?) -> Bool {
         guard let operation, let data = try? JSONEncoder().encode(operation) else { return false }
-        guard transport?.send(data) == true else { disconnect(message: "Передача остановлена. Подключитесь заново."); return false }
+        if PerformanceLog.enabled && (operation.type == "heartbeat" || operation.type == "pointer" && operation.action != "move") {
+            let now = ProcessInfo.processInfo.systemUptime
+            pendingMeasurements = pendingMeasurements.filter { now - $0.value.time < 30 }
+            pendingMeasurements[operation.operationID] = (now, operation.action ?? operation.type)
+        }
+        guard transport?.send(data) == true else { disconnect(message: "Соединение прервано"); return false }
         return true
     }
-    @discardableResult private func send(_ type: String, edit: (inout WireMessage) -> Void = { _ in }) -> Bool {
+    @discardableResult func send(_ type: String, edit: (inout WireMessage) -> Void = { _ in }) -> Bool {
         guard var operation = session.make(type) else { return false }; edit(&operation); return transmit(operation)
     }
     private func decode<T: Decodable>(_ object: Any, as: T.Type) throws -> T { try JSONDecoder().decode(T.self, from: JSONSerialization.data(withJSONObject: object)) }
@@ -186,15 +223,24 @@ final class MacViewerModel: ObservableObject {
         do {
             guard let m = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
             switch m["type"] as? String {
+            case "performanceAck":
+                if let id = m["id"] as? String, let sent = pendingMeasurements.removeValue(forKey: id) {
+                    PerformanceLog.record("input-roundtrip", ["kind": sent.kind, "ms": (ProcessInfo.processInfo.systemUptime - sent.time) * 1000])
+                }
             case "state":
                 let state = try decode(m["state"] ?? [:], as: HostState.self)
+                objectWillChange.send()
                 if try session.accept(state) { cancelGesture(notify: false) }
+                connectionInterrupted = false
                 if !connected {
                     connected = true; connecting = false; timeout?.invalidate(); timeout = nil
+                    activity = ProcessInfo.processInfo.beginActivity(options: .userInteractive, reason: "WAI Remote live screen")
                     remember()
-                    heartbeat = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in _ = self?.send("heartbeat") }
+                    heartbeat = Timer.connectionTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in _ = self?.send("heartbeat") }
                 }
-                status = mode == .paused ? "Владелец Mac приостановил управление" : m["lab"] as? Bool == true ? "Проверочный экран" : "Ваш Mac · защищённое соединение"
+                status = mode == .paused ? "Владелец Mac приостановил управление" : m["lab"] as? Bool == true ? "Проверочный экран" : "Подключено"
+                transport?.clipboard.onPasteFailure = { [weak self] message in self?.pasteFailure = message }
+                transport?.clipboard.setEnabled(state.permissions.control && state.mode != .paused && m["lab"] as? Bool != true)
             case "ink":
                 let op = try decode(m["op"] ?? [:], as: WireMessage.self)
                 guard let id = op.strokeID else { return }
@@ -221,13 +267,13 @@ final class MacViewerModel: ObservableObject {
                 if !strokes.contains(where: { $0.id == selectedID }) { selectedID = nil }
             default: break
             }
-        } catch { disconnect(message: "Mac прислал некорректное состояние. Подключение остановлено.") }
+        } catch { disconnect(message: "Не удалось продолжить соединение. Подключитесь снова.") }
     }
     func changeMode(_ mode: RemoteMode) { cancelGesture(notify: true); _ = transmit(session.changeMode(mode)); selectedID = nil }
     func changeTool(_ value: DrawingTool) { cancelGesture(notify: true); tool = value; selectedID = nil }
-    func pointer(_ action: String, at point: InkPoint, button: Int = 0, dx: Double = 0, dy: Double = 0) {
+    func pointer(_ action: String, at point: InkPoint, button: Int = 0, dx: Double = 0, dy: Double = 0, modifiers: [String] = []) {
         guard canControl else { return }; lastCursor = point
-        send("pointer") { $0.action = action; $0.x = point.x; $0.y = point.y; $0.button = button; $0.deltaX = min(2000, max(-2000, dx)); $0.deltaY = min(2000, max(-2000, dy)) }
+        send("pointer") { $0.action = action; $0.x = point.x; $0.y = point.y; $0.button = button; $0.deltaX = min(2000, max(-2000, dx)); $0.deltaY = min(2000, max(-2000, dy)); $0.modifiers = modifiers }
     }
     func rightClick() { pointer("down", at: lastCursor, button: 2); pointer("up", at: lastCursor, button: 2) }
     func keyEvent(_ key: String, action: String, modifiers: [String] = []) {
@@ -236,11 +282,38 @@ final class MacViewerModel: ObservableObject {
     }
     func key(_ key: String, modifiers: [String] = []) {
         guard canControl else { return }
-        for action in ["down", "up"] { send("key") { $0.key = key; $0.action = action; $0.modifiers = modifiers } }
+        keyEvent(key, action: "down", modifiers: modifiers)
+        keyEvent(key, action: "up")
     }
     func text(_ text: String) {
-        guard canControl, !text.isEmpty, text.utf16.count <= 4096, !text.contains("\0") else { return }
-        send("text") { $0.text = text }
+        guard canControl, !text.isEmpty, !text.contains("\0") else { return }
+        PerformanceLog.record("text-submit", ["units": text.utf16.count])
+        var chunk = "", units = 0
+        for scalar in text.unicodeScalars {
+            let count = scalar.utf16.count
+            if units + count > 4096 {
+                guard send("text", edit: { $0.text = chunk }) else { return }
+                chunk = ""; units = 0
+            }
+            chunk.unicodeScalars.append(scalar); units += count
+        }
+        if !chunk.isEmpty { send("text") { $0.text = chunk } }
+    }
+    func paste() {
+        PerformanceLog.record("paste-request", ["canControl": canControl,
+            "concealed": (NSPasteboard.general.types ?? []).contains(ClipboardContent.concealed),
+            "hasText": (NSPasteboard.general.types ?? []).contains(.string),
+            "clipboardReady": transport?.clipboard.available == true])
+        guard canControl else { return }
+        if let text = ClipboardContent.textForExplicitInsertion(from: .general) {
+            self.text(text)
+        } else if let clipboard = transport?.clipboard, clipboard.available {
+            let epoch = session.state?.inputEpoch
+            clipboard.pushCurrent { [weak self] in
+                guard let self, self.canControl, self.session.state?.inputEpoch == epoch else { return }
+                self.key("KeyV", modifiers: ["Meta"])
+            }
+        } else if let text = NSPasteboard.general.string(forType: .string) { self.text(text) }
     }
     func beginStroke(at point: InkPoint) {
         guard canDraw, let identity, let inkTool = InkTool(rawValue: tool.rawValue) else { return }
