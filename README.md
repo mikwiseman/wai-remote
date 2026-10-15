@@ -16,7 +16,7 @@ Requires **macOS 15 or later**, on Apple Silicon or Intel. Install WAI Remote on
 
 Both computers need internet. They can be on different networks. The sharing Mac must be awake and unlocked; locking it or putting it to sleep closes access. Stop sharing or revoke a saved device from the app at any time.
 
-The Mac viewer supports mouse, keyboard, text paste, drawing and full screen. **⌘⌥Esc** releases the viewer's keyboard focus; **⌘Q** quits locally. File transfer, audio and unattended access before login are not included. The interface is currently in Russian.
+The Mac viewer supports mouse, keyboard, copying text, images and files between Macs, drawing and full screen. OpenRamble can insert dictated text into the remote window. **⌘⌥Esc** releases the viewer's keyboard focus; **⌘Q** quits locally. Audio forwarding and unattended access before login are not included. The interface is currently in Russian.
 
 Updates use **Sparkle**. The app checks automatically; you choose when to install. You can also use **WAI Remote → Проверить обновления…**. Prototype 0.1.0 installations need one manual update because they did not include Sparkle.
 

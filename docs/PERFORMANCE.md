@@ -2,6 +2,16 @@
 
 Work in progress, 15 October 2026. Video comparisons use the user's MacBook and **waiMini**. The update requested for Mark's Mac is a separate installation task.
 
+## Published 0.2.1 (50), 15 October
+
+At the owner's request, build 50 is now the latest public [GitHub release](https://github.com/mikwiseman/wai-remote/releases/tag/v0.2.1) and the update offered by the [main Sparkle feed](https://waiwai.is/remote/updates/appcast.xml). The previous main-feed item was 0.2.0 (3); builds through 49 were published only in separate preview feeds. That explains why a 0.2.0 installation using the main feed had no newer version to find.
+
+The signed, notarized universal DMG is 20,099,899 bytes, SHA-256 `5ea833dd405e1582daa0368c25accf02a9c719b96553206814ada4d6d25487da`. Apple accepted notarization `94c88c43-ef7d-43f6-9ba2-6b6c0a1a17d0`; stapling, the mounted application's signature and Gatekeeper checks passed. The published main feed matches the verified signed file byte for byte, retains the original feed URL and public key, and the installed MacBook's Sparkle accepted its signature. GitHub's public assets report the same DMG and ZIP hashes as the local archives.
+
+The MacBook completed the real Sparkle 49→50 download, install and relaunch. The installed executable matches the candidate, saved computers remain present, and the temporary preview-feed override was removed. Two identical app processes appeared after an automation read during relaunch; they were stopped and one process was opened. This is not evidence of an independently verified single-launch update. The installed interface displays 0.2.1 (50) and «Без ограничения по времени». Its synthetic sharing test was closed afterwards. Mark's installation remains deferred at the owner's request; no update on that Mac is claimed.
+
+This publication does not establish consistently smooth video or superiority to AnyDesk. The failed sustained-video gates and the unverified simultaneous two-person desktop scenario below remain open. Release evidence is in `.runtime/build50-{dmg-artifact,installed,main-channel,github-release}.json` and `.runtime/build50-main-channel-sparkle.log`.
+
 ## Invitation duration, candidate 50
 
 The ten-minute limit applied to an unused invitation, not to a connected session or a saved computer. The owner requested invitations without a time limit. Candidate 50 removes the invitation expiry and keeps the link usable while access stays open. Closing access, replacing the invitation and first approval still revoke its pairing secret. A previously approved computer reconnects using its saved public identity, without that secret.
