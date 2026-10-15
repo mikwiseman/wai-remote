@@ -10,6 +10,8 @@ The signed, notarized universal DMG is 20,099,899 bytes, SHA-256 `5ea833dd405e15
 
 The MacBook completed the real Sparkle 49→50 download, install and relaunch. The installed executable matches the candidate, saved computers remain present, and the temporary preview-feed override was removed. Two identical app processes appeared after an automation read during relaunch; they were stopped and one process was opened. This is not evidence of an independently verified single-launch update. The installed interface displays 0.2.1 (50) and «Без ограничения по времени». Its synthetic sharing test was closed afterwards. Mark's installation remains deferred at the owner's request; no update on that Mac is claimed.
 
+The public browser viewer was also updated. Its HTML, JavaScript, CSS, icon and manifest match the built artifacts byte for byte. Previous hashed assets were retained, and the gateway was not restarted. Its connection form rendered without console errors; a new remote session was not established for this publication check. Clicking the live landing page's download button saved the exact signed DMG. Evidence: `.runtime/build50-public-viewer.json`, `.runtime/build50-public-viewer.jpg` and `.runtime/build50-browser-download.json`.
+
 This publication does not establish consistently smooth video or superiority to AnyDesk. The failed sustained-video gates and the unverified simultaneous two-person desktop scenario below remain open. Release evidence is in `.runtime/build50-{dmg-artifact,installed,main-channel,github-release}.json` and `.runtime/build50-main-channel-sparkle.log`.
 
 ## Invitation duration, candidate 50
