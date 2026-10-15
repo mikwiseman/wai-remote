@@ -161,7 +161,7 @@ struct HomeView: View {
                             host.copyInvite(); copied = true
                             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { copied = false }
                         }.buttonStyle(.borderedProminent).controlSize(.large)
-                        Text("Действует 10 минут\nдля одного устройства.").font(.system(size: 11)).foregroundStyle(.secondary)
+                        Text("Без ограничения по времени.").font(.system(size: 11)).foregroundStyle(.secondary)
                     }
                 } else if host.pending == nil && !host.starting {
                     Button("Создать приглашение") { host.newInvite() }.controlSize(.large)

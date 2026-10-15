@@ -1,6 +1,22 @@
 # Responsiveness verification
 
-Work in progress, 14 October 2026. Target: the user's MacBook and **waiMini**, not Mark's Mac.
+Work in progress, 15 October 2026. Video comparisons use the user's MacBook and **waiMini**. The update requested for Mark's Mac is a separate installation task.
+
+## Invitation duration, candidate 50
+
+The ten-minute limit applied to an unused invitation, not to a connected session or a saved computer. The owner requested invitations without a time limit. Candidate 50 removes the invitation expiry and keeps the link usable while access stays open. Closing access, replacing the invitation and first approval still revoke its pairing secret. A previously approved computer reconnects using its saved public identity, without that secret.
+
+The regression test advances invitation housekeeping by a year and then submits a freshly signed connection request using the original link. It failed before the change because the link disappeared, and passes afterwards with the request waiting for owner approval. Separate tests confirm that closing access and replacing a link invalidate the previous invitation. No wall-clock or system permission changes are needed for these tests.
+
+Validation: 105 Swift tests completed with zero failures and one explicit network-integration skip. Go race tests and the browser production build passed, and npm reported zero vulnerabilities. The update requested for Mark's Mac is prepared separately because the owner asked to defer installation while the computer is in use.
+
+## Installed build 49 and update restoration
+
+On 14 October, Mini completed Sparkle 47 to 48 and then 48 to 49. Before the second update full-screen access was open. After relaunch the Mini task observed **«Доступ открыт» without a manual sharing start or application launch**. The executable hash, Developer ID signature and Gatekeeper checks passed. Peers and TCC permissions were unchanged and the temporary preview-feed override was removed. The handoff key was absent after launch; its transient write and the boot-session value were not independently sampled. Evidence: `.runtime/build49-mini-autorestore.json`.
+
+MacBook completed Sparkle 47 to 49, retained its saved computers, and connected to the Mini's automatically reopened display. Remote WAI menu and Settings actions succeeded. A later broad network failure interrupted further input verification: concurrent requests from MacBook to the WAI health endpoint, GitHub and Apple timed out. The app connection also closed. These failures do not establish that Mini stopped sharing, and the final reconnection after the outage was not verified before interruption. Evidence: `.runtime/build49-installed.json` and local network diagnostics.
+
+Both preview packages were independently downloaded and matched the signed local archives. Build 48 is 18,103,791 bytes, SHA-256 `6ac9038b14884ab31742d0b222f5a99aece11340e4fae984a87468e9e58f4da3`; build 49 is 18,103,771 bytes, SHA-256 `87e1b8b01b78cedb4aaea57eae647d2b62493102a844dea7c2e2f296cea545b4`. Both are universal and require macOS 15 or newer. Stable remains 0.2.0 (3).
 
 ## Update handoff, candidate 48
 

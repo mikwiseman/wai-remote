@@ -59,7 +59,6 @@ final class HostModel: ObservableObject {
     private var labImage: NSImageView?
     private var labInk: InkView?
     private var secret: Data?
-    private var secretExpiry = Date.distantPast
     private var seenNonces: [String: Date] = [:]
     private var tick: Timer?
     private var observers: [NSObjectProtocol] = []
@@ -254,7 +253,7 @@ final class HostModel: ObservableObject {
         guard sharing else { return }
         var data = Data(count: 32); let result = data.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }
         guard result == errSecSuccess else { stop(reason: "Не удалось создать ключ приглашения", cause: "invite-randomness"); return }
-        secret = data; secretExpiry = Date().addingTimeInterval(600)
+        secret = data
         var url = URLComponents(string: gateway)!
         if !url.path.hasSuffix("/") { url.path += "/" }; url.query = nil
         var fragment = URLComponents(); fragment.queryItems = [URLQueryItem(name: "host", value: identity.id), URLQueryItem(name: "key", value: identity.publicKey), URLQueryItem(name: "secret", value: data.base64URL)]
@@ -262,7 +261,7 @@ final class HostModel: ObservableObject {
     }
     func copyInvite() { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(invite, forType: .string) }
     func openViewer() { if let url = URL(string: gateway) { NSWorkspace.shared.open(url) } }
-    private func receiveSignal(_ object: [String: Any]) {
+    func receiveSignal(_ object: [String: Any]) {
         guard sharing, object["type"] as? String == "offer", let from = object["from"] as? String,
               let body = object["body"] as? [String: Any], let payloadString = body["payload"] as? String,
               let payload = Data(base64URL: payloadString), let signature = body["signature"] as? String,
@@ -275,7 +274,7 @@ final class HostModel: ObservableObject {
               DeviceIdentity.verify(signature, data: payload, domain: "wai-remote/offer/v1", publicKey: offer.publicKey),
               seenNonces[offer.nonce] == nil else { return }
         let trusted = peers.first { $0.id == from && $0.publicKey == offer.publicKey }
-        let proofValid = secret != nil && secretExpiry > Date() && DeviceIdentity.verifyPairingProof(body["proof"] as? String ?? "", secret: secret!, payload: payload)
+        let proofValid = secret.map { DeviceIdentity.verifyPairingProof(body["proof"] as? String ?? "", secret: $0, payload: payload) } ?? false
         guard trusted != nil || proofValid else { return }
         // A signed retry from the same device can replace its unfinished attempt.
         // An established session or another device still owns the connection.
@@ -458,7 +457,7 @@ final class HostModel: ObservableObject {
         signaling?.close(); signaling = nil; pending = nil; secret = nil; invite = ""; status = reason
         detail = "Чтобы подключиться снова, откройте доступ на этом Mac."
     }
-    private func housekeeping() {
+    func housekeeping(now: Date = Date()) {
         refreshPermissions()
         if sharing, capturedWindow != nil {
             guard let frame = injector.windowTarget?.frame else {
@@ -472,9 +471,8 @@ final class HostModel: ObservableObject {
             disconnectViewer(); status = "Не удалось установить соединение. Можно попробовать снова."
         }
         if let machine { apply(machine.tick(now: ProcessInfo.processInfo.systemUptime)) }
-        if let pending, pending.offer.expiresAt < Date().timeIntervalSince1970 * 1000 { reject() }
-        if secretExpiry < Date() { secret = nil; invite = "" }
-        seenNonces = seenNonces.filter { Date().timeIntervalSince($0.value) < 150 }
+        if let pending, pending.offer.expiresAt < now.timeIntervalSince1970 * 1000 { reject() }
+        seenNonces = seenNonces.filter { now.timeIntervalSince($0.value) < 150 }
     }
     private func resizeWindowIfNeeded(_ size: CGSize) {
         let width = Int(size.width), height = Int(size.height)

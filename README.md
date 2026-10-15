@@ -48,7 +48,7 @@ Then select that address under **Настройки → Диагностика**
 - ScreenCaptureKit captures the display; WebRTC carries encrypted video and input between the devices.
 - A Go gateway authenticates device signatures and forwards connection setup messages. It does not receive unencrypted screen pixels or keystrokes.
 - Device identities use P-256 keys. The native private key stays in macOS Keychain. The host's public key is pinned in the invitation.
-- New invitations expire after ten minutes. A first connection still requires approval on the sharing Mac. Saved connections contain public identity information, not the invitation secret.
+- Invitations have no time limit while access remains open. Closing access or creating a new invitation revokes the old link. A first connection still requires approval on the sharing Mac. Saved computers can reconnect without a new invitation; their saved connections contain public identity information, not the invitation secret.
 - The host keeps final authority over viewing, control, drawing, pause and revocation. Input is released when focus or transport is lost; sequence numbers and session epochs reject stale commands.
 - The public relay uses short-lived credentials, bounded allocations and bandwidth, and relay-to-relay peers only. It is a small initial service, without an availability SLA.
 
