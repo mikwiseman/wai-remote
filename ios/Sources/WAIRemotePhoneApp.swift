@@ -7,12 +7,12 @@ import RemoteCore
     var body: some Scene {
         WindowGroup {
             PhoneView(model: model)
-                .tint(Color(red: 0.88, green: 0.35, blue: 0.28))
+                .tint(.accentColor)
                 .onOpenURL { model.open($0) }
                 .onChange(of: phase) { _, value in
-                    if value == .active { model.prepareIdentity() }
+                    if value == .active { model.resume() }
                     if value == .inactive, model.connected { model.releaseInput() }
-                    if value == .background, model.connected || model.connecting { model.disconnect(message: "Сеанс завершён при сворачивании приложения") }
+                    if value == .background, model.connected || model.connecting { model.suspend() }
                 }
         }
     }
@@ -24,56 +24,78 @@ struct PhoneView: View {
     @State private var text = ""
     @FocusState private var typing: Bool
     @Environment(\.verticalSizeClass) private var verticalSize
-    private let warm = Color(red: 0.97, green: 0.96, blue: 0.93)
+    private let warm = Color(uiColor: .systemBackground)
     var body: some View {
         Group { if model.connected { session } else { welcome } }
-            .preferredColorScheme(.light)
             .onChange(of: model.mode) { _, mode in if mode != .control { keyboard = false } }
             .sheet(isPresented: $keyboard) { keyboardSheet }
     }
     private var welcome: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                HStack {
-                    Text("WAI / REMOTE").font(.system(size: 13, weight: .bold, design: .monospaced)).tracking(3)
-                    Spacer()
-                    Image(systemName: "arrow.up.right").font(.system(size: 32, weight: .light)).foregroundStyle(.tint).accessibilityHidden(true)
-                }.padding(.top, 12)
-                Text("Ваш Mac.\nПод рукой.").font(.system(size: 44, weight: .semibold, design: .rounded)).tracking(-2).fixedSize(horizontal: false, vertical: true)
-                Text("Нажимайте, печатайте и рисуйте на экране Mac прямо с телефона.").font(.title3).foregroundStyle(.secondary)
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("ПРИГЛАШЕНИЕ С MAC").font(.system(size: 11, weight: .bold, design: .monospaced)).tracking(1.5)
-                    TextField("Вставьте ссылку из WAI Remote", text: $model.invitation, axis: .vertical)
-                        .lineLimit(2...3).textInputAutocapitalization(.never).autocorrectionDisabled()
-                        .font(.system(size: 14, design: .monospaced)).padding(16).background(.white, in: RoundedRectangle(cornerRadius: 16))
-                        .accessibilityIdentifier("invite").disabled(model.connecting)
-                    HStack {
-                        PasteButton(payloadType: String.self) { values in if let first = values.first { model.invitation = first } }
-                            .labelStyle(.titleAndIcon).buttonBorderShape(.capsule).disabled(model.connecting)
-                        Spacer()
-                        if !model.invitation.isEmpty { Button("Очистить") { model.invitation = "" }.font(.subheadline) }
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 28) {
+                    if !model.computers.isEmpty {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Сохранённые").font(.subheadline.weight(.medium)).foregroundStyle(.secondary)
+                            ForEach(model.computers) { computer in
+                                Button {
+                                    model.invitation = computer.invitation; model.connect()
+                                } label: {
+                                    HStack(spacing: 16) {
+                                        Image(systemName: "desktopcomputer").font(.title2).foregroundStyle(.tint)
+                                        Text(computer.name).font(.headline).foregroundStyle(.primary)
+                                        Spacer()
+                                        Image(systemName: "arrow.up.right").foregroundStyle(.secondary)
+                                    }.padding(20).frame(maxWidth: .infinity, alignment: .leading).remoteGlass()
+                                }.buttonStyle(.plain).disabled(model.connecting)
+                                    .contextMenu { Button("Забыть этот Mac", role: .destructive) { model.forget(computer.id) } }
+                            }
+                        }
+                    } else {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Image(systemName: "macbook.and.iphone").font(.system(size: 48, weight: .light)).foregroundStyle(.tint).padding(.bottom, 8)
+                            Text("Ваш Mac. Под рукой.").font(.title.weight(.semibold))
+                            Text("Откройте экран Mac, управляйте и рисуйте вместе. Из любой сети.").foregroundStyle(.secondary)
+                        }.padding(.vertical, 12)
                     }
-                    Button(action: model.connect) {
-                        HStack { Text(model.connecting ? "Подключаемся…" : "Подключиться"); Spacer(); if model.connecting { ProgressView() } else { Image(systemName: "arrow.up.right") } }
-                            .font(.headline).padding(20).frame(maxWidth: .infinity)
-                    }.buttonStyle(.borderedProminent).buttonBorderShape(.roundedRectangle(radius: 18))
-                        .disabled(model.connecting || model.invitation.isEmpty || model.identity == nil).accessibilityIdentifier("connect")
-                    if model.connecting { Button("Отменить") { model.disconnect() }.frame(maxWidth: .infinity) }
-                }
-                if model.status != "Ваш Mac. Под рукой." { Text(model.status).font(.headline).fixedSize(horizontal: false, vertical: true) }
-                Text(model.detail).font(.subheadline).foregroundStyle(.secondary)
-                Label("Первая версия · подключение по Wi-Fi", systemImage: "wifi").font(.footnote).foregroundStyle(.secondary)
-            }.padding(24).frame(maxWidth: 560, alignment: .leading).frame(maxWidth: .infinity)
-        }.background(warm).scrollDismissesKeyboard(.interactively)
+                    VStack(alignment: .leading, spacing: 14) {
+                        Text("Добавить Mac").font(.headline)
+                        TextField("Приглашение с Mac", text: $model.invitation, axis: .vertical)
+                            .lineLimit(1...3).textInputAutocapitalization(.never).autocorrectionDisabled()
+                            .font(.body).padding(16).background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 16))
+                            .accessibilityIdentifier("invite").disabled(model.connecting)
+                        HStack {
+                            PasteButton(payloadType: String.self) { values in if let first = values.first { model.invitation = first } }
+                                .labelStyle(.titleAndIcon).buttonBorderShape(.capsule).disabled(model.connecting)
+                            Spacer()
+                            Button(action: model.connect) {
+                                HStack { if model.connecting { ProgressView() }; Text(model.connecting ? "Подключаемся" : "Подключиться") }.padding(.horizontal, 4)
+                            }.remotePrimaryButton().controlSize(.large)
+                                .disabled(model.connecting || model.invitation.isEmpty || model.identity == nil).accessibilityIdentifier("connect")
+                        }
+                        Text("На Mac выберите «Поделиться экраном» и скопируйте приглашение.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
+                    if model.connecting || model.status != "Ваш Mac. Под рукой." {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(model.status).font(.headline)
+                            Text(model.detail).font(.subheadline).foregroundStyle(.secondary)
+                            if model.connecting { Button("Отменить") { model.disconnect() }.padding(.top, 4) }
+                        }.padding(20).frame(maxWidth: .infinity, alignment: .leading).remoteGlass()
+                    }
+                }.padding(24).frame(maxWidth: 620).frame(maxWidth: .infinity)
+            }.background { RemoteBackdrop() }.scrollDismissesKeyboard(.interactively)
+                .navigationTitle("Компьютеры")
+        }
     }
     private var session: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
                 Image(systemName: model.mode == .paused ? "pause.circle.fill" : "lock.shield.fill").foregroundStyle(model.mode == .paused ? Color.orange : Color.green)
-                Text(model.status).font(.caption.weight(.semibold)).lineLimit(2)
+                VStack(alignment: .leading, spacing: 2) { Text(model.computerName).font(.subheadline.weight(.semibold)); Text(model.connectionInterrupted ? "Восстанавливаем связь…" : model.status).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
                 Spacer(minLength: 0)
                 Button { model.disconnect() } label: { Image(systemName: "xmark").frame(width: 44, height: 44) }.accessibilityLabel("Отключиться")
-            }.padding(.horizontal, 14)
+            }.padding(.horizontal, 14).remoteGlass(cornerRadius: 22).padding(.horizontal, 12).padding(.bottom, 8)
             ZStack {
                 RemoteScreen(model: model)
                 if !model.receivedFrame { ProgressView("Ждём изображение Mac…").tint(.white).foregroundStyle(.white).allowsHitTesting(false) }
@@ -97,7 +119,7 @@ struct PhoneView: View {
                 }
                 Text(model.mode == .draw ? "Ластик удаляет объект целиком · можно отменить" : "Касание — клик · удержание — перетаскивание")
                     .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.8)
-            }.padding(.horizontal, 14).padding(.vertical, 10).background(warm) }
+            }.padding(.horizontal, 14).padding(.vertical, 10).remoteGlass(cornerRadius: 26).padding(10) }
         }.background(warm)
     }
     private var compactTools: some View {
@@ -127,12 +149,12 @@ struct PhoneView: View {
             }
             Spacer(minLength: 0)
             iconButton("Вписать экран", symbol: "arrow.down.right.and.arrow.up.left") { model.resetZoomRevision += 1 }
-        }.padding(.horizontal, 14).padding(.vertical, 4).background(warm)
+        }.padding(.horizontal, 14).padding(.vertical, 4).remoteGlass(cornerRadius: 22).padding(.horizontal, 10)
     }
     private func modeButton(_ title: String, symbol: String, mode: RemoteMode, allowed: Bool) -> some View {
         Button { model.changeMode(mode) } label: {
             Label(title, systemImage: symbol).font(.subheadline.weight(.semibold)).frame(maxWidth: .infinity).frame(height: 44)
-                .background(model.mode == mode ? Color.primary : Color.clear, in: RoundedRectangle(cornerRadius: 13))
+                .background(model.mode == mode ? Color.accentColor : Color.clear, in: RoundedRectangle(cornerRadius: 13))
                 .foregroundStyle(model.mode == mode ? .white : .primary)
         }.disabled(model.mode == .paused || !allowed || !model.receivedFrame)
             .accessibilityAddTraits(model.mode == mode ? [.isSelected] : [])
@@ -181,7 +203,7 @@ struct PhoneView: View {
                 Spacer(); Button("Tab") { model.key("Tab") }; Spacer(); Button("⌫") { model.key("Backspace") }.accessibilityLabel("Backspace")
                 Spacer(); Button("↵ Enter") { model.key("Enter") }
             }.buttonStyle(.bordered).disabled(!model.canControl)
-        }.padding(24).presentationDetents([.height(220)]).presentationDragIndicator(.visible)
+        }.padding(24).presentationDetents([.height(240), .medium]).presentationDragIndicator(.visible)
             .onAppear { typing = true }.onDisappear { text = "" }
     }
 }

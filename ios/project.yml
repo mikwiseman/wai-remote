@@ -14,13 +14,16 @@ settings:
     SWIFT_VERSION: '5.0'
     DEVELOPMENT_TEAM: R4A779QVVY
     CODE_SIGN_STYLE: Automatic
-    MARKETING_VERSION: 0.1.0
-    CURRENT_PROJECT_VERSION: 2
+    MARKETING_VERSION: 0.3.0
+    CURRENT_PROJECT_VERSION: 52
 targets:
   WAIRemotePhone:
     type: application
     platform: iOS
-    sources: [Sources, Assets.xcassets]
+    sources:
+      - Sources
+      - Assets.xcassets
+      - ../Sources/WAIRemote/GlassSurface.swift
     dependencies:
       - package: WAIRemote
         product: RemoteCore

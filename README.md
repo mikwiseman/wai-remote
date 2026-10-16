@@ -1,6 +1,6 @@
 # WAI Remote
 
-**Another Mac, within reach.** A native macOS app for sharing a screen, controlling another Mac, and drawing together over the internet.
+**Your Mac, within reach.** Native macOS and iOS apps for controlling a Mac and drawing together over the internet.
 
 [Download for Mac](https://waiwai.is/remote) · [Releases](https://github.com/mikwiseman/wai-remote/releases)
 
@@ -8,15 +8,17 @@
 
 ## Use it
 
-Requires **macOS 15 or later**, on Apple Silicon or Intel. Install WAI Remote on both Macs.
+Requires **macOS 15 or later**, on Apple Silicon or Intel. Install WAI Remote on the sharing Mac, then connect from another Mac, the native iPhone/iPad app, or the browser viewer.
 
 1. On the Mac you want to access, choose **Поделиться экраном** (Share screen). Follow the macOS Screen Recording and Accessibility prompts, then open access.
 2. Copy its invitation. On the other Mac, choose **Подключиться** (Connect) and paste the link.
 3. Approve viewing or control on the sharing Mac. The connection is saved for next time.
 
-Both computers need internet. They can be on different networks. The sharing Mac must be awake and unlocked; locking it or putting it to sleep closes access. Stop sharing or revoke a saved device from the app at any time.
+Both devices need internet and can be on different networks. Open access stays enabled until you close it. WAI Remote prevents idle system sleep and restores access after app relaunch or login using a bundled background helper. Allow that helper in macOS Login Items if macOS requests it. Turning off the display does not close access. Locking or deliberately sleeping the Mac suspends capture and input; access resumes after wake and unlock. There is no access before login or through the lock screen.
 
-The Mac viewer supports mouse, keyboard, copying text, images and files between Macs, drawing and full screen. OpenRamble can insert dictated text into the remote window. **⌘⌥Esc** releases the viewer's keyboard focus; **⌘Q** quits locally. Audio forwarding and unattended access before login are not included. The interface is currently in Russian.
+Choose **Независимая мышь · выбрать окно** to control one application window while the owner continues using their own pointer. Remote events stay addressed to that window, with a separate blue pointer on the host. Some applications and keyboard shortcuts require the conventional full-screen mode. Closing the selected window closes its grant; the app never expands a window grant to the whole desktop.
+
+The Mac viewer supports mouse, keyboard, copying text, images and files between Macs, drawing and full screen. OpenRamble can insert dictated text into the remote window. **⌘⌥Esc** releases the viewer's keyboard focus; **⌘Q** quits locally. The iOS viewer has saved computers, touch control, text entry, two-finger scrolling and zoom, and reconnects when returning to the foreground. Audio forwarding is not included. The interface is currently in Russian. macOS/iOS 26 use native Liquid Glass; older supported systems use material surfaces.
 
 Updates use **Sparkle**. The app checks automatically; you choose when to install. You can also use **WAI Remote → Проверить обновления…**. Prototype 0.1.0 installations need one manual update because they did not include Sparkle.
 
@@ -49,6 +51,7 @@ Then select that address under **Настройки → Диагностика**
 - A Go gateway authenticates device signatures and forwards connection setup messages. It does not receive unencrypted screen pixels or keystrokes.
 - Device identities use P-256 keys. The native private key stays in macOS Keychain. The host's public key is pinned in the invitation.
 - Invitations have no time limit while access remains open. Closing access or creating a new invitation revokes the old link. A first connection still requires approval on the sharing Mac. Saved computers can reconnect without a new invitation; their saved connections contain public identity information, not the invitation secret.
+- Approved connections recover after transient transport loss with bounded retry delays. Explicit disconnect cancels recovery. The host detects silent signaling connections and reconnects independently of an active screen session.
 - The host keeps final authority over viewing, control, drawing, pause and revocation. Input is released when focus or transport is lost; sequence numbers and session epochs reject stale commands.
 - The public relay uses short-lived credentials, bounded allocations and bandwidth, and relay-to-relay peers only. It is a small initial service, without an availability SLA.
 
@@ -62,7 +65,8 @@ Then select that address under **Настройки → Диагностика**
 | `Sources/WAIRemote` | Native macOS host and viewer, permissions, input, Sparkle and UI |
 | `gateway` | Authenticated signaling and short-lived TURN credential issuance |
 | `web` | Browser viewer |
-| `ios` | Experimental iPhone/iPad viewer; not part of this public Mac release |
+| `ios` | Native iPhone/iPad viewer, distributed through TestFlight |
+| `Sources/WAIRemoteWatchdog` | Bundled login helper that restores an explicitly opened host |
 | `mac`, `design` | App icon sources and menu bar assets |
 | `deploy`, `scripts` | Service templates, packaging and release helpers |
 

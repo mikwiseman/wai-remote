@@ -33,7 +33,23 @@ The public relay uses coturn 4.18.0, UDP and TCP 3478, and a bounded UDP relay r
 
 After changing nginx, validate its configuration and reload it. If an edge proxy mirrors the origin configuration, wait for or trigger that sync before checking the public URL. Confirm `/remote/connect/healthz`, real device authentication, the remote session, download responses and update feed through the public hostname.
 
-The host must remain awake, unlocked and explicitly sharing. Release 0.2.1 supports native clipboard files up to 100 MiB. It does not provide login-screen access, audio forwarding or a service availability guarantee.
+The host must be logged in, unlocked and have an explicitly opened access grant. Release 0.3.0 preserves that grant across relaunch/login, prevents idle system sleep, and suspends capture/input while locked or deliberately asleep. The bundled `is.wai.remote.recovery` login agent relaunches this exact app after an unexpected exit. The owner can disable it in macOS Login Items or close access in the app. Native clipboard files remain limited to 100 MiB. Login-screen access, audio forwarding and an availability guarantee are not included.
+
+## iOS / TestFlight
+
+Use the existing App Store Connect app `is.wai.remote.ios`. On waiMini, prepare signing with `~/.local/bin/wai-signing prepare ios`; use the existing identity in `~/.appstoreconnect/aigid-appstore.keychain-db`. Install an App Store provisioning profile containing that certificate. Never change the global keychain search order or create a replacement certificate to resolve a profile mismatch.
+
+`python3 scripts/release-ios.py --profile PROFILE_UUID --version 0.3.0 --build 52` archives and exports with manual signing. Add `--upload` to upload after validation. Credentials are read from `~/.appstoreconnect/config.json`. DerivedData stays under `~/Library/Caches/WAIRemoteBuilds/ios-release`; archives and exports stay under `.release/`. Verify the uploaded build reaches VALID processing state and add it to the existing internal TestFlight group. Upload success alone does not prove tester availability.
+
+## Availability regression
+
+- Leave an approved session active beyond ten minutes. Check a moving timestamp and real input at the end, not just connection labels.
+- Interrupt the transport, then verify recovery to the same pinned host without another invitation. Cancel waiting and confirm it stays cancelled.
+- Background and foreground the iOS viewer; old touch gestures must be cancelled and control must wait for a fresh frame.
+- Verify `launchctl print gui/$(id -u)/is.wai.remote.recovery`, then terminate only the exact host process during an isolated test. Verify the helper relaunches the installed bundle and restores an open display grant.
+- Close access and confirm neither automatic retry nor application relaunch reopens it.
+- Lock and unlock a test Mac: capture/input must stop while locked and resume only after unlock. A display turning off alone must not revoke access.
+- Close a shared application window; access must close rather than switch to another window or display.
 
 ## Native input regression
 

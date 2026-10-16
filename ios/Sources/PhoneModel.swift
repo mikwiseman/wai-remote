@@ -10,14 +10,17 @@ enum DrawingTool: String, CaseIterable, Identifiable {
 }
 
 final class PhoneModel: ObservableObject {
+    @Published var computerName = "Mac"
+    @Published var computers: [SavedComputer] = []
     @Published var invitation = UserDefaults.standard.string(forKey: "lastMac") ?? ""
     @Published var status = "Ваш Mac. Под рукой."
     @Published var detail = "Откройте доступ в WAI Remote на Mac и вставьте приглашение."
     @Published var connecting = false
     @Published var connected = false
+    @Published var connectionInterrupted = false
     @Published var receivedFrame = false
-    @Published var track: RTCVideoTrack?
-    @Published private(set) var session = ViewerSession()
+    @Published var track: RTCVideoTrack? { didSet { if track !== oldValue { receivedFrame = false } } }
+    private(set) var session = ViewerSession()
     @Published var tool: DrawingTool = .pen
     @Published var color = InkStore.colors[0]
     @Published var width = 4.0
@@ -32,6 +35,14 @@ final class PhoneModel: ObservableObject {
     private var transport: ViewerTransport?
     private var heartbeat: Timer?
     private var timeout: Timer?
+    private var retryTimer: Timer?
+    private var interruptionTimer: Timer?
+    private var retryDelay: TimeInterval = 1
+    private var recoveryInvitation: String?
+    private var heartbeatAcknowledged = false
+    private var lastReply = ProcessInfo.processInfo.systemUptime
+    private var currentInvite: RemoteInvite?
+    private var resumeInvitation: String?
     private var attempt = UUID()
     private var snapshot: [InkStroke]?
     private var activeStroke: String?
@@ -41,13 +52,42 @@ final class PhoneModel: ObservableObject {
     private var offerStarted = false
     private(set) var lastCursor = InkPoint(0.5, 0.5)
     var mode: RemoteMode { session.mode }
-    var canControl: Bool { connected && receivedFrame && !session.invalidated && mode == .control && session.state?.permissions.control == true }
-    var canDraw: Bool { connected && receivedFrame && !session.invalidated && mode == .draw && session.state?.permissions.annotate == true }
+    var canControl: Bool { connected && receivedFrame && !connectionInterrupted && !session.invalidated && mode == .control && session.state?.permissions.control == true }
+    var canDraw: Bool { connected && receivedFrame && !connectionInterrupted && !session.invalidated && mode == .draw && session.state?.permissions.annotate == true }
     var visibleStrokes: [InkStroke] { strokes.filter { previews[$0.id] == nil && !hiddenIDs.contains($0.id) } + previews.values.sorted { $0.id < $1.id } }
 
     init() {
         RTCInitializeSSL()
         prepareIdentity()
+        if let data = UserDefaults.standard.data(forKey: "savedComputers"),
+           let saved = try? JSONDecoder().decode([SavedComputer].self, from: data) {
+            computers = saved.compactMap { try? SavedComputer(invitation: $0.invitation, name: $0.name) }
+        }
+    }
+    func forget(_ id: String) {
+        computers.removeAll { $0.id == id }
+        saveComputers()
+    }
+    private func saveComputers() {
+        if let data = try? JSONEncoder().encode(computers) { UserDefaults.standard.set(data, forKey: "savedComputers") }
+    }
+    private func remember() {
+        guard let invite = currentInvite,
+              let computer = try? SavedComputer(invitation: invite.savedURL.absoluteString, name: computerName) else { return }
+        computers.removeAll { $0.id == computer.id }; computers.append(computer)
+        saveComputers()
+        invitation = computer.invitation
+        UserDefaults.standard.set(invitation, forKey: "lastMac")
+    }
+    func suspend() {
+        let target = connected ? currentInvite?.savedURL.absoluteString : recoveryInvitation
+        disconnect(message: "Сеанс приостановлен")
+        resumeInvitation = target
+    }
+    func resume() {
+        prepareIdentity()
+        guard let target = resumeInvitation else { return }
+        resumeInvitation = nil; invitation = target; connect()
     }
     func prepareIdentity() {
         guard identity == nil else { return }
@@ -69,18 +109,20 @@ final class PhoneModel: ObservableObject {
         guard !connecting, !connected, let identity else { return }
         do {
             let invite = try RemoteInvite(invitation)
-            disconnect(message: "")
-            connecting = true; status = "Ищем ваш Mac…"; detail = "Оба устройства должны быть в одной Wi-Fi сети."
+            disconnect(message: "", cancelRecovery: false)
+            currentInvite = invite
+            computerName = computers.first(where: { $0.id == invite.hostID })?.name ?? "Mac"
+            connecting = true; status = "Подключаемся…"; detail = "Подключение через интернет. Ждём ответ Mac."
             let token = attempt
             let signal = ViewerSignaling(identity: identity, invite: invite); signaling = signal
             signal.onReady = { [weak self] configuration in guard let self, self.attempt == token, !self.offerStarted else { return }; self.offerStarted = true; self.createOffer(invite, token: token, ice: configuration) }
             signal.onMessage = { [weak self] message in guard let self, self.attempt == token else { return }; self.signal(message, invite: invite, token: token) }
             signal.onFailure = { [weak self] in
                 guard let self, self.attempt == token else { return }
-                if !self.connected { self.disconnect(message: "Mac недоступен. Проверьте Wi-Fi, доступ к локальной сети и адрес приглашения.") }
+                if !self.connected { self.recover(message: "Ожидаем Mac…") }
             }
-            timeout = Timer.scheduledTimer(withTimeInterval: 110, repeats: false) { [weak self] _ in
-                guard let self, self.attempt == token else { return }; self.disconnect(message: "Подключение не подтверждено. Откройте новое приглашение с Mac.")
+            timeout = Timer.connectionTimer(withTimeInterval: 110, repeats: false) { [weak self] _ in
+                guard let self, self.attempt == token else { return }; self.recover(message: "Mac пока не отвечает…")
             }
             signal.connect()
         } catch { status = "Нужно приглашение с Mac"; detail = "Скопируйте ссылку целиком из WAI Remote. Для первого подключения нужна новая ссылка." }
@@ -92,8 +134,18 @@ final class PhoneModel: ObservableObject {
         peer.onMessage = { [weak self] data in guard let self, self.attempt == token else { return }; self.receive(data) }
         peer.onState = { [weak self] state in
             guard let self, self.attempt == token else { return }
-            if state == .failed || state == .closed { self.disconnect(message: "Соединение закрыто. Доступ на Mac можно открыть снова.") }
-            if state == .disconnected { self.cancelGesture(notify: false); self.session.interrupt(); self.status = "Связь прервалась · ввод остановлен" }
+            if state == .failed || state == .closed { self.recover(message: "Восстанавливаем соединение…") }
+            if state == .disconnected {
+                self.cancelGesture(notify: false); self.session.interrupt()
+                self.connectionInterrupted = true; self.receivedFrame = false
+                self.status = "Восстанавливаем соединение…"
+                if self.interruptionTimer == nil {
+                    self.interruptionTimer = Timer.connectionTimer(withTimeInterval: 5, repeats: false) { [weak self] _ in
+                        guard let self, self.attempt == token, self.connectionInterrupted else { return }
+                        self.recover(message: "Восстанавливаем соединение…")
+                    }
+                }
+            }
         }
         peer.offer { [weak self] result in
             guard let self, self.attempt == token else { return }
@@ -108,8 +160,8 @@ final class PhoneModel: ObservableObject {
                 var body = ["payload": payload.base64URL, "signature": try identity.sign(payload, domain: "wai-remote/offer/v1")]
                 if let secret = invite.secret { body["proof"] = DeviceIdentity.pairingProof(secret: secret, payload: payload) }
                 self.signaling?.send(["type": "offer", "body": body])
-                self.status = "Подтвердите на Mac"; self.detail = "Разрешите этому iPhone просмотр и управление в WAI Remote."
-            } catch { self.disconnect(message: "Не удалось подготовить соединение. Проверьте Wi-Fi и попробуйте снова.") }
+                self.status = invite.secret == nil ? "Подключаемся к Mac…" : "Подтвердите на Mac"; self.detail = "Первое подключение требует разрешения владельца Mac."
+            } catch { self.recover(message: "Ищем сетевой маршрут…") }
         }
     }
     private func signal(_ message: [String: Any], invite: RemoteInvite, token: UUID) {
@@ -127,21 +179,45 @@ final class PhoneModel: ObservableObject {
             status = "Подключаем экран…"
             transport?.answer(sdp) { [weak self] error in
                 guard let self, self.attempt == token else { return }
-                if error != nil { self.disconnect(message: "Не удалось подключить изображение Mac.") }
+                if error != nil { self.recover(message: "Восстанавливаем изображение…") }
             }
-            invitation = invite.savedURL.absoluteString
-            UserDefaults.standard.set(invitation, forKey: "lastMac")
-        } else if message["type"] as? String == "unavailable" { disconnect(message: "Mac недоступен. Откройте доступ в WAI Remote на Mac.") }
+            if let name = payload["name"] as? String, !name.isEmpty, name.utf8.count <= 200 {
+                computerName = String(name.prefix(60))
+            }
+        } else if message["type"] as? String == "unavailable" { recover(message: "Ожидаем Mac…") }
         else if message["type"] as? String == "reject" {
             let reason = (message["body"] as? [String: Any])?["reason"] as? String
+            if reason == "network" || reason == "busy" { recover(message: reason == "busy" ? "Mac занят. Ожидаем освобождения…" : "Восстанавливаем соединение…"); return }
             disconnect(message: reason == "busy" ? "К Mac уже подключено другое устройство." : reason == "new-invite-required" ? "Нужно новое приглашение для настоящего экрана Mac." : "Подключение отклонено на Mac.")
         }
     }
-    func disconnect(message: String = "Вы отключились") {
+    func recover(message: String) {
+        let target = currentInvite.flatMap { invite in
+            invite.secret == nil || connected || answerAccepted ? invite.savedURL.absoluteString : nil
+        } ?? recoveryInvitation
+        guard let target else { disconnect(message: message + " Попробуйте подключиться снова."); return }
+        let delay = retryDelay
+        disconnect(message: message, cancelRecovery: false)
+        recoveryInvitation = target
+        retryDelay = min(delay * 2, 15)
+        connecting = true; connectionInterrupted = true
+        detail = "Соединение восстановится автоматически. Можно отменить ожидание."
+        retryTimer = Timer.connectionTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+            guard let self, self.recoveryInvitation == target else { return }
+            self.retryTimer = nil; self.connecting = false; self.invitation = target; self.connect()
+        }
+    }
+    func disconnect(message: String = "Вы отключились", cancelRecovery: Bool = true) {
+        retryTimer?.invalidate(); retryTimer = nil
+        interruptionTimer?.invalidate(); interruptionTimer = nil
+        if cancelRecovery { recoveryInvitation = nil; retryDelay = 1 }
+        heartbeatAcknowledged = false
+        resumeInvitation = nil
         if connected, let release = session.release(), let data = try? JSONEncoder().encode(release) { _ = transport?.send(data) }
         attempt = UUID(); heartbeat?.invalidate(); heartbeat = nil; timeout?.invalidate(); timeout = nil
         signaling?.close(); signaling = nil; transport?.close(); transport = nil
-        connecting = false; connected = false; receivedFrame = false; track = nil; session = ViewerSession()
+        currentInvite = nil
+        connecting = false; connected = false; connectionInterrupted = false; receivedFrame = false; track = nil; session = ViewerSession()
         strokes = []; previews = [:]; snapshot = nil; hiddenIDs = []; erasedIDs = []; activeStroke = nil; selectedID = nil
         answerAccepted = false; offerStarted = false; gestureRevision += 1
         UIApplication.shared.isIdleTimerDisabled = false
@@ -150,7 +226,7 @@ final class PhoneModel: ObservableObject {
     func releaseInput() { cancelGesture(notify: true); _ = transmit(session.release()) }
     @discardableResult private func transmit(_ operation: WireMessage?) -> Bool {
         guard let operation, let data = try? JSONEncoder().encode(operation) else { return false }
-        guard transport?.send(data) == true else { disconnect(message: "Передача остановлена. Подключитесь заново."); return false }
+        guard transport?.send(data) == true else { recover(message: "Восстанавливаем соединение…"); return false }
         return true
     }
     @discardableResult private func send(_ type: String, edit: (inout WireMessage) -> Void = { _ in }) -> Bool {
@@ -160,14 +236,25 @@ final class PhoneModel: ObservableObject {
     private func receive(_ data: Data) {
         do {
             guard let m = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+            lastReply = ProcessInfo.processInfo.systemUptime
             switch m["type"] as? String {
+            case "heartbeatAck": heartbeatAcknowledged = true
             case "state":
                 let state = try decode(m["state"] ?? [:], as: HostState.self)
+                objectWillChange.send()
                 if try session.accept(state) { cancelGesture(notify: false) }
+                connectionInterrupted = false; interruptionTimer?.invalidate(); interruptionTimer = nil
+                retryDelay = 1; recoveryInvitation = currentInvite?.savedURL.absoluteString
                 if !connected {
                     connected = true; connecting = false; timeout?.invalidate(); timeout = nil
+                    remember()
                     UIApplication.shared.isIdleTimerDisabled = true
-                    heartbeat = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in _ = self?.send("heartbeat") }
+                    heartbeat = Timer.connectionTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+                        guard let self else { return }
+                        if self.heartbeatAcknowledged && ProcessInfo.processInfo.systemUptime - self.lastReply > 8 {
+                            self.recover(message: "Восстанавливаем соединение…")
+                        } else { _ = self.send("heartbeat") }
+                    }
                 }
                 status = mode == .paused ? "Владелец Mac приостановил управление" : m["lab"] as? Bool == true ? "Проверочный экран" : "Ваш Mac · защищённое соединение"
             case "ink":
@@ -207,7 +294,7 @@ final class PhoneModel: ObservableObject {
     func rightClick() { pointer("down", at: lastCursor, button: 2); pointer("up", at: lastCursor, button: 2) }
     func key(_ key: String, modifiers: [String] = []) {
         guard canControl else { return }
-        for action in ["down", "up"] { send("key") { $0.key = key; $0.action = action; $0.modifiers = modifiers } }
+        for action in ["down", "up"] { send("key") { $0.key = key; $0.action = action; $0.modifiers = action == "down" ? modifiers : [] } }
     }
     func text(_ text: String) {
         guard canControl, !text.isEmpty, text.utf16.count <= 4096, !text.contains("\0") else { return }

@@ -13,7 +13,7 @@ final class ViewerSignaling {
     func connect() {
         let task = URLSession.shared.webSocketTask(with: invite.signalingURL)
         socket = task; task.maximumMessageSize = 131_072; task.resume(); receive(task)
-        ping = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in self?.send(["type": "ping"]) }
+        ping = Timer.connectionTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in self?.send(["type": "ping"]) }
     }
     func send(_ object: [String: Any]) {
         guard let task = socket, let data = try? JSONSerialization.data(withJSONObject: object),

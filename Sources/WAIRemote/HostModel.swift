@@ -30,6 +30,12 @@ final class HostModel: ObservableObject {
     @Published var sharing = false
     @Published var starting = false
     @Published private(set) var reconnecting = false
+    @Published private(set) var accessEnabled = PersistentAccess.read() != nil
+    @Published var backgroundNotice: String?
+    @Published private(set) var suspended = false
+    private var accessActivity: NSObjectProtocol?
+    private var sleeping = false
+    private var resumeAfter: TimeInterval = 0
     @Published var isLab = false
     @Published var connectedName: String?
     @Published var pending: PendingPeer?
@@ -53,6 +59,7 @@ final class HostModel: ObservableObject {
     private var iceConfiguration = ICEConfiguration.local
     private var machine: SessionMachine?
     private let injector = InputInjector()
+    private var remotePointer: RemotePointer?
     private var overlay: InkOverlay?
     private var labWindow: NSWindow?
     private var inputTestWindow: NSWindow?
@@ -74,15 +81,24 @@ final class HostModel: ObservableObject {
         self.identity = identity
         RTCInitializeSSL()
         factory = RTCPeerConnectionFactory(encoderFactory: ScreenVideoEncoderFactory(), decoderFactory: ScreenVideoDecoderFactory())
-        for (event, cause) in [(NSWorkspace.sessionDidResignActiveNotification, "session-inactive"), (NSWorkspace.willSleepNotification, "system-sleep"), (NSWorkspace.screensDidSleepNotification, "display-sleep")] {
-            observers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: event, object: nil, queue: .main) { [weak self] _ in self?.stop(reason: "Сеанс Mac завершён или заблокирован", cause: cause) })
+        for event in [NSWorkspace.sessionDidResignActiveNotification, NSWorkspace.willSleepNotification] {
+            observers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: event, object: nil, queue: .main) { [weak self] _ in
+                if event == NSWorkspace.willSleepNotification { self?.sleeping = true }
+                self?.suspendAccess(reason: "Доступ возобновится после разблокировки Mac")
+            })
+        }
+        for event in [NSWorkspace.sessionDidBecomeActiveNotification, NSWorkspace.didWakeNotification] {
+            observers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: event, object: nil, queue: .main) { [weak self] _ in
+                self?.sleeping = false
+                self?.restoreAccess()
+            })
         }
         observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
             guard let self, self.sharing, !self.isLab, self.capturedWindow == nil else { return }
             // AppKit posts this for unrelated display/settings changes too.
             let screen = NSScreen.screens.first { String(($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? UInt32) ?? 0) == self.surface.id }
             guard let screen, screen.frame == self.capturedScreenFrame else {
-                self.stop(reason: "Общий экран изменился. Откройте доступ для нового размера.", cause: "display-changed"); return
+                self.stop(reason: "Обновляем общий экран…", cause: "display-changed", preservingAccess: true); return
             }
         })
         observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
@@ -90,9 +106,72 @@ final class HostModel: ObservableObject {
         })
         // Extra defense on current macOS, not a documented security API. Physical lock verification remains a release gate.
         DistributedNotificationCenter.default().addObserver(self, selector: #selector(screenLocked), name: NSNotification.Name("com.apple.screenIsLocked"), object: nil)
+        DistributedNotificationCenter.default().addObserver(self, selector: #selector(screenUnlocked), name: NSNotification.Name("com.apple.screenIsUnlocked"), object: nil)
         tick = Timer.connectionTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in self?.housekeeping() }
     }
-    @objc private func screenLocked() { DispatchQueue.main.async { [weak self] in self?.stop(reason: "Mac заблокирован", cause: "screen-locked") } }
+    deinit {
+        tick?.invalidate()
+        for observer in observers {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+            NotificationCenter.default.removeObserver(observer)
+        }
+        DistributedNotificationCenter.default().removeObserver(self)
+        if let accessActivity { ProcessInfo.processInfo.endActivity(accessActivity) }
+    }
+    @objc private func screenLocked() { DispatchQueue.main.async { [weak self] in self?.suspendAccess(reason: "Mac заблокирован. Ждём разблокировки.") } }
+    @objc private func screenUnlocked() { DispatchQueue.main.async { [weak self] in self?.restoreAccess() } }
+    private func suspendAccess(reason: String) {
+        guard sharing || starting || accessEnabled else { return }
+        stop(reason: reason, cause: "session-suspended", preservingAccess: true)
+        suspended = accessEnabled
+    }
+    private func keepAvailable() {
+        guard accessEnabled, accessActivity == nil else { return }
+        accessActivity = ProcessInfo.processInfo.beginActivity(options: [.idleSystemSleepDisabled, .automaticTerminationDisabled], reason: "WAI Remote: доступ открыт")
+    }
+    func restoreAccess() {
+        guard accessEnabled, !sharing, !starting, !sleeping,
+              ProcessInfo.processInfo.systemUptime >= resumeAfter,
+              let saved = PersistentAccess.read() else { return }
+        keepAvailable()
+        guard SharingRelaunch.sessionActive else { suspended = true; status = "Mac заблокирован. Ждём разблокировки."; return }
+        suspended = false
+        resumeAfter = ProcessInfo.processInfo.systemUptime + 5
+        switch saved.target {
+        case .display: start(lab: false)
+        case .window(let pid, let id, let launchedAt, let boot):
+            guard SharingRelaunch.currentBootSession == boot,
+                  NSRunningApplication(processIdentifier: pid)?.launchDate == launchedAt else {
+                stop(reason: "Общее окно закрыто. Выберите другое окно.", cause: "window-closed"); return
+            }
+            let generation = connectionGeneration
+            starting = true
+            Task { @MainActor in
+                let content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false)
+                guard generation == connectionGeneration else { return }
+                starting = false
+                guard accessEnabled, SharingRelaunch.sessionActive else { return }
+                guard let window = content?.windows.first(where: { $0.windowID == id && $0.owningApplication?.processID == pid }) else {
+                    stop(reason: "Общее окно закрыто. Выберите другое окно.", cause: "window-closed"); return
+                }
+                start(lab: false, window: window)
+            }
+        }
+    }
+    private func rememberAccess() {
+        guard !isLab else { return }
+        let target: PersistentAccess.Target
+        if let window = capturedWindow, let pid = window.owningApplication?.processID,
+           let launchedAt = NSRunningApplication(processIdentifier: pid)?.launchDate,
+           let boot = SharingRelaunch.currentBootSession {
+            target = .window(pid: pid, id: window.windowID, launchedAt: launchedAt, boot: boot)
+        } else if capturedWindow == nil { target = .display }
+        else { return }
+        PersistentAccess.save(.init(target: target))
+        accessEnabled = true; suspended = false
+        keepAvailable()
+        backgroundNotice = BackgroundAccess.enable()
+    }
     func refreshPermissions() {
         let screen = CGPreflightScreenCaptureAccess(), control = CGPreflightPostEventAccess()
         if screenAllowed != screen { screenAllowed = screen }
@@ -220,6 +299,7 @@ final class HostModel: ObservableObject {
                 // until a viewer connects. Each session gets a fresh SCStream.
                 if !lab { video.stop(); capture = nil }
                 sharing = true; starting = false; status = "Подключаем сервер…"
+                rememberAccess()
                 let signal = Signaling(identity: identity); signaling = signal
                 var registered = false
                 signal.onRelayRefresh = { [weak self] configuration in self?.iceConfiguration = configuration }
@@ -245,7 +325,7 @@ final class HostModel: ObservableObject {
             } catch {
                 guard connectionGeneration == generation else { video.stop(); return }
                 PerformanceLog.record("capture-error", ["domain": (error as NSError).domain, "code": (error as NSError).code])
-                stop(reason: "Не удалось начать показ экрана. Попробуйте открыть доступ ещё раз.", cause: "capture-start")
+                stop(reason: "Не удалось начать показ экрана. Попробуйте открыть доступ ещё раз.", cause: "capture-start", preservingAccess: true)
             }
         }
     }
@@ -278,7 +358,8 @@ final class HostModel: ObservableObject {
         guard trusted != nil || proofValid else { return }
         // A signed retry from the same device can replace its unfinished attempt.
         // An established session or another device still owns the connection.
-        if transport != nil, transport?.isReady == false, machine?.author == from { disconnectViewer() }
+        if transport != nil, machine?.author == from,
+           transport?.isReady == false || machine?.stalled == true || machine?.state.reason == "transport-disconnected" { disconnectViewer() }
         guard transport == nil, pending == nil else { signaling?.send(["type":"reject","to":from,"body":["reason":"busy"]]); return }
         seenNonces[offer.nonce] = Date()
         if let trusted, isLab || !trusted.labOnly { connect(offer, permissions: trusted.permissions) }
@@ -307,7 +388,7 @@ final class HostModel: ObservableObject {
         } else { machine = SessionMachine(surface: surface, permissions: permissions, author: offer.peerID) }
         _ = machine?.setSystemControlAllowed(isLab || controlAllowed)
         if !iceConfiguration.iceServers.isEmpty && iceConfiguration.expiresAt <= Date().timeIntervalSince1970 {
-            stop(reason: "Параметры подключения истекли. Откройте доступ заново.", cause: "relay-expired"); return
+            stop(reason: "Обновляем параметры подключения…", cause: "relay-expired", preservingAccess: true); return
         }
         let peer = PeerTransport(factory: factory, source: capture.source, ice: iceConfiguration); transport = peer
         connectedName = offer.name; status = "Соединяемся…"
@@ -330,7 +411,7 @@ final class HostModel: ObservableObject {
                     } catch {
                         guard let self, self.capture === capture, self.transport === peer else { return }
                         PerformanceLog.record("capture-error", ["domain": (error as NSError).domain, "code": (error as NSError).code])
-                        self.stop(reason: "Не удалось начать показ экрана. Попробуйте открыть доступ ещё раз.", cause: "capture-start")
+                        self.stop(reason: "Не удалось начать показ экрана. Попробуйте открыть доступ ещё раз.", cause: "capture-start", preservingAccess: true)
                     }
                 }
             }
@@ -360,6 +441,7 @@ final class HostModel: ObservableObject {
         let handlingStart = ProcessInfo.processInfo.systemUptime
         let effects = machine.handle(m, now: ProcessInfo.processInfo.systemUptime)
         if effects.accepted {
+            if m.type == "heartbeat" { _ = transport?.send(["type": "heartbeatAck"]) }
             if m.type.hasPrefix("stroke") { if transport?.send(["type":"ink","author":machine.author,"op":m.jsonObject()]) != true { disconnectViewer(); return } }
             apply(effects)
             if PerformanceLog.enabled && (m.type == "heartbeat" || m.type == "pointer" && m.action != "move") {
@@ -376,7 +458,16 @@ final class HostModel: ObservableObject {
         if e.accepted, machine?.connected == true, machine?.stalled == false, transport?.isReady == true, activity == nil {
             activity = ProcessInfo.processInfo.beginActivity(options: .userInteractive, reason: "WAI Remote active session")
         }
-        if let input = e.input { if isLab { capture?.applyLab(input) } else { injector.apply(input) } }
+        if let input = e.input {
+            if isLab { capture?.applyLab(input) }
+            else {
+                injector.apply(input)
+                if input.type == "pointer", let x = input.x, let y = input.y, let target = injector.windowTarget {
+                    if remotePointer == nil { remotePointer = RemotePointer() }
+                    remotePointer?.show(InkPoint(x, y), in: target)
+                }
+            }
+        }
         if let point = e.laser {
             overlay?.view.showLaser(point); labInk?.showLaser(point)
             _ = transport?.send(["type":"laser", "point":point.jsonObject()])
@@ -420,7 +511,7 @@ final class HostModel: ObservableObject {
         let video = VideoCapture(factory: factory)
         video.onError = { [weak self, weak video] _ in
             guard let self, self.capture === video else { return }
-            self.stop(reason: "Захват экрана остановлен системой", cause: "capture-stopped")
+            self.stop(reason: "Захват экрана остановлен системой", cause: "capture-stopped", preservingAccess: true)
         }
         return video
     }
@@ -436,6 +527,7 @@ final class HostModel: ObservableObject {
         }
     }
     func disconnectViewer() {
+        remotePointer?.hide()
         connectionDeadline = nil
         injector.releaseAll(); machine?.disconnect(); transport?.close(); transport = nil; connectedName = nil
         if !isLab { stopCapture() }
@@ -448,17 +540,24 @@ final class HostModel: ObservableObject {
         let updated = peers.filter { $0.id != id }
         do { try KeyStore.save(updated); peers = updated } catch { status = "Не удалось удалить устройство" }
     }
-    func stop(reason: String = "Доступ закрыт", cause: String = "owner") {
+    func stop(reason: String = "Доступ закрыт", cause: String = "owner", preservingAccess: Bool = false) {
+        if !preservingAccess {
+            if accessEnabled { BackgroundAccess.disable() }
+            PersistentAccess.save(nil); accessEnabled = false; suspended = false
+            if let accessActivity { ProcessInfo.processInfo.endActivity(accessActivity); self.accessActivity = nil }
+        }
+        resumeAfter = ProcessInfo.processInfo.systemUptime + 2
         if sharing || starting { PerformanceLog.record("host-stop", ["cause": cause, "connected": transport?.isReady == true]) }
         connectionGeneration = UUID(); sharing = false; starting = false; reconnecting = false
         disconnectViewer(); machine?.stop(); machine = nil
         stopCapture(); capturedDisplay = nil; capturedScreenFrame = nil; overlay?.close(); overlay = nil; labWindow?.orderOut(nil)
         injector.setWindowTarget(nil); capturedWindow = nil; sharedWindowName = nil; resizingWindow = false
         signaling?.close(); signaling = nil; pending = nil; secret = nil; invite = ""; status = reason
-        detail = "Чтобы подключиться снова, откройте доступ на этом Mac."
+        detail = accessEnabled ? "Доступ восстановится автоматически." : "Чтобы подключиться снова, откройте доступ на этом Mac."
     }
     func housekeeping(now: Date = Date()) {
         refreshPermissions()
+        if accessEnabled && !sharing && !starting { restoreAccess() }
         if sharing, capturedWindow != nil {
             guard let frame = injector.windowTarget?.frame else {
                 stop(reason: "Общее окно закрыто. Выберите другое окно.", cause: "window-closed"); return

@@ -13,7 +13,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML=`
       <textarea id="invite" rows="2" placeholder="Вставьте приглашение из WAI Remote" spellcheck="false" autocomplete="off"></textarea>
       <div class="form-row"><label for="deviceName">Название этого устройства</label><input id="deviceName" maxlength="50" value="Мой браузер" autocomplete="off"></div>
       <button id="connect" class="primary" type="submit">Подключиться</button>
-      <p id="connectStatus" class="status" role="status"></p>
+      <p id="connectStatus" class="status" role="status"></p><button id="cancelRetry" type="button" class="hidden">Отменить ожидание</button>
     </form>
   </section>
   <section id="session" class="session hidden">
@@ -42,6 +42,7 @@ let ws:WebSocket|undefined,pc:RTCPeerConnection|undefined,channel:RTCDataChannel
 let host:HostState|undefined,mode:Mode='control',generation=0,sequence=0;
 let hostKey='',hostID='',pairSecret='',nonce='',connectionToken=0;
 let heartbeat:number|undefined,ping:number|undefined,connectTimeout:number|undefined;
+let retryTimer:number|undefined,interruptionTimer:number|undefined,retryDelay=1000,recoveryURL:string|undefined,lastReply=0,hasHeartbeatAck=false;
 let strokes=new Map<string,Stroke>(),snapshot:Map<string,Stroke>|undefined,preview:Stroke|undefined;
 let pendingStrokes=new Map<string,Stroke>();
 let selectedID:string|undefined,erasePoint:Point|undefined;
@@ -67,8 +68,20 @@ updateConnectButton();
 el<HTMLInputElement>('deviceName').value=localStorage.getItem('wai-device-name')||(matchMedia('(pointer:coarse)').matches?'Мой телефон':'Мой браузер');
 
 function status(text:string){el('connectStatus').textContent=text;el('connectionLabel').textContent=text;}
+class RetryableConnectionError extends Error {}
 function fail(error:unknown){cleanup();status(error instanceof Error && !(error instanceof TypeError) && !(error instanceof DOMException) && !(error instanceof SyntaxError) && !(error instanceof RangeError)?error.message:'Не удалось подключиться. Проверьте приглашение и повторите попытку.');el<HTMLButtonElement>('connect').disabled=false;}
-function cleanup(){
+function recover(text:string){
+  const target=recoveryURL;
+  if(!target){fail(new Error(text+' Попробуйте подключиться снова.'));return;}
+  cleanup(false);status(text);el<HTMLButtonElement>('connect').disabled=true;
+  el('cancelRetry').classList.remove('hidden');
+  const delay=retryDelay;retryDelay=Math.min(15000,retryDelay*2);
+  retryTimer=window.setTimeout(()=>{retryTimer=undefined;el<HTMLTextAreaElement>('invite').value=target;void connect(true);},delay);
+}
+function cleanup(cancelRecovery=true){
+  clearTimeout(retryTimer);retryTimer=undefined;clearTimeout(interruptionTimer);interruptionTimer=undefined;
+  if(cancelRecovery){recoveryURL=undefined;retryDelay=1000;}
+  hasHeartbeatAck=false;el('cancelRetry').classList.add('hidden');
   connectionToken++;live=false;host=undefined;invalidated=false;
   clearInterval(heartbeat);clearInterval(ping);clearTimeout(connectTimeout);clearTimeout(longPress);
   channel?.close();channel=undefined;pc?.close();pc=undefined;ws?.close();ws=undefined;
@@ -79,8 +92,10 @@ function cleanup(){
 }
 function signal(type:string,body?:unknown){if(ws?.readyState===WebSocket.OPEN)ws.send(JSON.stringify({type,body}));}
 
-el('connectForm').addEventListener('submit',async event=>{
-  event.preventDefault();cleanup();const token=connectionToken;
+el('cancelRetry').addEventListener('click',()=>{cleanup();status('Вы отключились');});
+el('connectForm').addEventListener('submit',event=>{event.preventDefault();void connect();});
+async function connect(retrying=false){
+  cleanup(!retrying);const token=connectionToken;
   try{
     const url=new URL(el<HTMLTextAreaElement>('invite').value.trim());
     if(url.origin!==location.origin)throw new Error('Откройте приглашение в браузере по указанному в нём адресу.');
@@ -88,11 +103,13 @@ el('connectForm').addEventListener('submit',async event=>{
     hostKey=fragment.get('key')??'';hostID=fragment.get('host')??'';pairSecret=fragment.get('secret')??'';
     if(!hostKey||await keyID(hostKey)!==hostID)throw new Error('Ссылка повреждена. Скопируйте новое приглашение на Mac.');
     if(pairSecret&&unb64(pairSecret).length!==32)throw new Error('Некорректное приглашение');
+    if(!pairSecret)recoveryURL=url.href;
+    el('cancelRetry').classList.remove('hidden');
     el<HTMLButtonElement>('connect').disabled=true;status('Подключаемся…');
     device=await identity();if(token!==connectionToken)return;
     const name=el<HTMLInputElement>('deviceName').value.trim()||'Моё устройство';localStorage.setItem('wai-device-name',name);
     const socket=new WebSocket(new URL('signal',location.href).href.replace(/^http/,'ws'));ws=socket;
-    connectTimeout=window.setTimeout(()=>{if(token===connectionToken)fail(new Error('Время ожидания истекло. Проверьте, открыт ли доступ на Mac.'));},110000);
+    connectTimeout=window.setTimeout(()=>{if(token===connectionToken)recover('Ожидаем Mac…');},110000);
     socket.onmessage=async event=>{
       if(token!==connectionToken)return;
       try{
@@ -100,7 +117,7 @@ el('connectForm').addEventListener('submit',async event=>{
         const m=JSON.parse(event.data);
         if(m.type==='challenge'){
           const signature=await sign(device,'wai-remote/signal/v1',bytes(`viewer\n${hostID}\n${device.id}\n${m.nonce}`));
-          if(token===connectionToken)socket.send(JSON.stringify({type:'hello',role:'viewer',hostID,peerID:device.id,publicKey:device.publicKey,signature}));
+          if(token===connectionToken)socket.send(JSON.stringify({type:'hello',role:'viewer',hostID,peerID:device.id,publicKey:device.publicKey,signature,iceVersion:2}));
         }else if(m.type==='ready'){
           ping=window.setInterval(()=>signal('ping'),20000);await createOffer(name,token,iceConfiguration(m.ice));
         }else if(m.type==='answer'&&m.from===hostID){
@@ -112,41 +129,51 @@ el('connectForm').addEventListener('submit',async event=>{
           await pc!.setRemoteDescription({type:'answer',sdp:answer.sdp});
           status(answer.lab?'Проверка изображения':'Подключаемся…');
           const saved=new URL(location.pathname,location.origin);saved.hash=new URLSearchParams({host:hostID,key:hostKey}).toString();localStorage.setItem('wai-last-host',saved.href);
-          el<HTMLTextAreaElement>('invite').value=saved.href;pairSecret='';
+          el<HTMLTextAreaElement>('invite').value=saved.href;pairSecret='';recoveryURL=saved.href;
         }else if(m.type==='reject'){
+          if(m.body?.reason==='busy'||m.body?.reason==='network'){recover(m.body.reason==='busy'?'Mac занят. Ожидаем освобождения…':'Восстанавливаем соединение…');return;}
           throw new Error(m.body?.reason==='busy'?'На Mac уже подключено устройство. Отключите его в WAI Remote.':m.body?.reason==='new-invite-required'?'Создайте новое приглашение в WAI Remote на Mac.':'Mac отклонил подключение.');
-        }else if(m.type==='unavailable')throw new Error('Mac недоступен. Откройте доступ в приложении.');
-      }catch(error){if(token===connectionToken)fail(error);}
+        }else if(m.type==='unavailable'){recover('Ожидаем Mac…');return;}
+      }catch(error){if(token===connectionToken){if(error instanceof RetryableConnectionError)recover(error.message);else fail(error);}}
     };
-    socket.onerror=()=>{if(token===connectionToken&&!live)fail(new Error('Сервер подключения недоступен'));};
-    socket.onclose=()=>{if(token===connectionToken&&!live)fail(new Error('Связь с сервером закрыта'));};
-  }catch(error){if(token===connectionToken)fail(error);}
-});
+    socket.onerror=()=>{if(token===connectionToken&&!live)recover('Сервер временно недоступен…');};
+    socket.onclose=()=>{if(token===connectionToken&&!live)recover('Восстанавливаем соединение…');};
+  }catch(error){if(token===connectionToken){if(error instanceof RetryableConnectionError)recover(error.message);else fail(error);}}
+}
 
 async function createOffer(name:string,token:number,configuration:RTCConfiguration){
   const peer=new RTCPeerConnection(configuration);pc=peer;
   peer.addTransceiver('video',{direction:'recvonly'});
   const data=peer.createDataChannel('interaction',{ordered:true});channel=data;
   data.onmessage=event=>{if(token===connectionToken)receive(event.data);};
-  data.onclose=()=>{if(token===connectionToken)fail(new Error('Сеанс завершён на Mac. Можно подключиться снова, если доступ открыт.'));};
+  data.onclose=()=>{if(token===connectionToken)recover('Восстанавливаем соединение…');};
   peer.ontrack=event=>{if(token!==connectionToken)return;video.srcObject=event.streams[0]??new MediaStream([event.track]);void video.play().catch(()=>{});};
   peer.onconnectionstatechange=()=>{
     if(token!==connectionToken)return;
-    if(peer.connectionState==='failed')fail(new Error('Не удалось передать изображение. Проверьте сеть и откройте подключение заново.'));
-    if(peer.connectionState==='disconnected'){release();el('connectionLabel').textContent='Соединение прервано';}
+    if(peer.connectionState==='failed')recover('Восстанавливаем соединение…');
+    if(peer.connectionState==='disconnected'){release();el('connectionLabel').textContent='Восстанавливаем соединение…';if(!interruptionTimer)interruptionTimer=window.setTimeout(()=>{if(token===connectionToken)recover('Восстанавливаем соединение…');},5000);}
   };
   await peer.setLocalDescription(await peer.createOffer());
   await new Promise<void>((resolve,reject)=>{
-    if(peer.iceGatheringState==='complete'){resolve();return;}
-    const timer=setTimeout(()=>{peer.removeEventListener('icegatheringstatechange',change);reject(new Error('Не удалось подключиться. Проверьте интернет на обоих устройствах.'));},12000);
-    function change(){if(peer.iceGatheringState==='complete'){clearTimeout(timer);peer.removeEventListener('icegatheringstatechange',change);resolve();}}
-    peer.addEventListener('icegatheringstatechange',change);
+    const started=performance.now();
+    function finish(){
+      clearInterval(timer);peer.removeEventListener('icegatheringstatechange',change);
+      if(peer.localDescription?.sdp.includes('a=candidate:'))resolve();
+      else reject(new RetryableConnectionError('Ищем сетевой маршрут…'));
+    }
+    function change(){if(peer.iceGatheringState==='complete')finish();}
+    const timer=window.setInterval(()=>{
+      const elapsed=performance.now()-started,sdp=peer.localDescription?.sdp??'';
+      const usable=configuration.iceTransportPolicy==='relay'?sdp.includes(' typ relay'):sdp.includes('a=candidate:');
+      if(elapsed>=12000||elapsed>=2000&&usable)finish();
+    },100);
+    peer.addEventListener('icegatheringstatechange',change);change();
   });
   if(token!==connectionToken)return;
   nonce=b64(crypto.getRandomValues(new Uint8Array(32)));
   const payload=bytes(JSON.stringify({hostID,peerID:device.id,publicKey:device.publicKey,nonce,expiresAt:Date.now()+100000,name,sdp:peer.localDescription!.sdp}));
   const body={payload:b64(payload),signature:await sign(device,'wai-remote/offer/v1',payload),proof:pairSecret?await proof(pairSecret,payload):undefined};
-  if(token!==connectionToken)return;signal('offer',body);status('Подтвердите подключение в WAI Remote на Mac.');
+  if(token!==connectionToken)return;signal('offer',body);status(pairSecret?'Подтвердите подключение в WAI Remote на Mac.':'Подключаемся к Mac…');
 }
 
 function send(type:string,fields:Record<string,unknown>={}):boolean{
@@ -159,8 +186,10 @@ function send(type:string,fields:Record<string,unknown>={}):boolean{
 function receive(raw:unknown){
   if(typeof raw!=='string'||raw.length>65000){fail(new Error('Некорректное сообщение Mac'));return;}
   try{
-    const m=JSON.parse(raw);
+    const m=JSON.parse(raw);lastReply=performance.now();
+    if(m.type==='heartbeatAck'){hasHeartbeatAck=true;return;}
     if(m.type==='state'){
+      clearTimeout(interruptionTimer);interruptionTimer=undefined;retryDelay=1000;
       const next=m.state as HostState;
       if(!Number.isSafeInteger(next.inputEpoch)||next.surface.width<=0||next.surface.height<=0||next.surface.width>32768||next.surface.height>32768)throw new Error('Некорректный экран');
       const changed=!host||next.inputEpoch!==host.inputEpoch||next.sessionID!==host.sessionID||next.controllerEpoch!==host.controllerEpoch;
@@ -169,7 +198,7 @@ function receive(raw:unknown){
       else{sequence=Math.max(sequence,next.nextSequence);if(next.modeGeneration>=generation){generation=next.modeGeneration;mode=next.mode;}}
       if(layerChanged){cancelGesture(false);pendingStrokes.clear();}
       host=next;invalidated=false;
-      if(!live){live=true;clearTimeout(connectTimeout);el('welcome').classList.add('hidden');el('session').classList.remove('hidden');heartbeat=window.setInterval(()=>{if(!document.hidden)send('heartbeat');},500);send('heartbeat');}
+      if(!live){live=true;clearTimeout(connectTimeout);el('welcome').classList.add('hidden');el('session').classList.remove('hidden');heartbeat=window.setInterval(()=>{if(document.hidden)return;if(hasHeartbeatAck&&performance.now()-lastReply>8000)recover('Восстанавливаем соединение…');else send('heartbeat');},500);send('heartbeat');}
       updateMode();layout();
       el('connectionLabel').textContent=m.lab?'Проверка изображения':next.permissions.control?'':'Только просмотр';
     }else if(m.type==='ink'){

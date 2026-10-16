@@ -40,6 +40,12 @@ class MacViewerModel: ObservableObject {
     private var transport: ViewerTransport?
     private var heartbeat: Timer?
     private var timeout: Timer?
+    private var retryTimer: Timer?
+    private var interruptionTimer: Timer?
+    private var retryDelay: TimeInterval = 1
+    private var recoveryInvitation: String?
+    private var heartbeatAcknowledged = false
+    private var lastReply = ProcessInfo.processInfo.systemUptime
     private var activity: NSObjectProtocol?
     private var workspaceObservers: [NSObjectProtocol] = []
     private var resumeInvitation: String?
@@ -53,8 +59,8 @@ class MacViewerModel: ObservableObject {
     private var offerStarted = false
     private(set) var lastCursor = InkPoint(0.5, 0.5)
     var mode: RemoteMode { session.mode }
-    var canControl: Bool { connected && receivedFrame && !session.invalidated && mode == .control && session.state?.permissions.control == true }
-    var canDraw: Bool { connected && receivedFrame && !session.invalidated && mode == .draw && session.state?.permissions.annotate == true }
+    var canControl: Bool { connected && receivedFrame && !connectionInterrupted && !session.invalidated && mode == .control && session.state?.permissions.control == true }
+    var canDraw: Bool { connected && receivedFrame && !connectionInterrupted && !session.invalidated && mode == .draw && session.state?.permissions.annotate == true }
     var visibleStrokes: [InkStroke] { strokes.filter { previews[$0.id] == nil && !hiddenIDs.contains($0.id) } + previews.values.sorted { $0.id < $1.id } }
 
     @Published var computerName = "Другой Mac"
@@ -80,7 +86,7 @@ class MacViewerModel: ObservableObject {
         guard connected || connecting else { return }
         // Only an established session may resume. A pairing request must not
         // reappear without a fresh user action, and input is never replayed.
-        let saved = connected ? currentInvite?.savedURL.absoluteString : nil
+        let saved = connected ? currentInvite?.savedURL.absoluteString : recoveryInvitation
         disconnect(message: saved == nil ? "Подключение прервано" : "Соединение приостановлено")
         resumeInvitation = saved
         connectionInterrupted = saved != nil
@@ -121,7 +127,7 @@ class MacViewerModel: ObservableObject {
         do {
             let invite = try RemoteInvite(invitation)
             guard invite.hostID != identity.id else { status = "Это приглашение с этого Mac"; detail = "Откройте WAI Remote на другом Mac и скопируйте его приглашение."; return }
-            disconnect(message: "")
+            disconnect(message: "", cancelRecovery: false)
             invitationDraft = ""
             currentInvite = invite
             computerName = computers.first(where: { $0.id == invite.hostID })?.name ?? "Другой Mac"
@@ -132,10 +138,10 @@ class MacViewerModel: ObservableObject {
             signal.onMessage = { [weak self] message in guard let self, self.attempt == token else { return }; self.signal(message, invite: invite, token: token) }
             signal.onFailure = { [weak self] in
                 guard let self, self.attempt == token else { return }
-                if !self.connected { self.disconnect(message: "Не удалось связаться с Mac. Проверьте интернет и убедитесь, что на нём открыт доступ.") }
+                if !self.connected { self.recover(message: "Ожидаем Mac…") }
             }
             timeout = Timer.connectionTimer(withTimeInterval: 110, repeats: false) { [weak self] _ in
-                guard let self, self.attempt == token else { return }; self.disconnect(message: "Время подключения истекло. Проверьте доступ на другом Mac и попробуйте снова.")
+                guard let self, self.attempt == token else { return }; self.recover(message: "Mac пока не отвечает…")
             }
             signal.connect()
         } catch { status = "Нужно приглашение с Mac"; detail = "Скопируйте ссылку целиком из WAI Remote. Для первого подключения нужна новая ссылка." }
@@ -147,8 +153,19 @@ class MacViewerModel: ObservableObject {
         peer.onMessage = { [weak self] data in guard let self, self.attempt == token else { return }; self.receive(data) }
         peer.onState = { [weak self] state in
             guard let self, self.attempt == token else { return }
-            if state == .failed || state == .closed { self.disconnect(message: "Соединение закрыто. Доступ на Mac можно открыть снова.") }
-            if state == .disconnected { self.transport?.clipboard.setEnabled(false); self.cancelGesture(notify: false); self.session.interrupt(); self.connectionInterrupted = true; self.status = "Соединение прервано" }
+            if state == .failed || state == .closed { self.recover(message: "Восстанавливаем соединение…") }
+            if state == .disconnected {
+                self.cancelGesture(notify: false); self.session.interrupt()
+                self.connectionInterrupted = true; self.receivedFrame = false
+                self.status = "Восстанавливаем соединение…"
+                if self.interruptionTimer == nil {
+                    self.interruptionTimer = Timer.connectionTimer(withTimeInterval: 5, repeats: false) { [weak self] _ in
+                        guard let self, self.attempt == token, self.connectionInterrupted else { return }
+                        self.recover(message: "Восстанавливаем соединение…")
+                    }
+                }
+            }
+            if state == .disconnected { self.transport?.clipboard.setEnabled(false) }
         }
         peer.offer { [weak self] result in
             guard let self, self.attempt == token else { return }
@@ -164,7 +181,7 @@ class MacViewerModel: ObservableObject {
                 if let secret = invite.secret { body["proof"] = DeviceIdentity.pairingProof(secret: secret, payload: payload) }
                 self.signaling?.send(["type": "offer", "body": body])
                 self.status = invite.secret == nil ? "Подключаемся к Mac…" : "Подтвердите на другом Mac"; self.detail = "При первом подключении владелец Mac разрешает просмотр или управление."
-            } catch { self.disconnect(message: "Не удалось подготовить соединение. Проверьте интернет и попробуйте снова.") }
+            } catch { self.recover(message: "Ищем сетевой маршрут…") }
         }
     }
     private func signal(_ message: [String: Any], invite: RemoteInvite, token: UUID) {
@@ -182,17 +199,38 @@ class MacViewerModel: ObservableObject {
             status = "Подключаем экран…"
             transport?.answer(sdp) { [weak self] error in
                 guard let self, self.attempt == token else { return }
-                if error != nil { self.disconnect(message: "Не удалось подключить изображение Mac.") }
+                if error != nil { self.recover(message: "Восстанавливаем изображение…") }
             }
             if let name = payload["name"] as? String, !name.isEmpty, name.utf8.count <= 200,
                !computers.contains(where: { $0.id == invite.hostID }) { computerName = String(name.prefix(60)) }
-        } else if message["type"] as? String == "unavailable" { disconnect(message: "Mac недоступен. Откройте доступ в WAI Remote на Mac.") }
+        } else if message["type"] as? String == "unavailable" { recover(message: "Ожидаем Mac…") }
         else if message["type"] as? String == "reject" {
             let reason = (message["body"] as? [String: Any])?["reason"] as? String
+            if reason == "network" || reason == "busy" { recover(message: reason == "busy" ? "Mac занят. Ожидаем освобождения…" : "Восстанавливаем соединение…"); return }
             disconnect(message: reason == "busy" ? "К Mac уже подключено другое устройство." : reason == "network" ? "Не удалось установить соединение через интернет. Попробуйте подключиться снова." : reason == "new-invite-required" ? "Откройте доступ к экрану Mac и создайте новое приглашение." : "Подключение отклонено на Mac.")
         }
     }
-    func disconnect(message: String = "Вы отключились") {
+    func recover(message: String) {
+        let target = currentInvite.flatMap { invite in
+            invite.secret == nil || connected || answerAccepted ? invite.savedURL.absoluteString : nil
+        } ?? recoveryInvitation
+        guard let target else { disconnect(message: message + " Попробуйте подключиться снова."); return }
+        let delay = retryDelay
+        disconnect(message: message, cancelRecovery: false)
+        recoveryInvitation = target
+        retryDelay = min(delay * 2, 15)
+        connecting = true; connectionInterrupted = true
+        detail = "Соединение восстановится автоматически. Можно отменить ожидание."
+        retryTimer = Timer.connectionTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+            guard let self, self.recoveryInvitation == target else { return }
+            self.retryTimer = nil; self.connecting = false; self.invitation = target; self.connect()
+        }
+    }
+    func disconnect(message: String = "Вы отключились", cancelRecovery: Bool = true) {
+        retryTimer?.invalidate(); retryTimer = nil
+        interruptionTimer?.invalidate(); interruptionTimer = nil
+        if cancelRecovery { recoveryInvitation = nil; retryDelay = 1 }
+        heartbeatAcknowledged = false
         resumeInvitation = nil
         if connected, let release = session.release(), let data = try? JSONEncoder().encode(release) { _ = transport?.send(data) }
         attempt = UUID(); heartbeat?.invalidate(); heartbeat = nil; timeout?.invalidate(); timeout = nil
@@ -212,7 +250,7 @@ class MacViewerModel: ObservableObject {
             pendingMeasurements = pendingMeasurements.filter { now - $0.value.time < 30 }
             pendingMeasurements[operation.operationID] = (now, operation.action ?? operation.type)
         }
-        guard transport?.send(data) == true else { disconnect(message: "Соединение прервано"); return false }
+        guard transport?.send(data) == true else { recover(message: "Восстанавливаем соединение…"); return false }
         return true
     }
     @discardableResult func send(_ type: String, edit: (inout WireMessage) -> Void = { _ in }) -> Bool {
@@ -222,7 +260,9 @@ class MacViewerModel: ObservableObject {
     private func receive(_ data: Data) {
         do {
             guard let m = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+            lastReply = ProcessInfo.processInfo.systemUptime
             switch m["type"] as? String {
+            case "heartbeatAck": heartbeatAcknowledged = true
             case "performanceAck":
                 if let id = m["id"] as? String, let sent = pendingMeasurements.removeValue(forKey: id) {
                     PerformanceLog.record("input-roundtrip", ["kind": sent.kind, "ms": (ProcessInfo.processInfo.systemUptime - sent.time) * 1000])
@@ -231,12 +271,18 @@ class MacViewerModel: ObservableObject {
                 let state = try decode(m["state"] ?? [:], as: HostState.self)
                 objectWillChange.send()
                 if try session.accept(state) { cancelGesture(notify: false) }
-                connectionInterrupted = false
+                connectionInterrupted = false; interruptionTimer?.invalidate(); interruptionTimer = nil
+                retryDelay = 1; recoveryInvitation = currentInvite?.savedURL.absoluteString
                 if !connected {
                     connected = true; connecting = false; timeout?.invalidate(); timeout = nil
                     activity = ProcessInfo.processInfo.beginActivity(options: .userInteractive, reason: "WAI Remote live screen")
                     remember()
-                    heartbeat = Timer.connectionTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in _ = self?.send("heartbeat") }
+                    heartbeat = Timer.connectionTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+                        guard let self else { return }
+                        if self.heartbeatAcknowledged && ProcessInfo.processInfo.systemUptime - self.lastReply > 8 {
+                            self.recover(message: "Восстанавливаем соединение…")
+                        } else { _ = self.send("heartbeat") }
+                    }
                 }
                 status = mode == .paused ? "Владелец Mac приостановил управление" : m["lab"] as? Bool == true ? "Проверочный экран" : "Подключено"
                 transport?.clipboard.onPasteFailure = { [weak self] message in self?.pasteFailure = message }

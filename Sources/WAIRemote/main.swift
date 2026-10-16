@@ -20,11 +20,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 600), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "WAI Remote"; window.isReleasedWhenClosed = false
+        window.titlebarAppearsTransparent = true; window.titlebarSeparatorStyle = .none
         window.contentMinSize = NSSize(width: 560, height: 480)
         window.contentViewController = NSHostingController(rootView: ProgressView("Открываем WAI Remote…").frame(width: 640, height: 600))
-        window.center(); window.makeKeyAndOrderFront(nil)
+        window.center()
+        if !CommandLine.arguments.contains("--background") { window.makeKeyAndOrderFront(nil) }
         makeMenus()
-        NSApp.activate(ignoringOtherApps: true)
+        if !CommandLine.arguments.contains("--background") { NSApp.activate(ignoringOtherApps: true) }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let result = Result { try KeyStore.identity() }
             DispatchQueue.main.async {
@@ -38,7 +40,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                         UserDefaults.standard.removeObject(forKey: "continueSharingAfterPermissionRestart")
                         self.model.permissionRequested = true
                         self.model.start(lab: false)
-                    } else { self.model.resumeAfterUpdate() }
+                    } else { self.model.resumeAfterUpdate()
+                        self.model.restoreAccess() }
                     self.window.contentViewController = NSHostingController(rootView: HomeView(host: self.model, viewer: self.viewer, connect: self.connect))
                     self.window.setContentSize(NSSize(width: 640, height: 600))
                     self.model.$pending.sink { [weak self] value in if value != nil { self?.showHome() } }.store(in: &self.subscriptions)
@@ -67,7 +70,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         menu.addItem(withTitle: "Проверить обновления…", action: #selector(checkUpdates), keyEquivalent: "")
         menu.addItem(withTitle: "Настройки…", action: #selector(diagnostics), keyEquivalent: ",")
         menu.addItem(.separator())
-        menu.addItem(withTitle: "Завершить WAI Remote", action: #selector(quit), keyEquivalent: "q")
+        menu.addItem(withTitle: "Закрыть доступ и выйти", action: #selector(quit), keyEquivalent: "q")
         for item in menu.items { item.target = self }
         statusItem.menu = menu
         let main = NSMenu(), appItem = NSMenuItem(); main.addItem(appItem); appItem.submenu = menu.copy() as? NSMenu
@@ -129,7 +132,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
     }
     @objc func stop() { model?.stop() }
-    @objc func quit() { NSApp.terminate(nil) }
+    @objc func quit() { model?.stop(); NSApp.terminate(nil) }
     @objc func checkUpdates() { updater.check() }
     @objc func about() { NSApp.orderFrontStandardAboutPanel(nil); NSApp.activate(ignoringOtherApps: true) }
     @objc func diagnostics() {
@@ -151,7 +154,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     func applicationWillTerminate(_ notification: Notification) {
         if updater.relaunchingForUpdate { model?.prepareForUpdateRelaunch() }
-        viewer?.disconnect(); model?.stop()
+        viewer?.disconnect(); model?.stop(cause: "application-exit", preservingAccess: true)
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { showWindow(); return false }

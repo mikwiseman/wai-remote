@@ -6,6 +6,19 @@ import XCTest
 
 @MainActor
 final class SignalingTests: XCTestCase {
+    func testSilentHalfOpenSocketIsReplacedWithoutWaitingForTheTCPTimeout() throws {
+        let gateway = try TestGateway()
+        defer { gateway.stop() }
+        let signal = Signaling(identity: DeviceIdentity(), heartbeatInterval: 0.1, responseTimeout: 0.25)
+        defer { signal.close() }
+        let ready = expectation(description: "Replace a socket that accepts writes but stops responding")
+        ready.expectedFulfillmentCount = 2
+        signal.onReady = { _ in ready.fulfill() }
+        signal.onFailure = { error in XCTFail(error) }
+        signal.connect(url: try start(gateway))
+        wait(for: [ready], timeout: 3)
+        XCTAssertEqual(gateway.connections.count, 2)
+    }
     func testHostRegistersAgainAfterSignalingConnectionIsLost() throws {
         let gateway = try TestGateway()
         defer { gateway.stop() }

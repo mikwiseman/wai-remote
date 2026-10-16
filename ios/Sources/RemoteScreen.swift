@@ -16,6 +16,7 @@ final class ScreenView: UIView, RTCVideoViewDelegate {
     private let video = RTCMTLVideoView(frame: .zero)
     private let ink = PhoneInkView()
     private var currentTrack: RTCVideoTrack?
+    private let frameObserver = FirstPhoneFrame()
     private var zoom: CGFloat = 1
     private var offset = CGPoint.zero
     private var touches = [ObjectIdentifier: CGPoint]()
@@ -37,6 +38,10 @@ final class ScreenView: UIView, RTCVideoViewDelegate {
         isMultipleTouchEnabled = true; clipsToBounds = true; backgroundColor = UIColor(white: 0.08, alpha: 1)
         content.isUserInteractionEnabled = false; content.clipsToBounds = true
         video.videoContentMode = .scaleAspectFit; video.delegate = self
+        frameObserver.onFrame = { [weak self] in
+            guard let self, self.currentTrack != nil, !self.model.connectionInterrupted else { return }
+            self.model.receivedFrame = true
+        }
         addSubview(content); content.addSubview(video); content.addSubview(ink)
         isAccessibilityElement = true; accessibilityLabel = "Экран Mac"
         accessibilityHint = "Касание — клик, удержание — перетаскивание. Два пальца — прокрутка или масштаб."
@@ -44,13 +49,18 @@ final class ScreenView: UIView, RTCVideoViewDelegate {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     func update() {
-        if currentTrack !== model.track { currentTrack?.remove(video); currentTrack = model.track; currentTrack?.add(video) }
+        if currentTrack !== model.track {
+            currentTrack?.remove(video); currentTrack?.remove(frameObserver)
+            currentTrack = model.track; frameObserver.reset()
+            currentTrack?.add(video); currentTrack?.add(frameObserver)
+        }
+        if !model.receivedFrame && !model.connectionInterrupted { frameObserver.arm() }
         if revision != model.gestureRevision { revision = model.gestureRevision; resetGesture() }
         if zoomRevision != model.resetZoomRevision { zoomRevision = model.resetZoomRevision; zoom = 1; offset = .zero }
         ink.strokes = model.visibleStrokes; ink.selectedID = model.selectedID; ink.surfaceWidth = CGFloat(model.session.state?.surface.width ?? 1280)
         ink.setNeedsDisplay(); setNeedsLayout()
     }
-    func detach() { resetGesture(); currentTrack?.remove(video); currentTrack = nil }
+    func detach() { frameObserver.reset(); resetGesture(); currentTrack?.remove(video); currentTrack?.remove(frameObserver); currentTrack = nil }
     override func layoutSubviews() {
         super.layoutSubviews()
         let surface = model.session.state?.surface
@@ -63,8 +73,7 @@ final class ScreenView: UIView, RTCVideoViewDelegate {
         video.frame = content.bounds; ink.frame = content.bounds; ink.setNeedsDisplay()
     }
     func videoView(_ videoView: RTCVideoRenderer, didChangeVideoSize size: CGSize) {
-        guard size.width > 0, size.height > 0 else { return }
-        DispatchQueue.main.async { [weak self] in guard let self, self.currentTrack != nil else { return }; if !self.model.receivedFrame { self.model.receivedFrame = true } }
+        // Size negotiation is not proof of a fresh frame.
     }
     private func normalized(_ point: CGPoint) -> InkPoint {
         let p = content.convert(point, from: self)
@@ -211,4 +220,23 @@ private func segmentDistance(_ p: CGPoint, _ a: CGPoint, _ b: CGPoint) -> CGFloa
     let dx = b.x - a.x, dy = b.y - a.y, length = dx * dx + dy * dy
     let t = length == 0 ? 0 : max(0, min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / length))
     return hypot(p.x - a.x - t * dx, p.y - a.y - t * dy)
+}
+
+private final class FirstPhoneFrame: NSObject, RTCVideoRenderer {
+    private let lock = NSLock()
+    private var waiting = true
+    private var generation = 0
+    var onFrame: (() -> Void)?
+    func arm() { lock.lock(); waiting = true; lock.unlock() }
+    func reset() { lock.lock(); generation += 1; waiting = true; lock.unlock() }
+    func setSize(_ size: CGSize) {}
+    func renderFrame(_ frame: RTCVideoFrame?) {
+        guard let frame, frame.width > 0, frame.height > 0 else { return }
+        lock.lock(); let notify = waiting, token = generation; waiting = false; lock.unlock()
+        if notify { DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.lock.lock(); let current = self.generation == token; self.lock.unlock()
+            if current { self.onFrame?() }
+        } }
+    }
 }

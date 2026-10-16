@@ -20,7 +20,7 @@ struct HomeView: View {
             Picker("Что вы хотите сделать", selection: $sharingTab) {
                 Text("Подключиться").tag(false)
                 Text("Поделиться экраном").tag(true)
-            }.pickerStyle(.segmented).labelsHidden().controlSize(.large).frame(width: 360).padding(.top, 22)
+            }.pickerStyle(.segmented).labelsHidden().controlSize(.large).frame(width: 380).padding(8).remoteGlass(cornerRadius: 22).padding(.top, 22)
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
                     if sharingTab { shareContent } else { connectContent }
@@ -32,9 +32,9 @@ struct HomeView: View {
             }
         }
         .frame(minWidth: 560, minHeight: 480)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background { RemoteBackdrop() }
         .tint(accent)
-        .onAppear { if host.starting || host.sharing || host.permissionRequested { sharingTab = true } }
+        .onAppear { if host.starting || host.sharing || host.accessEnabled || host.permissionRequested { sharingTab = true } }
         .onChange(of: host.pending?.id) { _, pending in if pending != nil { sharingTab = true } }
         .sheet(item: $editing) { computer in
             VStack(alignment: .leading, spacing: 18) {
@@ -46,7 +46,7 @@ struct HomeView: View {
         .sheet(isPresented: $choosingWindow) {
             VStack(alignment: .leading, spacing: 18) {
                 Text("Выберите окно").font(.title2.weight(.semibold))
-                Text("Вы будете управлять этим окном. Человек за Mac сможет работать в других приложениях. Буфер обмена общий.")
+                Text("Удалённый курсор работает внутри выбранного окна. Владелец Mac продолжает пользоваться своей мышью в других приложениях.")
                     .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 if loadingWindows {
                     ProgressView().frame(maxWidth: .infinity).frame(height: 260)
@@ -81,13 +81,16 @@ struct HomeView: View {
     }
     private var connectContent: some View {
         VStack(alignment: .leading, spacing: 24) {
-            Text("Подключиться к Mac").font(.system(size: 28, weight: .semibold))
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Ваши компьютеры").font(.system(size: 30, weight: .semibold))
+                Text("Откройте сохранённый Mac или добавьте новый.").font(.callout).foregroundStyle(.secondary)
+            }
             VStack(alignment: .leading, spacing: 10) {
                 Text("Приглашение").font(.system(size: 12, weight: .medium))
                 HStack(spacing: 10) {
                     TextField("Вставьте ссылку подключения", text: $viewer.invitationDraft).textFieldStyle(.roundedBorder)
                         .controlSize(.large).onSubmit(connectInvitation).accessibilityIdentifier("connectionInvitation")
-                    Button("Подключиться", action: connectInvitation).buttonStyle(.borderedProminent).controlSize(.large)
+                    Button("Подключиться", action: connectInvitation).remotePrimaryButton().controlSize(.large)
                         .disabled(viewer.invitationDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || viewer.connecting)
                 }
                 Text("На другом Mac откройте WAI Remote и выберите «Поделиться экраном».")
@@ -96,7 +99,7 @@ struct HomeView: View {
             if !viewer.computers.isEmpty {
                 Divider()
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("Сохранённые компьютеры").font(.headline)
+                    Text("Сохранённые").font(.subheadline.weight(.medium)).foregroundStyle(.secondary)
                     ForEach(viewer.computers) { computer in
                         HStack(spacing: 14) {
                             Image(systemName: "desktopcomputer").font(.system(size: 23)).foregroundStyle(accent)
@@ -108,7 +111,7 @@ struct HomeView: View {
                                 Button("Переименовать…") { computerName = computer.name; editing = computer }
                                 Button("Забыть этот Mac", role: .destructive) { viewer.forget(computer.id) }
                             } label: { Image(systemName: "ellipsis") }.menuStyle(.borderlessButton).menuIndicator(.hidden).frame(width: 22).accessibilityLabel("Действия с компьютером «\(computer.name)»")
-                        }.padding(.vertical, 4)
+                        }.padding(16).remoteGlass(cornerRadius: 18)
                     }
                 }
             }
@@ -116,7 +119,7 @@ struct HomeView: View {
     }
     private var shareContent: some View {
         VStack(alignment: .leading, spacing: 24) {
-            title(host.reconnecting ? "Восстанавливаем соединение" : host.pending != nil ? "Запрос подключения" : host.sharing ? "Доступ открыт" : "Поделиться экраном", subtitle: host.reconnecting ? "Соединение восстановится автоматически, когда сервер станет доступен." : host.pending != nil || host.connectedName != nil ? "" : host.sharing ? "При первом подключении потребуется ваше разрешение." : "Отправьте приглашение человеку, которому хотите показать экран.")
+            title(host.suspended ? "Доступ приостановлен" : host.reconnecting ? "Восстанавливаем соединение" : host.pending != nil ? "Запрос подключения" : host.sharing ? "Доступ открыт" : "Поделиться экраном", subtitle: host.suspended ? "Продолжим автоматически после разблокировки Mac." : host.reconnecting ? "Соединение восстановится автоматически, когда сервер станет доступен." : host.pending != nil || host.connectedName != nil ? "" : host.sharing ? "Сохранённые устройства могут подключаться в любой момент." : "Отправьте приглашение человеку, которому хотите показать экран.")
             if (!host.sharing || !host.isLab) && (!host.screenAllowed || !host.controlAllowed) {
                 VStack(alignment: .leading, spacing: 16) {
                     if !host.screenAllowed { permission("Запись экрана", detail: "Разрешите запись экрана для WAI Remote в настройках macOS.", action: host.requestScreen) }
@@ -136,14 +139,21 @@ struct HomeView: View {
                         Button("Отклонить") { host.reject() }
                         Spacer()
                         Button("Только просмотр") { host.approve(control: false) }
-                        Button("Разрешить управление") { host.approve(control: true) }.buttonStyle(.borderedProminent).disabled(!host.controlAllowed && !host.isLab)
+                        Button("Разрешить управление") { host.approve(control: true) }.remotePrimaryButton().disabled(!host.controlAllowed && !host.isLab)
                     }
-                }.padding(20).background(accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
+                }.padding(20).remoteGlass()
+            }
+            if host.accessEnabled && !host.sharing {
+                Label(host.status, systemImage: "moon.zzz").foregroundStyle(.secondary)
+                Button("Закрыть доступ", role: .destructive) { host.stop() }
+            }
+            if let notice = host.backgroundNotice {
+                Text(notice).font(.callout).foregroundStyle(.orange)
             }
             if host.sharing {
                 if let name = host.sharedWindowName {
                     Label(name, systemImage: "macwindow").font(.callout)
-                    Text("Передаётся только это окно. Буфер обмена общий.").font(.caption).foregroundStyle(.secondary)
+                    Text("Независимая мышь. Буфер обмена общий.").font(.caption).foregroundStyle(.secondary)
                 }
                 if let name = host.connectedName {
                     Label(name, systemImage: "desktopcomputer").font(.headline)
@@ -160,7 +170,7 @@ struct HomeView: View {
                         Button(copied ? "Приглашение скопировано" : "Скопировать приглашение") {
                             host.copyInvite(); copied = true
                             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { copied = false }
-                        }.buttonStyle(.borderedProminent).controlSize(.large)
+                        }.remotePrimaryButton().controlSize(.large)
                         Text("Без ограничения по времени.").font(.system(size: 11)).foregroundStyle(.secondary)
                     }
                 } else if host.pending == nil && !host.starting {
@@ -171,21 +181,23 @@ struct HomeView: View {
                     Spacer()
                     Button("Закрыть доступ", role: .destructive) { host.stop() }.controlSize(.large)
                 }
-                Text("При блокировке или переходе Mac в сон доступ закроется.")
+                Text("Доступ сохраняется после обновлений и перезапуска. Экран заблокированного Mac не передаётся.")
                     .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             } else {
                 Button { host.start(lab: false) } label: {
                     HStack { if host.starting { ProgressView().controlSize(.small) }; Text(host.starting ? "Открываем доступ…" : "Открыть доступ к экрану") }
-                }.buttonStyle(.borderedProminent).controlSize(.large).disabled(host.starting || !host.screenAllowed)
+                }.remotePrimaryButton().controlSize(.large).disabled(host.starting || !host.screenAllowed)
                 if WindowInputTarget.isSupported {
-                    Button("Работать в отдельном окне…") { choosingWindow = true }
+                    Button { choosingWindow = true } label: {
+                        Label("Независимая мышь · выбрать окно", systemImage: "cursorarrow.motionlines")
+                    }.controlSize(.large)
                         .disabled(host.starting || !host.screenAllowed)
                 }
                 if host.status != "Доступ закрыт" { Text(host.status).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
             }
             if !host.peers.isEmpty {
                 DisclosureGroup("Разрешённые устройства (\(host.peers.count))") {
-                    Text("Могут подключаться без нового приглашения, пока доступ открыт.").foregroundStyle(.secondary).padding(.top, 8)
+                    Text("Разрешение действует до отзыва. Новое приглашение не требуется.").foregroundStyle(.secondary).padding(.top, 8)
                     ForEach(host.peers) { peer in
                         HStack { Text(peer.name); Spacer(); Button("Отозвать доступ") { host.forget(peer.id) } }.padding(.top, 10)
                     }

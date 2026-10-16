@@ -8,12 +8,17 @@ final class Signaling {
     private var endpoint: URL?
     private var retry: Timer?
     private var retryDelay: TimeInterval = 1
+    private var lastReply = ProcessInfo.processInfo.systemUptime
+    private let heartbeatInterval: TimeInterval
+    private let responseTimeout: TimeInterval
     var onReady: ((ICEConfiguration) -> Void)?
     var onRelayRefresh: ((ICEConfiguration) -> Void)?
     var onMessage: (([String: Any]) -> Void)?
     var onFailure: ((String) -> Void)?
     var onReconnecting: (() -> Void)?
-    init(identity: DeviceIdentity) { self.identity = identity }
+    init(identity: DeviceIdentity, heartbeatInterval: TimeInterval = 20, responseTimeout: TimeInterval = 45) {
+        self.identity = identity; self.heartbeatInterval = heartbeatInterval; self.responseTimeout = responseTimeout
+    }
     func connect(url: URL) {
         close(); endpoint = url; openSocket()
     }
@@ -21,7 +26,12 @@ final class Signaling {
         guard let url = endpoint else { return }
         let socket = URLSession.shared.webSocketTask(with: url); self.socket = socket
         socket.maximumMessageSize = 131_072; socket.resume(); receive(socket)
-        ping = Timer.connectionTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in self?.send(["type": "ping"]) }
+        lastReply = ProcessInfo.processInfo.systemUptime
+        ping = Timer.connectionTimer(withTimeInterval: heartbeatInterval, repeats: true) { [weak self, weak socket] _ in
+            guard let self, let socket, self.socket === socket else { return }
+            if ProcessInfo.processInfo.systemUptime - self.lastReply > self.responseTimeout { self.reconnect(after: socket) }
+            else { self.send(["type": "ping"]) }
+        }
     }
     private func receive(_ current: URLSessionWebSocketTask) {
         current.receive { [weak self] result in
@@ -30,6 +40,7 @@ final class Signaling {
                 switch result {
                 case .failure: self.reconnect(after: current)
                 case .success(let message):
+                    self.lastReply = ProcessInfo.processInfo.systemUptime
                     let data: Data
                     switch message { case .data(let d): data = d; case .string(let s): data = Data(s.utf8); @unknown default: return }
                     if let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] { self.handle(object) }
@@ -39,6 +50,7 @@ final class Signaling {
         }
     }
     private func reconnect(after current: URLSessionWebSocketTask) {
+        guard socket === current else { return }
         // A duplicate registration may remain on the gateway until its old socket
         // times out. Retry that rejection too; only explicit authentication failure
         // is terminal. Never tear down an established WebRTC session here.
@@ -78,7 +90,14 @@ final class Signaling {
     }
     func send(_ object: [String: Any]) {
         guard let data = try? JSONSerialization.data(withJSONObject: object), let string = String(data: data, encoding: .utf8) else { return }
-        socket?.send(.string(string)) { _ in }
+        guard let current = socket else { return }
+        current.send(.string(string)) { [weak self, weak current] error in
+            guard error != nil else { return }
+            DispatchQueue.main.async {
+                guard let self, let current, self.socket === current else { return }
+                self.reconnect(after: current)
+            }
+        }
     }
     func close() {
         endpoint = nil; retry?.invalidate(); retry = nil; retryDelay = 1
