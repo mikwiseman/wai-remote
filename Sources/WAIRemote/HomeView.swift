@@ -10,17 +10,15 @@ struct HomeView: View {
     @State private var copied = false
     @State private var editing: SavedComputer?
     @State private var computerName = ""
-    @State private var choosingWindow = false
-    @State private var loadingWindows = false
     private let accent = Color.accentColor
     private func connectInvitation() { viewer.invitation = viewer.invitationDraft; connect() }
 
     var body: some View {
         VStack(spacing: 0) {
-            Picker("Что вы хотите сделать", selection: $sharingTab) {
-                Text("Подключиться").tag(false)
-                Text("Поделиться экраном").tag(true)
-            }.pickerStyle(.segmented).labelsHidden().controlSize(.large).frame(width: 380).padding(8).remoteGlass(cornerRadius: 22).padding(.top, 22)
+            HStack(spacing: 24) {
+                tab("Подключиться", sharing: false)
+                tab("Поделиться экраном", sharing: true)
+            }.padding(.top, 20)
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
                     if sharingTab { shareContent } else { connectContent }
@@ -31,7 +29,7 @@ struct HomeView: View {
                     .font(.callout).foregroundStyle(.secondary).padding(.bottom, 18)
             }
         }
-        .frame(minWidth: 560, minHeight: 480)
+        .frame(minWidth: 560, maxWidth: .infinity, minHeight: 480, maxHeight: .infinity, alignment: .top)
         .background { RemoteBackdrop() }
         .tint(accent)
         .onAppear { if host.starting || host.sharing || host.accessEnabled || host.permissionRequested { sharingTab = true } }
@@ -43,33 +41,18 @@ struct HomeView: View {
                 HStack { Button("Отмена") { editing = nil }; Spacer(); Button("Сохранить") { viewer.rename(computer.id, name: computerName); editing = nil }.keyboardShortcut(.defaultAction) }
             }.padding(28).frame(width: 360)
         }
-        .sheet(isPresented: $choosingWindow) {
-            VStack(alignment: .leading, spacing: 18) {
-                Text("Выберите окно").font(.title2.weight(.semibold))
-                Text("Удалённый курсор работает внутри выбранного окна. Владелец Mac продолжает пользоваться своей мышью в других приложениях.")
-                    .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                if loadingWindows {
-                    ProgressView().frame(maxWidth: .infinity).frame(height: 260)
-                } else if host.windowChoices.isEmpty {
-                    ContentUnavailableView("Нет доступных окон", systemImage: "macwindow", description: Text("Откройте нужное приложение и обновите список."))
-                        .frame(height: 260)
-                } else {
-                    List(host.windowChoices) { choice in
-                        Button { choosingWindow = false; host.start(lab: false, window: choice.window) } label: {
-                            HStack { Image(systemName: "macwindow"); Text(choice.name).lineLimit(2); Spacer(); Image(systemName: "arrow.up.right") }.padding(.vertical, 5)
-                        }.buttonStyle(.plain)
-                    }.frame(height: 260)
-                }
-                Text("В некоторых приложениях для работы с диалогами нужно перейти к этому окну на самом Mac.")
-                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                HStack { Button("Обновить список") { Task { await loadWindows() } }; Spacer(); Button("Отмена") { choosingWindow = false }.keyboardShortcut(.cancelAction) }
-            }.padding(26).frame(width: 480).task { await loadWindows() }
-        }
     }
-    @MainActor private func loadWindows() async {
-        loadingWindows = true
-        await host.loadWindows()
-        loadingWindows = false
+    private func tab(_ title: String, sharing: Bool) -> some View {
+        Button { sharingTab = sharing } label: {
+            Text(title).font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(sharingTab == sharing ? .primary : .secondary)
+                .frame(width: 170, height: 36)
+                .overlay(alignment: .bottom) {
+                    Rectangle().fill(sharingTab == sharing ? accent : .clear).frame(height: 2)
+                }.contentShape(Rectangle())
+        }.buttonStyle(.plain)
+            .accessibilityAddTraits(sharingTab == sharing ? .isSelected : [])
+            .accessibilityIdentifier(sharing ? "shareTab" : "connectTab")
     }
     private func title(_ text: String, subtitle: String) -> some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -155,6 +138,10 @@ struct HomeView: View {
                     Label(name, systemImage: "macwindow").font(.callout)
                     Text("Независимая мышь. Буфер обмена общий.").font(.caption).foregroundStyle(.secondary)
                 }
+                if host.independentPointer {
+                    Label("Независимая мышь · весь экран", systemImage: "cursorarrow.motionlines").font(.callout)
+                    Text("Ваша мышь остаётся на месте. Буфер обмена общий.").font(.caption).foregroundStyle(.secondary)
+                }
                 if let name = host.connectedName {
                     Label(name, systemImage: "desktopcomputer").font(.headline)
                     HStack {
@@ -187,9 +174,9 @@ struct HomeView: View {
                 Button { host.start(lab: false) } label: {
                     HStack { if host.starting { ProgressView().controlSize(.small) }; Text(host.starting ? "Открываем доступ…" : "Открыть доступ к экрану") }
                 }.remotePrimaryButton().controlSize(.large).disabled(host.starting || !host.screenAllowed)
-                if WindowInputTarget.isSupported {
-                    Button { choosingWindow = true } label: {
-                        Label("Независимая мышь · выбрать окно", systemImage: "cursorarrow.motionlines")
+                if DesktopInputTarget.isSupported {
+                    Button { host.start(lab: false, independentPointer: true) } label: {
+                        Label("Независимая мышь", systemImage: "cursorarrow.motionlines")
                     }.controlSize(.large)
                         .disabled(host.starting || !host.screenAllowed)
                 }

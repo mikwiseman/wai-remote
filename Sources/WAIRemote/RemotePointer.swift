@@ -1,10 +1,11 @@
 import AppKit
 import RemoteCore
 
-/// A separate visual pointer for window control. Never moves the desktop cursor,
+/// A separate visual pointer. Never moves the desktop cursor,
 /// becomes key, or receives the owner's mouse events.
 final class RemotePointer {
     private let panel: NSPanel
+    var windowID: CGWindowID { CGWindowID(panel.windowNumber) }
     init() {
         panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 28, height: 34),
                         styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -15,12 +16,22 @@ final class RemotePointer {
         panel.contentView = PointerShape()
     }
     func show(_ point: InkPoint, in target: WindowInputTarget) {
-        guard let frame = target.frame, let screen = NSScreen.screens.first else { hide(); return }
+        guard let frame = target.frame else { hide(); return }
+        position(point, in: frame)
+        panel.level = .normal
+        // Place it directly above its target; another app can cover both together.
+        panel.order(.above, relativeTo: Int(target.windowID))
+    }
+    func show(_ point: InkPoint, on display: CGRect) {
+        position(point, in: display)
+        panel.level = .popUpMenu
+        panel.orderFrontRegardless()
+    }
+    private func position(_ point: InkPoint, in frame: CGRect) {
+        guard let screen = NSScreen.screens.first else { return }
         let x = frame.minX + point.x * max(1, frame.width - 1)
         let y = frame.minY + point.y * max(1, frame.height - 1)
         panel.setFrameOrigin(NSPoint(x: x - 2, y: screen.frame.maxY - y - 32))
-        // Place it directly above its target; another app can cover both together.
-        panel.order(.above, relativeTo: Int(target.windowID))
     }
     func hide() { panel.orderOut(nil) }
     deinit { panel.close() }

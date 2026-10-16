@@ -45,8 +45,8 @@ final class HostModel: ObservableObject {
     @Published var controlAllowed = CGPreflightPostEventAccess()
     @Published var gateway = UserDefaults.standard.string(forKey: "signalingGateway") ?? "https://waiwai.is/remote/connect/"
     @Published var peers = KeyStore.peers()
-    @Published var windowChoices: [SharedWindowChoice] = []
     @Published private(set) var sharedWindowName: String?
+    @Published private(set) var independentPointer = false
     let identity: DeviceIdentity
     private let factory: RTCPeerConnectionFactory
     private var capture: VideoCapture?
@@ -139,6 +139,7 @@ final class HostModel: ObservableObject {
         resumeAfter = ProcessInfo.processInfo.systemUptime + 5
         switch saved.target {
         case .display: start(lab: false)
+        case .independentDisplay: start(lab: false, independentPointer: true)
         case .window(let pid, let id, let launchedAt, let boot):
             guard SharingRelaunch.currentBootSession == boot,
                   NSRunningApplication(processIdentifier: pid)?.launchDate == launchedAt else {
@@ -165,7 +166,7 @@ final class HostModel: ObservableObject {
            let launchedAt = NSRunningApplication(processIdentifier: pid)?.launchDate,
            let boot = SharingRelaunch.currentBootSession {
             target = .window(pid: pid, id: window.windowID, launchedAt: launchedAt, boot: boot)
-        } else if capturedWindow == nil { target = .display }
+        } else if capturedWindow == nil { target = independentPointer ? .independentDisplay : .display }
         else { return }
         PersistentAccess.save(.init(target: target))
         accessEnabled = true; suspended = false
@@ -209,7 +210,7 @@ final class HostModel: ObservableObject {
                let launchedAt = NSRunningApplication(processIdentifier: pid)?.launchDate {
                 target = .window(pid: pid, id: window.windowID, launchedAt: launchedAt)
             } else if capturedWindow == nil, let display = capturedDisplay {
-                target = .display(display.displayID)
+                target = independentPointer ? .independentDisplay(display.displayID) : .display(display.displayID)
             }
         }
         SharingRelaunch.save(target)
@@ -218,11 +219,11 @@ final class HostModel: ObservableObject {
         guard let target = SharingRelaunch.take() else { return }
         permissionRequested = true
         switch target {
-        case .display(let id):
+        case .display(let id), .independentDisplay(let id):
             guard id == CGMainDisplayID() else {
                 status = "Общий экран изменился. Откройте доступ ещё раз."; return
             }
-            start(lab: false)
+            start(lab: false, independentPointer: target == .independentDisplay(id))
         case .window(let pid, let id, let launchedAt):
             let generation = connectionGeneration
             Task { @MainActor in
@@ -245,18 +246,11 @@ final class HostModel: ObservableObject {
         do { try helper.run(); NSApp.terminate(nil) }
         catch { UserDefaults.standard.removeObject(forKey: resumeKey); status = "Не удалось перезапустить. Закройте WAI Remote и откройте снова." }
     }
-    @MainActor func loadWindows() async {
-        do {
-            let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
-            windowChoices = content.windows.filter {
-                $0.windowLayer == 0 && $0.frame.width >= 200 && $0.frame.height >= 100 &&
-                $0.owningApplication != nil && !($0.title ?? "").isEmpty &&
-                ($0.owningApplication?.processID != ProcessInfo.processInfo.processIdentifier || $0.windowID == inputTestWindow.map { CGWindowID($0.windowNumber) })
-            }.map { SharedWindowChoice(window: $0) }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-        } catch { windowChoices = []; status = "Не удалось получить список окон." }
-    }
-    func start(lab: Bool, window: SCWindow? = nil) {
+    func start(lab: Bool, window: SCWindow? = nil, independentPointer: Bool = false) {
         guard !sharing, !starting else { return }
+        guard !independentPointer || DesktopInputTarget.isSupported else {
+            status = "Независимая мышь недоступна в этой версии macOS."; return
+        }
         refreshPermissions()
         if !lab && !screenAllowed { status = "Нужно разрешение на запись экрана"; return }
         guard let base = URL(string: gateway), RemoteInvite.isAllowedGateway(base) else {
@@ -290,7 +284,11 @@ final class HostModel: ObservableObject {
                     surface = Surface(id: String(display.displayID), width: Int(screen.frame.width), height: Int(screen.frame.height))
                     capturedScreenFrame = screen.frame
                     capturedDisplay = display
+                    self.independentPointer = independentPointer
+                    injector.setIndependentPointer(independentPointer)
                     injector.bounds = CGDisplayBounds(display.displayID)
+                    if independentPointer && remotePointer == nil { remotePointer = RemotePointer() }
+                    injector.excludedWindows = Set([CGWindowID(overlay!.panel.windowNumber)] + (remotePointer.map { [$0.windowID] } ?? []))
                     try await video.startDisplay(display, excluding: [CGWindowID(overlay!.panel.windowNumber)])
                     }
                 }
@@ -453,7 +451,7 @@ final class HostModel: ObservableObject {
     private func apply(_ e: SessionEffects) {
         transport?.clipboard.setEnabled(!isLab && sharing && machine?.connected == true &&
             machine?.stalled == false && machine?.state.permissions.control == true && machine?.state.mode != .paused)
-        if e.releaseInput { injector.releaseAll() }
+        if e.releaseInput { injector.releaseAll(); remotePointer?.hide() }
         if machine?.stalled == true, let activity { ProcessInfo.processInfo.endActivity(activity); self.activity = nil }
         if e.accepted, machine?.connected == true, machine?.stalled == false, transport?.isReady == true, activity == nil {
             activity = ProcessInfo.processInfo.beginActivity(options: .userInteractive, reason: "WAI Remote active session")
@@ -462,9 +460,10 @@ final class HostModel: ObservableObject {
             if isLab { capture?.applyLab(input) }
             else {
                 injector.apply(input)
-                if input.type == "pointer", let x = input.x, let y = input.y, let target = injector.windowTarget {
+                if input.type == "pointer", let x = input.x, let y = input.y, independentPointer || injector.windowTarget != nil {
                     if remotePointer == nil { remotePointer = RemotePointer() }
-                    remotePointer?.show(InkPoint(x, y), in: target)
+                    if let target = injector.windowTarget { remotePointer?.show(InkPoint(x, y), in: target) }
+                    else { remotePointer?.show(InkPoint(x, y), on: injector.bounds) }
                 }
             }
         }
@@ -552,6 +551,7 @@ final class HostModel: ObservableObject {
         disconnectViewer(); machine?.stop(); machine = nil
         stopCapture(); capturedDisplay = nil; capturedScreenFrame = nil; overlay?.close(); overlay = nil; labWindow?.orderOut(nil)
         injector.setWindowTarget(nil); capturedWindow = nil; sharedWindowName = nil; resizingWindow = false
+        independentPointer = false; injector.excludedWindows.removeAll()
         signaling?.close(); signaling = nil; pending = nil; secret = nil; invite = ""; status = reason
         detail = accessEnabled ? "Доступ восстановится автоматически." : "Чтобы подключиться снова, откройте доступ на этом Mac."
     }

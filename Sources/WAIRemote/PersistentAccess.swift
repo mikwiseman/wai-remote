@@ -6,6 +6,7 @@ import ServiceManagement
 struct PersistentAccess: Codable, Equatable {
     enum Target: Codable, Equatable {
         case display
+        case independentDisplay
         case window(pid: pid_t, id: CGWindowID, launchedAt: Date, boot: String)
     }
     let target: Target
