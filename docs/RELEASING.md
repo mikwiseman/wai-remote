@@ -23,6 +23,32 @@ Use a Mac with Xcode, a Developer ID Application identity, notarization credenti
 
 The app requires macOS 15+, supports Apple Silicon and Intel, and uses bundle identifier `is.wai.remote.dev` to preserve existing installations' identity and permissions. Do not rename that identifier during packaging. Version 0.1.0 predates Sparkle and needs a manual installation.
 
+## Signing on waiMini
+
+The existing WAI Remote Sparkle key is installed at `~/.config/wai-remote/sparkle-ed25519.key` (directory mode 0700, file mode 0600). Pass it explicitly with `--ed-key-file`; unattended releases do not need the login keychain. Its public key must remain `GndWRikzQviRjfkdO0CHl99wRI1tHaBpzAJ47EeP15U=`.
+
+The exact key is backed up in 1Password, **Development → WAI Remote Sparkle EdDSA private key**, document ID `ykqcyvjmowvaobfaodc2xffcbu`. To restore it on an authorized release Mac:
+
+```sh
+umask 077
+mkdir -p "$HOME/.config/wai-remote"
+op document get ykqcyvjmowvaobfaodc2xffcbu --vault Development \
+  --out-file "$HOME/.config/wai-remote/sparkle-ed25519.key"
+```
+
+Before a release, run `~/.local/bin/wai-signing check all` to verify the existing macOS and iOS signing identities with disposable binaries. Generate and verify the Sparkle feed on the Mini:
+
+```sh
+.build/artifacts/sparkle/Sparkle/bin/generate_appcast \
+  --ed-key-file "$HOME/.config/wai-remote/sparkle-ed25519.key" \
+  --download-url-prefix https://waiwai.is/remote/downloads/ RELEASE_DIRECTORY
+.build/artifacts/sparkle/Sparkle/bin/sign_update --verify \
+  --ed-key-file "$HOME/.config/wai-remote/sparkle-ed25519.key" \
+  RELEASE_DIRECTORY/appcast.xml
+```
+
+Publish the signed feed atomically at `/opt/wai-remote/releases/updates/appcast.xml` on `wai-web-prod`, after verifying that its payload is already available at the public download URL. Preserve the previous feed for rollback.
+
 ## Public service
 
 The current deployment uses HTTPS at `waiwai.is/remote/connect/` with a loopback-only Go process behind nginx. The web assets must be built with that base path. The nginx include also routes `/remote/downloads/` and `/remote/updates/`; `/remote` itself belongs to the `wai-web` landing page.
