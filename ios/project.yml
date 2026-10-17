@@ -24,6 +24,7 @@ targets:
       - Sources
       - Assets.xcassets
       - ../Sources/WAIRemote/GlassSurface.swift
+      - ../Sources/WAIRemote/InvitationQR.swift
     dependencies:
       - package: WAIRemote
         product: RemoteCore

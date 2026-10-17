@@ -68,5 +68,7 @@
 	<false/>
 	<key>SUVerifyUpdateBeforeExtraction</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>Камера считывает QR-код приглашения, чтобы подключиться к другому Mac.</string>
 </dict>
 </plist>
