@@ -68,6 +68,29 @@ final class RemoteScreenTests: XCTestCase {
         XCTAssertEqual(model.operations.map(\.modifiers), [["Shift"], []])
     }
 
+    func testCommandEquivalentReleasesItsKeyWithoutWaitingForKeyUp() throws {
+        _ = NSApplication.shared
+        let model = InputRecorder(identity: DeviceIdentity())
+        let screen = RemoteScreenView(model: model)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 480),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = screen
+        defer { window.close() }
+        window.makeFirstResponder(screen)
+        func event(_ type: NSEvent.EventType) throws -> NSEvent {
+            try XCTUnwrap(NSEvent.keyEvent(with: type, location: .zero, modifierFlags: .command,
+                timestamp: 0, windowNumber: window.windowNumber, context: nil, characters: "a",
+                charactersIgnoringModifiers: "a", isARepeat: false, keyCode: 0))
+        }
+        XCTAssertTrue(screen.performKeyEquivalent(with: try event(.keyDown)))
+        XCTAssertEqual(model.input.map(\.key), ["KeyA", "KeyA"])
+        XCTAssertEqual(model.input.map(\.action), ["down", "up"],
+                       "AppKit may consume the key-up for a handled key equivalent; the remote shortcut must still finish.")
+        XCTAssertEqual(model.input.map(\.modifiers), [["Meta"], []])
+        screen.keyUp(with: try event(.keyUp))
+        XCTAssertEqual(model.input.count, 2, "A later key-up must not duplicate the completed command.")
+    }
+
     func testMenuShortcutDoesNotLeaveCommandHeld() {
         let model = InputRecorder(identity: DeviceIdentity())
         model.key("KeyC", modifiers: ["Meta"])

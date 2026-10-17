@@ -48,7 +48,7 @@ final class HostModel: ObservableObject {
     @Published private(set) var sharedWindowName: String?
     @Published private(set) var independentPointer = false
     let identity: DeviceIdentity
-    private let factory: RTCPeerConnectionFactory
+    private var factory: RTCPeerConnectionFactory
     private var capture: VideoCapture?
     private var captureStartTask: Task<Void, Never>?
     private var capturedDisplay: SCDisplay?
@@ -379,7 +379,12 @@ final class HostModel: ObservableObject {
     private func connect(_ offer: Offer, permissions: Permissions) {
         guard sharing else { return }
         let permissions = Permissions(control: permissions.control, annotate: capturedWindow == nil && permissions.annotate)
-        if !isLab { capture = makeCapture() }
+        if !isLab {
+            // Match the viewer's lifetime: connection resources and network
+            // workers belong to this session, not the lifetime of the app.
+            factory = RTCPeerConnectionFactory(encoderFactory: ScreenVideoEncoderFactory(), decoderFactory: ScreenVideoDecoderFactory())
+            capture = makeCapture()
+        }
         guard let capture, sharing else { return }
         if let machine, machine.author == offer.peerID, machine.state.surface == surface {
             machine.reconnect(); _ = machine.setPermissions(permissions)

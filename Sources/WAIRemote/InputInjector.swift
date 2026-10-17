@@ -15,7 +15,7 @@ final class InputInjector {
     func apply(_ message: WireMessage) {
         let target = windowTarget, bounds = bounds, independent = independentPointer, excluded = excludedWindows
         let received = ProcessInfo.processInfo.systemUptime
-        delivery.submit { [events] current in
+        delivery.submit(coalescingPointerMove: message.type == "pointer" && message.action == "move") { [events] current in
             events.windowTarget = target; events.bounds = bounds; events.isCurrent = current
             events.independentPointer = independent; events.excludedWindows = excluded
             let started = ProcessInfo.processInfo.systemUptime
@@ -98,9 +98,17 @@ private final class InjectedEvents {
                 if pressed.frame.contains(p) { _ = pressed.press(if: isCurrent) }
                 return
             }
-            if action == "down", b == 0, keys.isEmpty, buttons.isEmpty, (m.modifiers ?? []).isEmpty,
-               let pressed = destination.window?.button(at: p) {
-                windowButton = pressed; return
+            if action == "down", b == 0 {
+                let eligible = keys.isEmpty && buttons.isEmpty && (m.modifiers ?? []).isEmpty
+                let lookupStarted = ProcessInfo.processInfo.systemUptime
+                let pressed = eligible ? destination.window?.button(at: p) : nil
+                if PerformanceLog.enabled {
+                    PerformanceLog.record("input-button-lookup", ["eligible": eligible, "found": pressed != nil,
+                        "heldKeys": keys.count, "heldButtons": buttons.count, "modifiers": (m.modifiers ?? []).count,
+                        "accessibilityTrusted": AXIsProcessTrusted(),
+                        "lookupMs": (ProcessInfo.processInfo.systemUptime - lookupStarted) * 1000])
+                }
+                if let pressed { windowButton = pressed; return }
             }
             if windowButton != nil {
                 if action == "move" { return }

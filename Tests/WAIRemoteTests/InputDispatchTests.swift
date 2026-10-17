@@ -5,6 +5,27 @@ import XCTest
 
 @MainActor
 final class InputDispatchTests: XCTestCase {
+    func testPointerFloodKeepsLatestPositionWithoutDelayingClicksOrCrossingReleases() async {
+        let delivery = InputDeliveryQueue()
+        let entered = expectation(description: "Input temporarily busy")
+        let finished = expectation(description: "Gesture delivered")
+        let resume = DispatchSemaphore(value: 0)
+        var delivered: [String] = []
+        delivery.submit { _ in entered.fulfill(); _ = resume.wait(timeout: .now() + 2) }
+        await fulfillment(of: [entered], timeout: 1)
+        for i in 0..<1_000 { delivery.submit(coalescingPointerMove: true) { _ in delivered.append("hover \(i)") } }
+        delivery.submit { _ in delivered.append("down") }
+        for i in 0..<1_000 { delivery.submit(coalescingPointerMove: true) { _ in delivered.append("drag \(i)") } }
+        delivery.submit { _ in delivered.append("up") }
+        delivery.submit { _ in delivered.append("key") }
+        delivery.submit(coalescingPointerMove: true) { _ in delivered.append("next hover") }
+        delivery.submit { _ in finished.fulfill() }
+        resume.signal()
+        await fulfillment(of: [finished], timeout: 2)
+        XCTAssertEqual(delivered, ["hover 999", "down", "drag 999", "up", "key", "next hover"],
+                       "Outdated pointer positions must not build a backlog or move a gesture across its down/up boundary.")
+    }
+
     func testAccessibilityActionForOurWindowRunsOnMainAndRechecksCancellation() async {
         let finished = expectation(description: "Press returned")
         let button = WindowInputTarget.Button(frame: .zero, requiresMainThread: true, action: {

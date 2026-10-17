@@ -24,14 +24,16 @@ final class RemotePointer {
     }
     func show(_ point: InkPoint, on display: CGRect) {
         position(point, in: display)
-        panel.level = .popUpMenu
-        panel.orderFrontRegardless()
+        let changedLevel = panel.level != .popUpMenu
+        if changedLevel { panel.level = .popUpMenu }
+        if changedLevel || !panel.isVisible { panel.orderFrontRegardless() }
     }
     private func position(_ point: InkPoint, in frame: CGRect) {
         guard let screen = NSScreen.screens.first else { return }
         let x = frame.minX + point.x * max(1, frame.width - 1)
         let y = frame.minY + point.y * max(1, frame.height - 1)
-        panel.setFrameOrigin(NSPoint(x: x - 2, y: screen.frame.maxY - y - 32))
+        let origin = NSPoint(x: x - 2, y: screen.frame.maxY - y - 32)
+        if panel.frame.origin != origin { panel.setFrameOrigin(origin) }
     }
     func hide() { panel.orderOut(nil) }
     deinit { panel.close() }

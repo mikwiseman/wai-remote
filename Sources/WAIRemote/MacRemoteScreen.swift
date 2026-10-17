@@ -195,7 +195,10 @@ final class RemoteScreenView: NSView, NSTextInputClient {
         if event.keyCode == 9 && !event.modifierFlags.contains(.shift) {
             paste(nil); return true
         }
-        keyDown(with: event); return true
+        guard let code = InputInjector.keyCodes.first(where: { $0.value == event.keyCode })?.key else { return false }
+        // AppKit can consume key-up after a handled command equivalent. Send
+        // the whole shortcut now, so a later click cannot inherit a held key.
+        model.key(code, modifiers: modifiers(event)); return true
     }
     @objc func paste(_ sender: Any?) {
         model.paste()
