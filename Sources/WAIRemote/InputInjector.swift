@@ -15,7 +15,7 @@ final class InputInjector {
     func apply(_ message: WireMessage) {
         let target = windowTarget, bounds = bounds, independent = independentPointer, excluded = excludedWindows
         let received = ProcessInfo.processInfo.systemUptime
-        delivery.submit { [events] current in
+        delivery.submit(coalescingPointerMove: message.type == "pointer" && message.action == "move") { [events] current in
             events.windowTarget = target; events.bounds = bounds; events.isCurrent = current
             events.independentPointer = independent; events.excludedWindows = excluded
             let started = ProcessInfo.processInfo.systemUptime

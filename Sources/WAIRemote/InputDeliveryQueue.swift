@@ -6,17 +6,35 @@ final class InputDeliveryQueue {
     private let queue = DispatchQueue(label: "is.wai.remote.input", qos: .userInteractive)
     private let lock = NSLock()
     private var generation: UInt64 = 0
+    private final class PendingMove {
+        var operation: (@escaping () -> Bool) -> Void
+        init(_ operation: @escaping (@escaping () -> Bool) -> Void) { self.operation = operation }
+    }
+    private var pendingMove: PendingMove?
 
-    func submit(_ operation: @escaping (@escaping () -> Bool) -> Void) {
-        lock.lock(); let token = generation; lock.unlock()
+    func submit(coalescingPointerMove: Bool = false, _ operation: @escaping (@escaping () -> Bool) -> Void) {
+        lock.lock(); defer { lock.unlock() }
+        if coalescingPointerMove, let pendingMove { pendingMove.operation = operation; return }
+        let token = generation
+        let pending = PendingMove(operation)
+        // Clicks, releases, keys and scrolls are barriers. Only consecutive,
+        // not-yet-started pointer positions may replace one another.
+        pendingMove = coalescingPointerMove ? pending : nil
         let current = { [self] in
             lock.lock(); defer { lock.unlock() }; return generation == token
         }
-        queue.async { if current() { operation(current) } }
+        queue.async { [self] in
+            lock.lock()
+            if pendingMove === pending { pendingMove = nil }
+            let operation = pending.operation
+            lock.unlock()
+            if current() { operation(current) }
+        }
     }
 
     func cancel(release: @escaping () -> Void) {
-        lock.lock(); generation &+= 1; lock.unlock()
+        lock.lock(); defer { lock.unlock() }
+        generation &+= 1; pendingMove = nil
         queue.async(execute: release)
     }
 }

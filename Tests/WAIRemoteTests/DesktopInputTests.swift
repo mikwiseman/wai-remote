@@ -25,6 +25,29 @@ final class DesktopInputTests: XCTestCase {
         XCTAssertNil(DesktopInputTarget.target(windowID: 11, windows: [overlay, window(second)]))
     }
 
+    func testVisualPointerAndInkAreSkippedWithoutSkippingAnotherApplicationsWindow() {
+        var queries: [CGWindowID] = []
+        let hit = DesktopInputTarget.hitWindow(excluding: [90, 91]) { below in
+            queries.append(below)
+            return [0: 90, 90: 91, 91: 22][below]
+        }
+        XCTAssertEqual(hit, 22)
+        XCTAssertEqual(queries, [0, 90, 91], "Look below our visual overlays using WindowServer's actual input regions.")
+        queries = []
+        XCTAssertEqual(DesktopInputTarget.hitWindow(excluding: [90]) { below in
+            queries.append(below); return 11
+        }, 11)
+        XCTAssertEqual(queries, [0], "An unrelated window must block the hit even if it cannot receive remote input.")
+    }
+
+    func testRepeatedOrMissingOverlayHitCannotLoopOrInventATarget() {
+        var queries = 0
+        XCTAssertNil(DesktopInputTarget.hitWindow(excluding: [90]) { _ in queries += 1; return 90 })
+        XCTAssertLessThanOrEqual(queries, 2)
+        XCTAssertNil(DesktopInputTarget.hitWindow(excluding: []) { _ in nil })
+        XCTAssertNil(DesktopInputTarget.hitWindow(excluding: []) { _ in 0 })
+    }
+
     func testDragAndReleaseStayWithTheOriginalAppAfterCrossingAnotherWindow() {
         var routing = DesktopInputTarget()
         XCTAssertEqual(routing.pointer(action: "down", button: 0, at: point, hitTest: { _ in self.first }), first)

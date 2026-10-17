@@ -34,15 +34,33 @@ struct DesktopInputTarget {
         return unsafeBitCast(symbol, to: Connection.self)
     }()
     private static let findWindow: FindWindow? = {
-        guard let library, let symbol = dlsym(library, "SLSFindWindowByGeometry") else { return nil }
+        guard let library, let symbol = dlsym(library, "SLSFindWindowAndOwner") else { return nil }
         return unsafeBitCast(symbol, to: FindWindow.self)
     }()
     static var isSupported: Bool { WindowInputTarget.isSupported && connection != nil && findWindow != nil }
 
+    static func hitWindow(excluding: Set<CGWindowID>, find: (CGWindowID) -> CGWindowID?) -> CGWindowID? {
+        var below: CGWindowID = 0
+        var visited = Set<CGWindowID>()
+        for _ in 0...excluding.count {
+            guard let id = find(below), id > 0, visited.insert(id).inserted else { return nil }
+            if !excluding.contains(id) { return id }
+            below = id
+        }
+        return nil
+    }
+
     static func target(at point: CGPoint, excluding: Set<CGWindowID>) -> WindowInputTarget? {
         guard let connection, let findWindow else { return nil }
-        var point = point, local = CGPoint.zero, id: CGWindowID = 0, owner: Int32 = 0
-        guard findWindow(connection(), 0, 1, 0, &point, &local, &id, &owner) == 0,
+        let cid = connection()
+        // ignoresMouseEvents does not exclude an NSPanel from WindowServer's
+        // geometric lookup. Continue below our pointer/ink only, never below
+        // an unrelated or unaddressable window. See yabai's point lookup.
+        guard let id = hitWindow(excluding: excluding, find: { below in
+            var point = point, local = CGPoint.zero, id: CGWindowID = 0, owner: Int32 = 0
+            return findWindow(cid, Int32(bitPattern: below), below == 0 ? 1 : -1, 0,
+                              &point, &local, &id, &owner) == 0 ? id : nil
+        }),
               let windows = CGWindowListCopyWindowInfo(.optionIncludingWindow, id) as? [[String: Any]] else { return nil }
         return target(windowID: id, windows: windows, excluding: excluding)
     }
