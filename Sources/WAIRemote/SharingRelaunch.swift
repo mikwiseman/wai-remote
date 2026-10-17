@@ -6,6 +6,7 @@ import Security
 struct SharingRelaunch: Codable {
     enum Target: Codable, Equatable {
         case display(CGDirectDisplayID)
+        case independentDisplay(CGDirectDisplayID)
         case window(pid: pid_t, id: CGWindowID, launchedAt: Date)
     }
 

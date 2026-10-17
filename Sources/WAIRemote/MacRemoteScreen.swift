@@ -11,7 +11,7 @@ struct MacRemoteScreen: NSViewRepresentable {
     static func dismantleNSView(_ view: RemoteScreenView, coordinator: ()) { view.detach() }
 }
 
-private final class FrameRenderer: NSObject, RTCVideoRenderer {
+final class FrameRenderer: NSObject, RTCVideoRenderer {
     private let display: AVSampleBufferVideoRenderer
     var onFrame: (() -> Void)?
     private let lock = NSLock()
@@ -23,6 +23,9 @@ private final class FrameRenderer: NSObject, RTCVideoRenderer {
     private let enqueuing = FrameTimingLog("display-enqueue")
     private var active = true
     init(display: AVSampleBufferDisplayLayer) { self.display = display.sampleBufferRenderer }
+    func awaitNextFrame() {
+        lock.lock(); delivered = false; lock.unlock()
+    }
     func stop() {
         lock.lock()
         active = false
@@ -73,7 +76,7 @@ final class RemoteScreenView: NSView, NSTextInputClient {
     private let model: MacViewerModel
     private var video: DecodedVideoView?
     private let ink = InkView()
-    private var renderer: FrameRenderer?
+    private(set) var renderer: FrameRenderer?
     private var track: RTCVideoTrack?
     private var pressedKeys = Set<UInt16>()
     private var pointerDown = false
@@ -125,6 +128,9 @@ final class RemoteScreenView: NSView, NSTextInputClient {
                 self.renderer = renderer; track.add(renderer)
             }
         }
+        // A brief ICE interruption can resume on the same track. Its next
+        // displayed frame must dismiss the waiting overlay again.
+        if !model.receivedFrame { renderer?.awaitNextFrame() }
         ink.referenceWidth = Double(model.session.state?.surface.width ?? 1920)
         let strokes = model.visibleStrokes
         if ink.strokes != strokes { ink.strokes = strokes }

@@ -56,6 +56,15 @@ final class AvailabilityTests: XCTestCase {
         PersistentAccess.save(nil, to: defaults)
         XCTAssertNil(PersistentAccess.read(from: defaults))
     }
+    func testIndependentMouseDoesNotRestoreAsTheOwnersSystemMouse() throws {
+        let name = "independent-access-\(UUID())", defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        PersistentAccess.save(.init(target: .independentDisplay), to: defaults)
+        XCTAssertEqual(PersistentAccess.read(from: defaults)?.target, .independentDisplay)
+        // Existing full-display grants retain their original control mode.
+        defaults.set(Data("{\"target\":{\"display\":{}}}".utf8), forKey: PersistentAccess.key)
+        XCTAssertEqual(PersistentAccess.read(from: defaults)?.target, .display)
+    }
     func testDisplaySleepDoesNotCloseAccessAndSystemSleepPreservesConsent() {
         let previous = UserDefaults.standard.data(forKey: PersistentAccess.key)
         defer { UserDefaults.standard.set(previous, forKey: PersistentAccess.key) }

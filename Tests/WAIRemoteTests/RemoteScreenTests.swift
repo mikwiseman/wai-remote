@@ -267,4 +267,31 @@ final class RemoteScreenTests: XCTestCase {
 
         XCTAssertFalse(model.receivedFrame, "Readiness must belong to the current video track.")
     }
+
+    func testVideoReappearsWhenTheSameTrackResumesAfterInterruption() async throws {
+        let model = MacViewerModel(identity: DeviceIdentity())
+        let factory = RTCPeerConnectionFactory()
+        model.track = factory.videoTrack(with: factory.videoSource(), trackId: "screen")
+        let screen = RemoteScreenView(model: model)
+        screen.update()
+        let renderer = try XCTUnwrap(screen.renderer)
+        let first = expectation(description: "First frame appears")
+        let resumed = expectation(description: "Resumed frame removes the waiting overlay")
+        var appearances = 0
+        let observation = model.$receivedFrame.dropFirst().filter { $0 }.sink { _ in
+            appearances += 1
+            if appearances == 1 { first.fulfill() } else { resumed.fulfill() }
+        }
+        defer { observation.cancel(); screen.detach() }
+        let frame = RTCVideoFrame(buffer: RTCCVPixelBuffer(pixelBuffer: try pixels()), rotation: ._0, timeStampNs: 1)
+        renderer.renderFrame(frame)
+        await fulfillment(of: [first], timeout: 2)
+
+        model.receivedFrame = false // Temporary ICE interruption; the track survives.
+        screen.update()
+        renderer.renderFrame(frame)
+
+        await fulfillment(of: [resumed], timeout: 2)
+        XCTAssertTrue(model.receivedFrame)
+    }
 }

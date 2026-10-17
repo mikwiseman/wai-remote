@@ -36,6 +36,10 @@ final class SharingRelaunchTests: XCTestCase {
         save(target)
         XCTAssertEqual(take(), target)
     }
+    func testUpdateKeepsTheIndependentPointerMode() {
+        save(.independentDisplay(1))
+        XCTAssertEqual(take(), .independentDisplay(1))
+    }
 
     func testClosedAccessClearsAnyPendingRestoration() {
         save()
