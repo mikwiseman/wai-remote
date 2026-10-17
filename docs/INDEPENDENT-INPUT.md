@@ -10,7 +10,7 @@ The independent mouse shares the main display and selects the application window
 
 ## Routing
 
-WindowServer hit-testing selects the actual input window. Bounding-box scans are insufficient: on both test machines the Dock exposes a transparent rectangle covering the whole display. `SLSFindWindowByGeometry` respects these input regions; the result is checked against the current window's process ID and bounds. Missing SPI disables the independent-mode entry point.
+WindowServer hit-testing selects the actual input window. Bounding-box scans are insufficient: on both test machines the Dock exposes a transparent rectangle covering the whole display. `SLSFindWindowAndOwner` follows the window regions and can continue below an explicitly excluded window. The pointer and ink panels must be skipped this way: `ignoresMouseEvents` alone does not remove them from geometric hit-testing. The lookup never skips an unrelated or unaddressable window, and validates the result's current process ID and bounds. Missing SPI disables the independent-mode entry point.
 
 A button-down pins its window until all held buttons are released. Hover and scroll do not redirect keyboard input. Each held key retains its original destination for key-up, even after another window is clicked. Empty or closed targets never fall through to the global HID queue. Disconnect, pause and permission loss cancel pending work, release held input and hide the remote pointer.
 
