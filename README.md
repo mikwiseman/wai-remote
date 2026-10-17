@@ -11,8 +11,10 @@
 Requires **macOS 15 or later**, on Apple Silicon or Intel. Install WAI Remote on the sharing Mac, then connect from another Mac, the native iPhone/iPad app, or the browser viewer.
 
 1. On the Mac you want to access, choose **Поделиться экраном** (Share screen). Follow the macOS Screen Recording and Accessibility prompts, then open access.
-2. Copy its invitation. On the other Mac, choose **Подключиться** (Connect) and paste the link.
+2. On the other Mac, iPhone/iPad or browser viewer, choose **Сканировать QR-код** and scan the code shown by the sharing Mac. You can also open an image of the code or paste the invitation link.
 3. Approve viewing or control on the sharing Mac. The connection is saved for next time.
+
+QR scanning uses the camera only while the scanner is open. Camera frames and selected images stay on your device. The iPhone Camera app can also open the QR's web invitation; choose **Открыть в приложении WAI Remote** to continue in the installed app. Treat the code like its invitation link and share it only with the intended recipient.
 
 Both devices need internet and can be on different networks. Open access stays enabled until you close it. WAI Remote prevents idle system sleep and restores access after app relaunch or login using a bundled background helper. Allow that helper in macOS Login Items if macOS requests it. Turning off the display does not close access. Locking or deliberately sleeping the Mac suspends capture and input; access resumes after wake and unlock. There is no access before login or through the lock screen.
 

@@ -4,20 +4,30 @@ public struct RemoteInvite {
     public let hostID: String
     public let publicKey: String
     public let secret: Data?
+    public let invitationURL: URL
     public let signalingURL: URL
     public let savedURL: URL
 
     public enum Invalid: Error { case invitation }
 
     public static func phoneURL(for invitation: String) -> URL? {
-        guard (try? RemoteInvite(invitation)) != nil else { return nil }
+        guard let invitation = try? RemoteInvite(invitation) else { return nil }
         var url = URLComponents(); url.scheme = "wai-remote"; url.host = "connect"
-        url.queryItems = [URLQueryItem(name: "invite", value: invitation)]
+        url.queryItems = [URLQueryItem(name: "invite", value: invitation.invitationURL.absoluteString)]
         return url.url
     }
 
     public init(_ text: String) throws {
-        guard text.utf8.count <= 4096, var url = URLComponents(string: text.trimmingCharacters(in: .whitespacesAndNewlines)) else { throw Invalid.invitation }
+        guard text.utf8.count <= 8192, var url = URLComponents(string: text.trimmingCharacters(in: .whitespacesAndNewlines)) else { throw Invalid.invitation }
+        if url.scheme == "wai-remote" {
+            guard url.host == "connect", url.user == nil, url.password == nil, url.port == nil,
+                  url.path.isEmpty, url.fragment == nil, let items = url.queryItems,
+                  items.count == 1, items[0].name == "invite", let value = items[0].value,
+                  let invitation = URLComponents(string: value) else { throw Invalid.invitation }
+            url = invitation
+        }
+        guard let originalURL = url.url, originalURL.absoluteString.utf8.count <= 4096 else { throw Invalid.invitation }
+        invitationURL = originalURL
         var fields = URLComponents(); fields.percentEncodedQuery = url.percentEncodedFragment
         let items = fields.queryItems ?? []
         guard Set(items.map(\.name)).count == items.count else { throw Invalid.invitation }

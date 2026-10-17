@@ -115,11 +115,9 @@ class MacViewerModel: ObservableObject {
         UserDefaults.standard.set(invitation, forKey: "lastMac")
     }
     func open(_ url: URL) {
-        guard url.scheme == "wai-remote", url.host == "connect",
-              let text = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "invite" })?.value,
-              (try? RemoteInvite(text)) != nil else { return }
+        guard let invite = try? RemoteInvite(url.absoluteString) else { return }
         if connected || connecting { return }
-        invitationDraft = text
+        invitationDraft = invite.invitationURL.absoluteString
         // Opening a link prepares the invitation; the visible Connect button starts the session.
     }
     func connect() {
