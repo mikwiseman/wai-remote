@@ -43,7 +43,9 @@ struct HomeView: View {
             }.padding(28).frame(width: 360)
         }
         .sheet(isPresented: $scanningQR) {
-            InvitationScanner { invitation in viewer.invitation = invitation; connect() }
+            InvitationScanner { invitation in
+                viewer.invitationDraft = invitation; connectInvitation()
+            }
         }
     }
     private func tab(_ title: String, sharing: Bool) -> some View {
