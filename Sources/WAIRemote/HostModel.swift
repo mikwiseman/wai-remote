@@ -30,7 +30,7 @@ final class HostModel: ObservableObject {
     @Published var sharing = false
     @Published var starting = false
     @Published private(set) var reconnecting = false
-    @Published private(set) var accessEnabled = PersistentAccess.read() != nil
+    @Published private(set) var accessEnabled: Bool
     @Published var backgroundNotice: String?
     @Published private(set) var suspended = false
     private var accessActivity: NSObjectProtocol?
@@ -48,6 +48,8 @@ final class HostModel: ObservableObject {
     @Published private(set) var sharedWindowName: String?
     @Published private(set) var independentPointer = false
     let identity: DeviceIdentity
+    private let defaults: UserDefaults
+    private let disableBackgroundAccess: () -> Void
     private var factory: RTCPeerConnectionFactory
     private var capture: VideoCapture?
     private var captureStartTask: Task<Void, Never>?
@@ -77,8 +79,12 @@ final class HostModel: ObservableObject {
     @Published var permissionRequested = false
     private var surface = Surface(id: "lab", width: 1280, height: 800)
 
-    init(identity: DeviceIdentity) {
+    init(identity: DeviceIdentity, defaults: UserDefaults = .standard,
+         disableBackgroundAccess: @escaping () -> Void = BackgroundAccess.disable) {
         self.identity = identity
+        self.defaults = defaults
+        self.disableBackgroundAccess = disableBackgroundAccess
+        self.accessEnabled = PersistentAccess.read(from: defaults) != nil
         RTCInitializeSSL()
         factory = RTCPeerConnectionFactory(encoderFactory: ScreenVideoEncoderFactory(), decoderFactory: ScreenVideoDecoderFactory())
         for event in [NSWorkspace.sessionDidResignActiveNotification, NSWorkspace.willSleepNotification] {
@@ -132,7 +138,7 @@ final class HostModel: ObservableObject {
     func restoreAccess() {
         guard accessEnabled, !sharing, !starting, !sleeping,
               ProcessInfo.processInfo.systemUptime >= resumeAfter,
-              let saved = PersistentAccess.read() else { return }
+              let saved = PersistentAccess.read(from: defaults) else { return }
         keepAvailable()
         guard SharingRelaunch.sessionActive else { suspended = true; status = "Mac заблокирован. Ждём разблокировки."; return }
         suspended = false
@@ -168,7 +174,7 @@ final class HostModel: ObservableObject {
             target = .window(pid: pid, id: window.windowID, launchedAt: launchedAt, boot: boot)
         } else if capturedWindow == nil { target = independentPointer ? .independentDisplay : .display }
         else { return }
-        PersistentAccess.save(.init(target: target))
+        PersistentAccess.save(.init(target: target), to: defaults)
         accessEnabled = true; suspended = false
         keepAvailable()
         backgroundNotice = BackgroundAccess.enable()
@@ -315,7 +321,10 @@ final class HostModel: ObservableObject {
                     if self.transport == nil { self.status = "Восстанавливаем связь…" }
                 }
                 signal.onMessage = { [weak self] object in self?.receiveSignal(object) }
-                signal.onFailure = { [weak self] error in self?.stop(reason: error, cause: "signaling-invalid") }
+                signal.onFailure = { [weak self] error in
+                    guard let self, self.connectionGeneration == generation else { return }
+                    self.signalingFailed(error)
+                }
                 var components = URLComponents(url: base, resolvingAgainstBaseURL: false)!
                 components.scheme = base.scheme == "https" ? "wss" : "ws"
                 components.path = base.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")).isEmpty ? "/signal" : "/" + base.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/signal"
@@ -544,10 +553,18 @@ final class HostModel: ObservableObject {
         let updated = peers.filter { $0.id != id }
         do { try KeyStore.save(updated); peers = updated } catch { status = "Не удалось удалить устройство" }
     }
+    func signalingFailed(_ error: String) {
+        // Reject this connection, not the owner's consent. Older gateways also
+        // report read/handshake timeouts as "authentication failed". A new
+        // attempt must still answer a fresh challenge with the same device key.
+        stop(reason: error, cause: "signaling-invalid", preservingAccess: true)
+        resumeAfter = ProcessInfo.processInfo.systemUptime + 30
+        if accessEnabled { detail = "Разрешение сохранено. Повторная проверка соединения через 30 секунд." }
+    }
     func stop(reason: String = "Доступ закрыт", cause: String = "owner", preservingAccess: Bool = false) {
         if !preservingAccess {
-            if accessEnabled { BackgroundAccess.disable() }
-            PersistentAccess.save(nil); accessEnabled = false; suspended = false
+            if accessEnabled { disableBackgroundAccess() }
+            PersistentAccess.save(nil, to: defaults); accessEnabled = false; suspended = false
             if let accessActivity { ProcessInfo.processInfo.endActivity(accessActivity); self.accessActivity = nil }
         }
         resumeAfter = ProcessInfo.processInfo.systemUptime + 2
