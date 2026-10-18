@@ -14,8 +14,8 @@ import subprocess
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--upload", action="store_true")
-parser.add_argument("--build", default="52")
-parser.add_argument("--version", default="0.3.0")
+parser.add_argument("--build", default="62")
+parser.add_argument("--version", default="0.3.3")
 parser.add_argument("--profile", required=True, help="UUID of an installed App Store provisioning profile")
 args = parser.parse_args()
 root = Path(__file__).resolve().parent.parent

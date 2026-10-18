@@ -21,7 +21,10 @@ final class ViewerTransport: NSObject, RTCPeerConnectionDelegate, RTCDataChannel
         config.iceTransportPolicy = ice.iceTransportPolicy == "relay" ? .relay : .all
         peer = factory.peerConnection(with: config, constraints: RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil), delegate: self)
         let receive = RTCRtpTransceiverInit(); receive.direction = .recvOnly
-        _ = peer.addTransceiver(of: .video, init: receive)
+        if let video = peer.addTransceiver(of: .video, init: receive) {
+            let supported = factory.rtpReceiverCapabilities(forKind: "video").codecs
+            video.setCodecPreferences(supported.filter { $0.name == "H264" } + supported.filter { $0.name != "H264" })
+        }
         let data = RTCDataChannelConfiguration(); data.isOrdered = true
         channel = peer.dataChannel(forLabel: "interaction", configuration: data); channel.delegate = self
     }

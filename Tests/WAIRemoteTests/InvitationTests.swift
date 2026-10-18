@@ -7,8 +7,11 @@ import XCTest
 final class InvitationTests: XCTestCase {
     private func host() -> HostModel {
         _ = NSApplication.shared
-        let model = HostModel(identity: DeviceIdentity())
-        model.peers = []
+        let suite = "invitation-\(UUID())", defaults = UserDefaults(suiteName: suite)!
+        addTeardownBlock { defaults.removePersistentDomain(forName: suite) }
+        let model = HostModel(identity: DeviceIdentity(), defaults: defaults,
+                              peersURL: FileManager.default.temporaryDirectory.appendingPathComponent("no-peers-\(UUID()).json"),
+                              disableBackgroundAccess: {})
         model.isLab = true
         model.sharing = true
         model.newInvite()

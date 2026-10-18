@@ -30,7 +30,8 @@ final class HostModel: ObservableObject {
     @Published var sharing = false
     @Published var starting = false
     @Published private(set) var reconnecting = false
-    @Published private(set) var accessEnabled = PersistentAccess.read() != nil
+    @Published private(set) var registered = false
+    @Published private(set) var accessEnabled: Bool
     @Published var backgroundNotice: String?
     @Published private(set) var suspended = false
     private var accessActivity: NSObjectProtocol?
@@ -44,10 +45,13 @@ final class HostModel: ObservableObject {
     @Published var screenAllowed = CGPreflightScreenCaptureAccess()
     @Published var controlAllowed = CGPreflightPostEventAccess()
     @Published var gateway = UserDefaults.standard.string(forKey: "signalingGateway") ?? "https://waiwai.is/remote/connect/"
-    @Published var peers = KeyStore.peers()
+    @Published private(set) var peers: [TrustedPeer]
     @Published private(set) var sharedWindowName: String?
     @Published private(set) var independentPointer = false
     let identity: DeviceIdentity
+    private let defaults: UserDefaults
+    private let peersURL: URL
+    private let disableBackgroundAccess: () -> Void
     private var factory: RTCPeerConnectionFactory
     private var capture: VideoCapture?
     private var captureStartTask: Task<Void, Never>?
@@ -58,6 +62,7 @@ final class HostModel: ObservableObject {
     private var transport: PeerTransport?
     private var iceConfiguration = ICEConfiguration.local
     private var machine: SessionMachine?
+    private var activePeer: TrustedPeer?
     private let injector = InputInjector()
     private var remotePointer: RemotePointer?
     private var overlay: InkOverlay?
@@ -77,8 +82,14 @@ final class HostModel: ObservableObject {
     @Published var permissionRequested = false
     private var surface = Surface(id: "lab", width: 1280, height: 800)
 
-    init(identity: DeviceIdentity) {
+    init(identity: DeviceIdentity, defaults: UserDefaults = .standard, peersURL: URL = KeyStore.peersURL,
+         disableBackgroundAccess: @escaping () -> Void = BackgroundAccess.disable) {
         self.identity = identity
+        self.defaults = defaults
+        self.peersURL = peersURL
+        self.peers = KeyStore.peers(at: peersURL)
+        self.disableBackgroundAccess = disableBackgroundAccess
+        self.accessEnabled = PersistentAccess.read(from: defaults) != nil
         RTCInitializeSSL()
         factory = RTCPeerConnectionFactory(encoderFactory: ScreenVideoEncoderFactory(), decoderFactory: ScreenVideoDecoderFactory())
         for event in [NSWorkspace.sessionDidResignActiveNotification, NSWorkspace.willSleepNotification] {
@@ -132,7 +143,7 @@ final class HostModel: ObservableObject {
     func restoreAccess() {
         guard accessEnabled, !sharing, !starting, !sleeping,
               ProcessInfo.processInfo.systemUptime >= resumeAfter,
-              let saved = PersistentAccess.read() else { return }
+              let saved = PersistentAccess.read(from: defaults) else { return }
         keepAvailable()
         guard SharingRelaunch.sessionActive else { suspended = true; status = "Mac заблокирован. Ждём разблокировки."; return }
         suspended = false
@@ -168,7 +179,7 @@ final class HostModel: ObservableObject {
             target = .window(pid: pid, id: window.windowID, launchedAt: launchedAt, boot: boot)
         } else if capturedWindow == nil { target = independentPointer ? .independentDisplay : .display }
         else { return }
-        PersistentAccess.save(.init(target: target))
+        PersistentAccess.save(.init(target: target), to: defaults)
         accessEnabled = true; suspended = false
         keepAvailable()
         backgroundNotice = BackgroundAccess.enable()
@@ -256,7 +267,7 @@ final class HostModel: ObservableObject {
         guard let base = URL(string: gateway), RemoteInvite.isAllowedGateway(base) else {
             status = "Укажите HTTPS-сервер или адрес в локальной сети"; return
         }
-        starting = true; reconnecting = false; isLab = lab; status = "Подготовка…"; connectionGeneration = UUID()
+        starting = true; reconnecting = false; registered = false; isLab = lab; status = "Подготовка…"; connectionGeneration = UUID()
         let generation = connectionGeneration
         let video = makeCapture(); capture = video
         Task { @MainActor in
@@ -299,23 +310,32 @@ final class HostModel: ObservableObject {
                 sharing = true; starting = false; status = "Подключаем сервер…"
                 rememberAccess()
                 let signal = Signaling(identity: identity); signaling = signal
-                var registered = false
-                signal.onRelayRefresh = { [weak self] configuration in self?.iceConfiguration = configuration }
+                var invitationCreated = false
+                signal.onRelayRefresh = { [weak self] configuration in
+                    guard let self, self.connectionGeneration == generation else { return }
+                    self.iceConfiguration = configuration
+                }
                 signal.onReady = { [weak self] configuration in
-                    guard let self else { return }
-                    self.iceConfiguration = configuration; self.reconnecting = false
+                    guard let self, self.connectionGeneration == generation else { return }
+                    self.iceConfiguration = configuration; self.reconnecting = false; self.registered = true
                     UserDefaults.standard.set(self.gateway, forKey: "signalingGateway")
                     self.status = self.transport?.isReady == true ? "Устройство подключено" : self.transport == nil ? "Доступ открыт" : "Соединяемся…"
                     self.detail = "Подключение нового устройства потребует вашего подтверждения."
-                    if !registered { registered = true; self.newInvite() }
+                    if !invitationCreated { invitationCreated = true; self.newInvite() }
                 }
                 signal.onReconnecting = { [weak self] in
-                    guard let self else { return }
-                    self.reconnecting = true
+                    guard let self, self.connectionGeneration == generation else { return }
+                    self.reconnecting = true; self.registered = false
                     if self.transport == nil { self.status = "Восстанавливаем связь…" }
                 }
-                signal.onMessage = { [weak self] object in self?.receiveSignal(object) }
-                signal.onFailure = { [weak self] error in self?.stop(reason: error, cause: "signaling-invalid") }
+                signal.onMessage = { [weak self] object in
+                    guard let self, self.connectionGeneration == generation else { return }
+                    self.receiveSignal(object)
+                }
+                signal.onFailure = { [weak self] error in
+                    guard let self, self.connectionGeneration == generation else { return }
+                    self.signalingFailed(error)
+                }
                 var components = URLComponents(url: base, resolvingAgainstBaseURL: false)!
                 components.scheme = base.scheme == "https" ? "wss" : "ws"
                 components.path = base.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")).isEmpty ? "/signal" : "/" + base.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/signal"
@@ -351,9 +371,11 @@ final class HostModel: ObservableObject {
               let pub = Data(base64URL: offer.publicKey), DeviceIdentity.id(publicKeyData: pub) == from,
               DeviceIdentity.verify(signature, data: payload, domain: "wai-remote/offer/v1", publicKey: offer.publicKey),
               seenNonces[offer.nonce] == nil else { return }
-        let trusted = peers.first { $0.id == from && $0.publicKey == offer.publicKey }
+        let trusted = peers.first { $0.id == from && $0.publicKey == offer.publicKey && $0.isAuthorized() }
         let proofValid = secret.map { DeviceIdentity.verifyPairingProof(body["proof"] as? String ?? "", secret: $0, payload: payload) } ?? false
-        guard trusted != nil || proofValid else { return }
+        guard trusted != nil || proofValid else {
+            signaling?.send(["type":"reject", "to":from, "body":["reason":"new-invite-required"]]); return
+        }
         // A signed retry from the same device can replace its unfinished attempt.
         // An established session or another device still owns the connection.
         if transport != nil, machine?.author == from,
@@ -364,20 +386,25 @@ final class HostModel: ObservableObject {
         else if proofValid { pending = PendingPeer(offer: offer); NSApp.activate(ignoringOtherApps: true) }
         else { signaling?.send(["type":"reject","to":from,"body":["reason":"new-invite-required"]]) }
     }
-    func approve(control: Bool) {
+    func approve(control: Bool, expiresAt: Date? = nil) {
         guard let offer = pending?.offer, sharing else { return }
+        if let expiresAt, !expiresAt.timeIntervalSince1970.isFinite || expiresAt <= Date() {
+            status = "Выберите срок доступа в будущем"; return
+        }
         pending = nil
         guard offer.expiresAt >= Date().timeIntervalSince1970 * 1000 else { return }
         let permission = Permissions(control: control && (isLab || controlAllowed), annotate: true)
-        let peer = TrustedPeer(id: offer.peerID, publicKey: offer.publicKey, name: offer.name, permissions: permission, labOnly: isLab)
+        let peer = TrustedPeer(id: offer.peerID, publicKey: offer.publicKey, name: offer.name, permissions: permission, labOnly: isLab, expiresAt: expiresAt)
         var updated = peers.filter { $0.id != peer.id }; updated.append(peer)
-        do { try KeyStore.save(updated); peers = updated }
+        do { try KeyStore.save(updated, to: peersURL); peers = updated }
         catch { status = "Не удалось сохранить устройство"; return }
         secret = nil; invite = ""; connect(offer, permissions: permission)
     }
     func reject() { if let pending { signaling?.send(["type":"reject","to":pending.id,"body":["reason":"declined"]]) }; pending = nil }
     private func connect(_ offer: Offer, permissions: Permissions) {
-        guard sharing else { return }
+        guard sharing, let approved = peers.first(where: {
+            $0.id == offer.peerID && $0.publicKey == offer.publicKey && $0.isAuthorized() && (isLab || !$0.labOnly)
+        }) else { return }
         let permissions = Permissions(control: permissions.control, annotate: capturedWindow == nil && permissions.annotate)
         if !isLab {
             // Match the viewer's lifetime: connection resources and network
@@ -386,6 +413,7 @@ final class HostModel: ObservableObject {
             capture = makeCapture()
         }
         guard let capture, sharing else { return }
+        activePeer = approved
         if let machine, machine.author == offer.peerID, machine.state.surface == surface {
             machine.reconnect(); _ = machine.setPermissions(permissions)
         } else { machine = SessionMachine(surface: surface, permissions: permissions, author: offer.peerID) }
@@ -399,6 +427,7 @@ final class HostModel: ObservableObject {
         let generation = connectionGeneration
         peer.onOpen = { [weak self, weak peer] in
             guard let self, self.transport === peer else { return }
+            guard !self.expireViewerIfNeeded() else { return }
             self.connectionDeadline = nil
             self.status = "Устройство подключено"; self.sendState(); self.sendSnapshot()
             guard self.transport === peer, self.capture === capture, self.sharing else { return }
@@ -440,6 +469,7 @@ final class HostModel: ObservableObject {
         }
     }
     private func receiveInteraction(_ data: Data) {
+        guard !expireViewerIfNeeded() else { return }
         guard sharing, let machine, let m = try? JSONDecoder().decode(WireMessage.self, from: data) else { return }
         let handlingStart = ProcessInfo.processInfo.systemUptime
         let effects = machine.handle(m, now: ProcessInfo.processInfo.systemUptime)
@@ -534,6 +564,7 @@ final class HostModel: ObservableObject {
         remotePointer?.hide()
         connectionDeadline = nil
         injector.releaseAll(); machine?.disconnect(); transport?.close(); transport = nil; connectedName = nil
+        activePeer = nil
         if !isLab { stopCapture() }
         localDrawing = false; overlay?.drawing = false; localStrokeID = nil; refreshInk()
         if let activity { ProcessInfo.processInfo.endActivity(activity); self.activity = nil }
@@ -542,17 +573,37 @@ final class HostModel: ObservableObject {
     func forget(_ id: String) {
         if machine?.author == id { disconnectViewer() }
         let updated = peers.filter { $0.id != id }
-        do { try KeyStore.save(updated); peers = updated } catch { status = "Не удалось удалить устройство" }
+        do { try KeyStore.save(updated, to: peersURL); peers = updated }
+        catch {
+            // A failed durable revocation must not leave the device able to reconnect.
+            stop(reason: "Не удалось сохранить отзыв. Доступ закрыт; повторите отзыв устройства.", cause: "peer-save-failed")
+        }
+    }
+    @discardableResult private func expireViewerIfNeeded(now: Date = Date()) -> Bool {
+        guard let activePeer, !activePeer.isAuthorized(at: now) else { return false }
+        signaling?.send(["type":"reject", "to":activePeer.id, "body":["reason":"new-invite-required"]])
+        disconnectViewer()
+        status = "Срок доступа устройства истёк"
+        detail = "Для этого устройства нужно новое приглашение и ваше подтверждение."
+        return true
+    }
+    func signalingFailed(_ error: String) {
+        // Reject this connection, not the owner's consent. Older gateways also
+        // report read/handshake timeouts as "authentication failed". A new
+        // attempt must still answer a fresh challenge with the same device key.
+        stop(reason: error, cause: "signaling-invalid", preservingAccess: true)
+        resumeAfter = ProcessInfo.processInfo.systemUptime + 30
+        if accessEnabled { detail = "Разрешение сохранено. Повторная проверка соединения через 30 секунд." }
     }
     func stop(reason: String = "Доступ закрыт", cause: String = "owner", preservingAccess: Bool = false) {
         if !preservingAccess {
-            if accessEnabled { BackgroundAccess.disable() }
-            PersistentAccess.save(nil); accessEnabled = false; suspended = false
+            if accessEnabled { disableBackgroundAccess() }
+            PersistentAccess.save(nil, to: defaults); accessEnabled = false; suspended = false
             if let accessActivity { ProcessInfo.processInfo.endActivity(accessActivity); self.accessActivity = nil }
         }
         resumeAfter = ProcessInfo.processInfo.systemUptime + 2
         if sharing || starting { PerformanceLog.record("host-stop", ["cause": cause, "connected": transport?.isReady == true]) }
-        connectionGeneration = UUID(); sharing = false; starting = false; reconnecting = false
+        connectionGeneration = UUID(); sharing = false; starting = false; reconnecting = false; registered = false
         disconnectViewer(); machine?.stop(); machine = nil
         stopCapture(); capturedDisplay = nil; capturedScreenFrame = nil; overlay?.close(); overlay = nil; labWindow?.orderOut(nil)
         injector.setWindowTarget(nil); capturedWindow = nil; sharedWindowName = nil; resizingWindow = false
@@ -561,6 +612,7 @@ final class HostModel: ObservableObject {
         detail = accessEnabled ? "Доступ восстановится автоматически." : "Чтобы подключиться снова, откройте доступ на этом Mac."
     }
     func housekeeping(now: Date = Date()) {
+        if expireViewerIfNeeded(now: now) { return }
         refreshPermissions()
         if accessEnabled && !sharing && !starting { restoreAccess() }
         if sharing, capturedWindow != nil {

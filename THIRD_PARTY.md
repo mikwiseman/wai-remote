@@ -6,5 +6,6 @@
 - **KWWKComputerUseCore / cua-driver** window addressing, MIT. Notices in [licenses/KWWK.txt](licenses/KWWK.txt) and [licenses/cua-driver.txt](licenses/cua-driver.txt). https://github.com/EYHN/kwwk-computer-use-core
 - **coder/websocket 1.8.15**, ISC license. https://github.com/coder/websocket
 - **coturn 4.18.0** is deployed separately under its upstream BSD-style license. It is not bundled in the Mac application. https://github.com/coturn/coturn
+- **jsQR 1.4.0**, copyright Cosmo Wolfe, Apache 2.0. Used by the browser QR scanner. License: [licenses/jsQR.txt](licenses/jsQR.txt). https://github.com/cozmo/jsQR
 
 The application includes the upstream frameworks' resources and licenses. Build tools, including Vite and TypeScript, retain their upstream licenses and are not bundled as executable code in the Mac app.

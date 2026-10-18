@@ -8,6 +8,12 @@ struct TrustedPeer: Codable, Identifiable {
     var name: String
     var permissions: Permissions
     var labOnly: Bool
+    var expiresAt: Date? = nil
+
+    func isAuthorized(at now: Date = Date()) -> Bool {
+        guard let expiresAt else { return true }
+        return expiresAt.timeIntervalSince1970.isFinite && expiresAt > now
+    }
 }
 
 enum KeyStore {
@@ -32,14 +38,14 @@ enum KeyStore {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("WAI Remote", isDirectory: true).appendingPathComponent("peers.json")
     }
-    static func peers() -> [TrustedPeer] {
-        guard let data = try? Data(contentsOf: peersURL) else { return [] }
+    static func peers(at url: URL = peersURL) -> [TrustedPeer] {
+        guard let data = try? Data(contentsOf: url) else { return [] }
         return (try? JSONDecoder().decode([TrustedPeer].self, from: data)) ?? []
     }
-    static func save(_ peers: [TrustedPeer]) throws {
-        try FileManager.default.createDirectory(at: peersURL.deletingLastPathComponent(), withIntermediateDirectories: true,
+    static func save(_ peers: [TrustedPeer], to url: URL = peersURL) throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true,
                                              attributes: [.posixPermissions: 0o700])
-        try JSONEncoder().encode(peers).write(to: peersURL, options: .atomic)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: peersURL.path)
+        try JSONEncoder().encode(peers).write(to: url, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 }

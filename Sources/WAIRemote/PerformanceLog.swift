@@ -36,8 +36,16 @@ enum PerformanceLog {
         let row = values.merging(["event": event, "time": Date().timeIntervalSince1970]) { _, new in new }
         guard let data = try? JSONSerialization.data(withJSONObject: row, options: [.sortedKeys]) else { return }
         queue.async {
-            // Bound a diagnostic run to 20 MB. Restarting the app starts a new file.
-            guard written < 20_000_000 else { return }
+            // Keep recent evidence for long-lived hosts without growing forever.
+            // Both files contain only this process's opt-in diagnostics.
+            if written + data.count + 1 > 20_000_000 {
+                let previous = url.deletingPathExtension().appendingPathExtension("previous.jsonl")
+                do {
+                    if FileManager.default.fileExists(atPath: previous.path) { try FileManager.default.removeItem(at: previous) }
+                    try FileManager.default.moveItem(at: url, to: previous)
+                    written = 0
+                } catch { return }
+            }
             if !FileManager.default.fileExists(atPath: url.path) {
                 FileManager.default.createFile(atPath: url.path, contents: nil, attributes: [.posixPermissions: 0o600])
             }

@@ -22,6 +22,7 @@ struct PhoneView: View {
     @ObservedObject var model: PhoneModel
     @State private var keyboard = false
     @State private var text = ""
+    @State private var scanningQR = false
     @FocusState private var typing: Bool
     @Environment(\.verticalSizeClass) private var verticalSize
     private let warm = Color(uiColor: .systemBackground)
@@ -29,6 +30,9 @@ struct PhoneView: View {
         Group { if model.connected { session } else { welcome } }
             .onChange(of: model.mode) { _, mode in if mode != .control { keyboard = false } }
             .sheet(isPresented: $keyboard) { keyboardSheet }
+            .sheet(isPresented: $scanningQR) {
+                InvitationScanner { invitation in model.invitation = invitation; model.connect() }
+            }
     }
     private var welcome: some View {
         NavigationStack {
@@ -60,6 +64,11 @@ struct PhoneView: View {
                     }
                     VStack(alignment: .leading, spacing: 14) {
                         Text("Добавить Mac").font(.headline)
+                        Button { scanningQR = true } label: {
+                            Label("Сканировать QR-код", systemImage: "qrcode.viewfinder")
+                                .frame(maxWidth: .infinity).padding(.vertical, 8)
+                        }.remotePrimaryButton().controlSize(.large)
+                            .disabled(model.connecting).accessibilityIdentifier("scanInvitationQR")
                         TextField("Приглашение с Mac", text: $model.invitation, axis: .vertical)
                             .lineLimit(1...3).textInputAutocapitalization(.never).autocorrectionDisabled()
                             .font(.body).padding(16).background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 16))
@@ -73,7 +82,7 @@ struct PhoneView: View {
                             }.remotePrimaryButton().controlSize(.large)
                                 .disabled(model.connecting || model.invitation.isEmpty || model.identity == nil).accessibilityIdentifier("connect")
                         }
-                        Text("На Mac выберите «Поделиться экраном» и скопируйте приглашение.")
+                        Text("На Mac выберите «Поделиться экраном»: отсканируйте QR-код или скопируйте приглашение.")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                     if model.connecting || model.status != "Ваш Mac. Под рукой." {

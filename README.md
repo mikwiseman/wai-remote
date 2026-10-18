@@ -11,8 +11,10 @@
 Requires **macOS 15 or later**, on Apple Silicon or Intel. Install WAI Remote on the sharing Mac, then connect from another Mac, the native iPhone/iPad app, or the browser viewer.
 
 1. On the Mac you want to access, choose **Поделиться экраном** (Share screen). Follow the macOS Screen Recording and Accessibility prompts, then open access.
-2. Copy its invitation. On the other Mac, choose **Подключиться** (Connect) and paste the link.
+2. On the other Mac, iPhone/iPad or browser viewer, choose **Сканировать QR-код** and scan the code shown by the sharing Mac. You can also open an image of the code or paste the invitation link.
 3. Approve viewing or control on the sharing Mac. The connection is saved for next time.
+
+QR scanning uses the camera only while the scanner is open. Camera frames and selected images stay on your device. The iPhone Camera app can also open the QR's web invitation; choose **Открыть в приложении WAI Remote** to continue in the installed app. Treat the code like its invitation link and share it only with the intended recipient.
 
 Both devices need internet and can be on different networks. Open access stays enabled until you close it. WAI Remote prevents idle system sleep and restores access after app relaunch or login using a bundled background helper. Allow that helper in macOS Login Items if macOS requests it. Turning off the display does not close access. Locking or deliberately sleeping the Mac suspends capture and input; access resumes after wake and unlock. There is no access before login or through the lock screen.
 
@@ -51,6 +53,7 @@ Then select that address under **Настройки → Диагностика**
 - A Go gateway authenticates device signatures and forwards connection setup messages. It does not receive unencrypted screen pixels or keystrokes.
 - Device identities use P-256 keys. The native private key stays in macOS Keychain. The host's public key is pinned in the invitation.
 - Invitations have no time limit while access remains open. Closing access or creating a new invitation revokes the old link. A first connection still requires approval on the sharing Mac. Saved computers can reconnect without a new invitation; their saved connections contain public identity information, not the invitation secret.
+- New device approvals offer one hour (the default), 24 hours, or until revoked. Existing approvals without an expiry stay indefinite. Expiration closes the active session and requires a fresh invitation and owner approval; it never revokes another device. Network and gateway failures preserve the owner's open-access grant.
 - Approved connections recover after transient transport loss with bounded retry delays. Explicit disconnect cancels recovery. The host detects silent signaling connections and reconnects independently of an active screen session.
 - The host keeps final authority over viewing, control, drawing, pause and revocation. Input is released when focus or transport is lost; sequence numbers and session epochs reject stale commands.
 - The public relay uses short-lived credentials, bounded allocations and bandwidth, and relay-to-relay peers only. It is a small initial service, without an availability SLA.

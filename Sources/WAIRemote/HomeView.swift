@@ -10,6 +10,8 @@ struct HomeView: View {
     @State private var copied = false
     @State private var editing: SavedComputer?
     @State private var computerName = ""
+    @State private var scanningQR = false
+    @State private var approvalDuration = ApprovalDuration.hour
     private let accent = Color.accentColor
     private func connectInvitation() { viewer.invitation = viewer.invitationDraft; connect() }
 
@@ -33,13 +35,20 @@ struct HomeView: View {
         .background { RemoteBackdrop() }
         .tint(accent)
         .onAppear { if host.starting || host.sharing || host.accessEnabled || host.permissionRequested { sharingTab = true } }
-        .onChange(of: host.pending?.id) { _, pending in if pending != nil { sharingTab = true } }
+        .onChange(of: host.pending?.id) { _, pending in
+            if pending != nil { sharingTab = true; approvalDuration = .hour }
+        }
         .sheet(item: $editing) { computer in
             VStack(alignment: .leading, spacing: 18) {
                 Text("Название компьютера").font(.title2.weight(.semibold))
                 TextField("Например, Mac mini дома", text: $computerName).textFieldStyle(.roundedBorder)
                 HStack { Button("Отмена") { editing = nil }; Spacer(); Button("Сохранить") { viewer.rename(computer.id, name: computerName); editing = nil }.keyboardShortcut(.defaultAction) }
             }.padding(28).frame(width: 360)
+        }
+        .sheet(isPresented: $scanningQR) {
+            InvitationScanner { invitation in
+                viewer.invitationDraft = invitation; connectInvitation()
+            }
         }
     }
     private func tab(_ title: String, sharing: Bool) -> some View {
@@ -76,6 +85,9 @@ struct HomeView: View {
                     Button("Подключиться", action: connectInvitation).remotePrimaryButton().controlSize(.large)
                         .disabled(viewer.invitationDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || viewer.connecting)
                 }
+                Button { scanningQR = true } label: {
+                    Label("Подключиться по QR-коду", systemImage: "qrcode.viewfinder")
+                }.disabled(viewer.connecting).accessibilityIdentifier("scanInvitationQR")
                 Text("На другом Mac откройте WAI Remote и выберите «Поделиться экраном».")
                     .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
@@ -102,7 +114,7 @@ struct HomeView: View {
     }
     private var shareContent: some View {
         VStack(alignment: .leading, spacing: 24) {
-            title(host.suspended ? "Доступ приостановлен" : host.reconnecting ? "Восстанавливаем соединение" : host.pending != nil ? "Запрос подключения" : host.sharing ? "Доступ открыт" : "Поделиться экраном", subtitle: host.suspended ? "Продолжим автоматически после разблокировки Mac." : host.reconnecting ? "Соединение восстановится автоматически, когда сервер станет доступен." : host.pending != nil || host.connectedName != nil ? "" : host.sharing ? "Сохранённые устройства могут подключаться в любой момент." : "Отправьте приглашение человеку, которому хотите показать экран.")
+            title(shareTitle, subtitle: shareSubtitle)
             if (!host.sharing || !host.isLab) && (!host.screenAllowed || !host.controlAllowed) {
                 VStack(alignment: .leading, spacing: 16) {
                     if !host.screenAllowed { permission("Запись экрана", detail: "Разрешите запись экрана для WAI Remote в настройках macOS.", action: host.requestScreen) }
@@ -118,16 +130,20 @@ struct HomeView: View {
                     Label("\(pending.offer.name) хочет подключиться", systemImage: "person.crop.circle.badge.questionmark").font(.headline)
                     Text("Разрешайте подключение, только если вы его ожидаете.").font(.callout).foregroundStyle(.secondary)
                     Text("При управлении также доступны текст, изображения и файлы, которые вы копируете в буфер обмена.").font(.caption).foregroundStyle(.secondary)
+                    Picker("Разрешить доступ", selection: $approvalDuration) {
+                        ForEach(ApprovalDuration.allCases) { duration in Text(duration.title).tag(duration) }
+                    }.pickerStyle(.segmented).accessibilityIdentifier("approvalDuration")
                     HStack {
                         Button("Отклонить") { host.reject() }
                         Spacer()
-                        Button("Только просмотр") { host.approve(control: false) }
-                        Button("Разрешить управление") { host.approve(control: true) }.remotePrimaryButton().disabled(!host.controlAllowed && !host.isLab)
+                        Button("Только просмотр") { host.approve(control: false, expiresAt: approvalDuration.expiresAt()) }
+                        Button("Разрешить управление") { host.approve(control: true, expiresAt: approvalDuration.expiresAt()) }.remotePrimaryButton().disabled(!host.controlAllowed && !host.isLab)
                     }
                 }.padding(20).remoteGlass()
             }
             if host.accessEnabled && !host.sharing {
-                Label(host.status, systemImage: "moon.zzz").foregroundStyle(.secondary)
+                Label(host.status, systemImage: host.suspended ? "moon.zzz" : "arrow.trianglehead.2.clockwise.rotate.90").foregroundStyle(.secondary)
+                Text(host.detail).font(.callout).foregroundStyle(.secondary)
                 Button("Закрыть доступ", role: .destructive) { host.stop() }
             }
             if let notice = host.backgroundNotice {
@@ -153,6 +169,11 @@ struct HomeView: View {
                         Button("Отключить устройство") { host.disconnectViewer() }
                     }
                 } else if host.pending == nil && !host.invite.isEmpty {
+                    VStack(alignment: .leading, spacing: 12) {
+                        InvitationCodeView(invitation: host.invite)
+                        Text("Отсканируйте код в WAI Remote на iPhone или другом Mac.")
+                            .font(.callout).foregroundStyle(.secondary)
+                    }
                     HStack(spacing: 14) {
                         Button(copied ? "Приглашение скопировано" : "Скопировать приглашение") {
                             host.copyInvite(); copied = true
@@ -170,7 +191,7 @@ struct HomeView: View {
                 }
                 Text("Доступ сохраняется после обновлений и перезапуска. Экран заблокированного Mac не передаётся.")
                     .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            } else {
+            } else if !host.accessEnabled {
                 Button { host.start(lab: false) } label: {
                     HStack { if host.starting { ProgressView().controlSize(.small) }; Text(host.starting ? "Открываем доступ…" : "Открыть доступ к экрану") }
                 }.remotePrimaryButton().controlSize(.large).disabled(host.starting || !host.screenAllowed)
@@ -184,13 +205,42 @@ struct HomeView: View {
             }
             if !host.peers.isEmpty {
                 DisclosureGroup("Разрешённые устройства (\(host.peers.count))") {
-                    Text("Разрешение действует до отзыва. Новое приглашение не требуется.").foregroundStyle(.secondary).padding(.top, 8)
-                    ForEach(host.peers) { peer in
-                        HStack { Text(peer.name); Spacer(); Button("Отозвать доступ") { host.forget(peer.id) } }.padding(.top, 10)
+                    Text("До конца срока можно подключаться без нового приглашения.").foregroundStyle(.secondary).padding(.top, 8)
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        ForEach(host.peers) { peer in
+                            HStack {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(peer.name)
+                                    Text(peer.permissions.control ? "Просмотр и управление" : "Только просмотр").foregroundStyle(.secondary)
+                                    if let expiry = peer.expiresAt {
+                                        Text(peer.isAuthorized(at: context.date) ? "До \(expiry.formatted(date: .abbreviated, time: .shortened))" : "Срок доступа истёк")
+                                            .foregroundStyle(peer.isAuthorized(at: context.date) ? Color.secondary : Color.orange)
+                                    } else { Text("До отзыва").foregroundStyle(.secondary) }
+                                }
+                                Spacer()
+                                Button("Отозвать доступ") { host.forget(peer.id) }
+                            }.padding(.top, 10)
+                        }
                     }
                 }.font(.system(size: 12))
             }
         }
+    }
+    private var shareTitle: String {
+        if host.suspended { return "Доступ приостановлен" }
+        if host.pending != nil { return "Запрос подключения" }
+        if host.connectedName != nil { return host.status }
+        if host.reconnecting || host.accessEnabled && !host.sharing { return "Восстанавливаем соединение" }
+        if host.starting { return "Открываем доступ" }
+        if host.sharing { return host.registered ? "Доступ открыт" : "Подключаем сервер" }
+        return "Поделиться экраном"
+    }
+    private var shareSubtitle: String {
+        if host.suspended { return "Продолжим автоматически после разблокировки Mac." }
+        if host.pending != nil || host.connectedName != nil { return "" }
+        if host.reconnecting || host.accessEnabled && !host.sharing { return "Разрешение сохранено. Соединение восстановится автоматически." }
+        if host.sharing { return host.registered ? "Разрешённые устройства могут подключаться до конца своего срока доступа." : "Проверяем связь. Разрешённые устройства смогут подключиться после подтверждения сервера." }
+        return "Отправьте приглашение человеку, которому хотите показать экран."
     }
     private func permission(_ text: String, detail: String, action: @escaping () -> Void) -> some View {
         HStack(spacing: 14) {
@@ -199,5 +249,16 @@ struct HomeView: View {
             Spacer()
             Button("Разрешить…", action: action)
         }
+    }
+}
+
+private enum ApprovalDuration: String, CaseIterable, Identifiable {
+    case hour, day, untilRevoked
+    var id: Self { self }
+    var title: String {
+        switch self { case .hour: "1 час"; case .day: "24 часа"; case .untilRevoked: "До отзыва" }
+    }
+    func expiresAt(from now: Date = Date()) -> Date? {
+        switch self { case .hour: now.addingTimeInterval(3_600); case .day: now.addingTimeInterval(86_400); case .untilRevoked: nil }
     }
 }
