@@ -3,6 +3,7 @@ import {b64,unb64,bytes,identity,keyID,sign,verify,proof} from './crypto';
 import type {Identity} from './crypto';
 import type {HostState,Mode,Operation,Point,Stroke} from './protocol';
 import {iceConfiguration} from './ice';
+import {installQRScanner} from './qr';
 
 document.querySelector<HTMLDivElement>('#app')!.innerHTML=`
   <section id="welcome" class="welcome">
@@ -12,7 +13,8 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML=`
       <label for="invite">Приглашение</label>
       <textarea id="invite" rows="2" placeholder="Вставьте приглашение из WAI Remote" spellcheck="false" autocomplete="off"></textarea>
       <div class="form-row"><label for="deviceName">Название этого устройства</label><input id="deviceName" maxlength="50" value="Мой браузер" autocomplete="off"></div>
-      <button id="connect" class="primary" type="submit">Подключиться</button>
+      <div class="connect-actions"><button id="connect" class="primary" type="submit">Подключиться</button><button id="scanQR" type="button">Сканировать QR-код</button></div>
+      <a id="openNative" class="hidden" href="#">Открыть в приложении WAI Remote</a>
       <p id="connectStatus" class="status" role="status"></p><button id="cancelRetry" type="button" class="hidden">Отменить ожидание</button>
     </form>
   </section>
@@ -57,7 +59,31 @@ let navigationGesture:'pending'|'pan'|'zoom'|undefined,navigationStart:Point|und
 let invalidated=false;
 const pressedPhysical=new Set<string>();
 
-function updateConnectButton(){el<HTMLButtonElement>('connect').disabled=!el<HTMLTextAreaElement>('invite').value.trim();}
+function updateConnectButton(){
+  const text=el<HTMLTextAreaElement>('invite').value.trim();
+  el<HTMLButtonElement>('connect').disabled=!text;
+  const link=el<HTMLAnchorElement>('openNative');link.classList.add('hidden');
+  void invitationURL(text).then(url=>{
+    if(el<HTMLTextAreaElement>('invite').value.trim()!==text)return;
+    link.href='wai-remote://connect?invite='+encodeURIComponent(url.href);link.classList.remove('hidden');
+  }).catch(()=>{});
+}
+async function invitationURL(text:string){
+  if(text.length>8192)throw new Error('Приглашение слишком длинное.');
+  let url=new URL(text.trim());
+  if(url.protocol==='wai-remote:'){
+    const entries=[...url.searchParams.entries()];
+    if(url.hostname!=='connect'||url.username||url.password||url.port||url.pathname||url.hash||entries.length!==1||entries[0][0]!=='invite')throw new Error('Некорректное приглашение.');
+    url=new URL(entries[0][1]);
+  }
+  if(url.href.length>4096||url.username||url.password||url.search||!['http:','https:'].includes(url.protocol))throw new Error('Некорректное приглашение.');
+  if(url.origin!==location.origin||url.pathname.replace(/\/$/,'')!==location.pathname.replace(/\/$/,''))throw new Error('Откройте приглашение в браузере по указанному в нём адресу.');
+  const fields=new URLSearchParams(url.hash.slice(1)),names=[...fields.keys()];
+  if(new Set(names).size!==names.length)throw new Error('Некорректное приглашение.');
+  const key=fields.get('key')??'',host=fields.get('host')??'',secret=fields.get('secret');
+  if(!key||unb64(key).length!==65||await keyID(key)!==host||(secret!==null&&unb64(secret).length!==32))throw new Error('Ссылка повреждена. Скопируйте новое приглашение на Mac.');
+  return url;
+}
 el('invite').addEventListener('input',updateConnectButton);
 function readInvitation(){if(location.hash){el<HTMLTextAreaElement>('invite').value=location.href;history.replaceState(null,'',location.pathname);updateConnectButton();}}
 const initialHash=location.hash;
@@ -65,6 +91,12 @@ if(initialHash){readInvitation();}
 else {const saved=localStorage.getItem('wai-last-host');if(saved)el<HTMLTextAreaElement>('invite').value=saved;}
 window.addEventListener('hashchange',readInvitation);
 updateConnectButton();
+const scanQR=installQRScanner(async text=>{
+  try{return (await invitationURL(text)).href;}catch{return undefined;}
+},invitation=>{
+  el<HTMLTextAreaElement>('invite').value=invitation;updateConnectButton();void connect();
+});
+el('scanQR').addEventListener('click',()=>{void scanQR();});
 el<HTMLInputElement>('deviceName').value=localStorage.getItem('wai-device-name')||(matchMedia('(pointer:coarse)').matches?'Мой телефон':'Мой браузер');
 
 function status(text:string){el('connectStatus').textContent=text;el('connectionLabel').textContent=text;}
@@ -97,12 +129,10 @@ el('connectForm').addEventListener('submit',event=>{event.preventDefault();void 
 async function connect(retrying=false){
   cleanup(!retrying);const token=connectionToken;
   try{
-    const url=new URL(el<HTMLTextAreaElement>('invite').value.trim());
-    if(url.origin!==location.origin)throw new Error('Откройте приглашение в браузере по указанному в нём адресу.');
+    const url=await invitationURL(el<HTMLTextAreaElement>('invite').value);
+    if(token!==connectionToken)return;
     const fragment=new URLSearchParams(url.hash.slice(1));
     hostKey=fragment.get('key')??'';hostID=fragment.get('host')??'';pairSecret=fragment.get('secret')??'';
-    if(!hostKey||await keyID(hostKey)!==hostID)throw new Error('Ссылка повреждена. Скопируйте новое приглашение на Mac.');
-    if(pairSecret&&unb64(pairSecret).length!==32)throw new Error('Некорректное приглашение');
     if(!pairSecret)recoveryURL=url.href;
     el('cancelRetry').classList.remove('hidden');
     el<HTMLButtonElement>('connect').disabled=true;status('Подключаемся…');

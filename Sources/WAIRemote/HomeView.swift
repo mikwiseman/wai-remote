@@ -10,6 +10,7 @@ struct HomeView: View {
     @State private var copied = false
     @State private var editing: SavedComputer?
     @State private var computerName = ""
+    @State private var scanningQR = false
     private let accent = Color.accentColor
     private func connectInvitation() { viewer.invitation = viewer.invitationDraft; connect() }
 
@@ -40,6 +41,11 @@ struct HomeView: View {
                 TextField("Например, Mac mini дома", text: $computerName).textFieldStyle(.roundedBorder)
                 HStack { Button("Отмена") { editing = nil }; Spacer(); Button("Сохранить") { viewer.rename(computer.id, name: computerName); editing = nil }.keyboardShortcut(.defaultAction) }
             }.padding(28).frame(width: 360)
+        }
+        .sheet(isPresented: $scanningQR) {
+            InvitationScanner { invitation in
+                viewer.invitationDraft = invitation; connectInvitation()
+            }
         }
     }
     private func tab(_ title: String, sharing: Bool) -> some View {
@@ -76,6 +82,9 @@ struct HomeView: View {
                     Button("Подключиться", action: connectInvitation).remotePrimaryButton().controlSize(.large)
                         .disabled(viewer.invitationDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || viewer.connecting)
                 }
+                Button { scanningQR = true } label: {
+                    Label("Подключиться по QR-коду", systemImage: "qrcode.viewfinder")
+                }.disabled(viewer.connecting).accessibilityIdentifier("scanInvitationQR")
                 Text("На другом Mac откройте WAI Remote и выберите «Поделиться экраном».")
                     .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
@@ -153,6 +162,11 @@ struct HomeView: View {
                         Button("Отключить устройство") { host.disconnectViewer() }
                     }
                 } else if host.pending == nil && !host.invite.isEmpty {
+                    VStack(alignment: .leading, spacing: 12) {
+                        InvitationCodeView(invitation: host.invite)
+                        Text("Отсканируйте код в WAI Remote на iPhone или другом Mac.")
+                            .font(.callout).foregroundStyle(.secondary)
+                    }
                     HStack(spacing: 14) {
                         Button(copied ? "Приглашение скопировано" : "Скопировать приглашение") {
                             host.copyInvite(); copied = true

@@ -41,7 +41,7 @@
 		<true/>
 	</dict>
 	<key>NSCameraUsageDescription</key>
-	<string>WAI Remote не использует камеру iPhone. Для просмотра экрана Mac, управления и рисования доступ к камере не нужен.</string>
+	<string>Камера считывает QR-код приглашения, чтобы подключиться к вашему Mac.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Чтобы видеть экран вашего Mac, нажимать и рисовать на нём по Wi-Fi.</string>
 	<key>NSMicrophoneUsageDescription</key>
