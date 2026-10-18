@@ -2,7 +2,11 @@ import XCTest
 import CoreImage
 import CoreVideo
 import RemoteCore
+#if os(macOS)
 @testable import WAIRemote
+#else
+@testable import WAI_Remote
+#endif
 
 final class InvitationQRCodeTests: XCTestCase {
     func testCameraFrameCanBeReadWithoutMetadataSupport() throws {

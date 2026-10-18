@@ -22,12 +22,36 @@ enum InvitationQRCode {
     }
 
     static func invitation(in image: CGImage) throws -> String? {
+        #if targetEnvironment(simulator)
+        return try simulatorInvitation(in: CIImage(cgImage: image))
+        #else
         try invitation(using: VNImageRequestHandler(cgImage: image))
+        #endif
     }
 
     static func invitation(in pixelBuffer: CVPixelBuffer) throws -> String? {
+        #if targetEnvironment(simulator)
+        return try simulatorInvitation(in: CIImage(cvPixelBuffer: pixelBuffer))
+        #else
         try invitation(using: VNImageRequestHandler(cvPixelBuffer: pixelBuffer))
+        #endif
     }
+
+    #if targetEnvironment(simulator)
+    private static func simulatorInvitation(in image: CIImage) throws -> String? {
+        // The iOS simulator cannot create Vision's hardware inference context.
+        // Its CPU path also returns no observations for valid QR images. Core
+        // Image's QR detector works without that context; devices still use Vision.
+        guard let detector = CIDetector(ofType: CIDetectorTypeQRCode,
+            context: CIContext(options: [.useSoftwareRenderer: true]),
+            options: [CIDetectorAccuracy: CIDetectorAccuracyHigh]) else {
+            throw NSError(domain: "is.wai.remote.qr", code: 1)
+        }
+        return detector.features(in: image).compactMap { feature in
+            (feature as? CIQRCodeFeature)?.messageString.flatMap { try? RemoteInvite($0).invitationURL.absoluteString }
+        }.first
+    }
+    #endif
 
     private static func invitation(using handler: VNImageRequestHandler) throws -> String? {
         let request = VNDetectBarcodesRequest()
@@ -160,7 +184,7 @@ private final class InvitationCamera: NSObject, ObservableObject {
         queue.async { [weak self] in
             let access = url.startAccessingSecurityScopedResource()
             defer { if access { url.stopAccessingSecurityScopedResource() } }
-            let result: String?
+            let result: Result<String?, Error>
             do {
                 let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
                 guard size <= 20_000_000,
@@ -170,16 +194,19 @@ private final class InvitationCamera: NSObject, ObservableObject {
                         kCGImageSourceCreateThumbnailWithTransform: true,
                         kCGImageSourceThumbnailMaxPixelSize: 2400
                       ] as CFDictionary) else { throw ScanError.image }
-                result = try InvitationQRCode.invitation(in: image)
+                result = .success(try InvitationQRCode.invitation(in: image))
             } catch {
                 Logger(subsystem: "is.wai.remote", category: "qr-image")
                     .error("Image read failed: \((error as NSError).domain, privacy: .public) \((error as NSError).code)")
-                result = nil
+                result = .failure(error)
             }
             DispatchQueue.main.async {
                 guard let self, self.generation == token else { return }
-                if let result { self.accept(result) }
-                else { self.message = "На изображении нет приглашения WAI Remote. Выберите другое изображение." }
+                switch result {
+                case .success(let invitation?): self.accept(invitation)
+                case .success(nil): self.message = "На изображении нет приглашения WAI Remote. Выберите другое изображение."
+                case .failure: self.message = "Не удалось прочитать изображение. Попробуйте ещё раз или вставьте ссылку приглашения."
+                }
             }
         }
     }
