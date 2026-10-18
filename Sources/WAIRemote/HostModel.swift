@@ -13,6 +13,7 @@ struct Offer: Codable {
     let expiresAt: Double
     let name: String
     let sdp: String
+    var localPointer: Bool? = nil
 }
 struct PendingPeer: Identifiable {
     var id: String { offer.peerID }
@@ -65,6 +66,7 @@ final class HostModel: ObservableObject {
     private var activePeer: TrustedPeer?
     private let injector = InputInjector()
     private var remotePointer: RemotePointer?
+    private var viewerHasLocalPointer = false
     private var overlay: InkOverlay?
     private var labWindow: NSWindow?
     private var inputTestWindow: NSWindow?
@@ -414,6 +416,7 @@ final class HostModel: ObservableObject {
         }
         guard let capture, sharing else { return }
         activePeer = approved
+        viewerHasLocalPointer = offer.localPointer == true
         if let machine, machine.author == offer.peerID, machine.state.surface == surface {
             machine.reconnect(); _ = machine.setPermissions(permissions)
         } else { machine = SessionMachine(surface: surface, permissions: permissions, author: offer.peerID) }
@@ -434,7 +437,14 @@ final class HostModel: ObservableObject {
             self.activity = ProcessInfo.processInfo.beginActivity(options: .userInteractive, reason: "WAI Remote active session")
             if !self.isLab {
                 let display = self.capturedDisplay, window = self.capturedWindow
-                let excluded = self.overlay.map { [CGWindowID($0.panel.windowNumber)] } ?? []
+                var excluded = self.overlay.map { [CGWindowID($0.panel.windowNumber)] } ?? []
+                // A desktop viewer already has an immediate OS cursor. Returning
+                // its second cursor inside the video creates a delayed duplicate.
+                // Keep that cursor visible to the host's owner; older/touch viewers
+                // retain the captured cursor unless they explicitly opt in.
+                if self.viewerHasLocalPointer && self.independentPointer, let pointer = self.remotePointer {
+                    excluded.append(pointer.windowID)
+                }
                 self.captureStartTask = Task { @MainActor [weak self, weak peer] in
                     do {
                         try Task.checkCancellation()
@@ -565,6 +575,7 @@ final class HostModel: ObservableObject {
         connectionDeadline = nil
         injector.releaseAll(); machine?.disconnect(); transport?.close(); transport = nil; connectedName = nil
         activePeer = nil
+        viewerHasLocalPointer = false
         if !isLab { stopCapture() }
         localDrawing = false; overlay?.drawing = false; localStrokeID = nil; refreshInk()
         if let activity { ProcessInfo.processInfo.endActivity(activity); self.activity = nil }

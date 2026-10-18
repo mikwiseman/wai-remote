@@ -174,7 +174,7 @@ class MacViewerModel: ObservableObject {
                 self.nonce = random.base64URL
                 let payload = try JSONSerialization.data(withJSONObject: ["hostID": invite.hostID, "peerID": identity.id, "publicKey": identity.publicKey,
                     "nonce": self.nonce, "expiresAt": (Date().timeIntervalSince1970 + 100) * 1000,
-                    "name": String((Host.current().localizedName ?? "Mac").prefix(40)), "sdp": sdp])
+                    "name": String((Host.current().localizedName ?? "Mac").prefix(40)), "sdp": sdp, "localPointer": true])
                 var body = ["payload": payload.base64URL, "signature": try identity.sign(payload, domain: "wai-remote/offer/v1")]
                 if let secret = invite.secret { body["proof"] = DeviceIdentity.pairingProof(secret: secret, payload: payload) }
                 self.signaling?.send(["type": "offer", "body": body])

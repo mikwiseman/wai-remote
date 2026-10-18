@@ -18,18 +18,43 @@ final class InvitationTests: XCTestCase {
         return model
     }
 
-    private func request(_ invitation: String, from viewer: DeviceIdentity = DeviceIdentity()) throws -> [String: Any] {
+    private func request(_ invitation: String, from viewer: DeviceIdentity = DeviceIdentity(), localPointer: Bool? = nil) throws -> [String: Any] {
         let invite = try RemoteInvite(invitation)
         let offer = Offer(hostID: invite.hostID, peerID: viewer.id, publicKey: viewer.publicKey,
                           nonce: Data(repeating: 7, count: 32).base64URL,
                           expiresAt: Date().addingTimeInterval(100).timeIntervalSince1970 * 1000,
-                          name: "Invitation test", sdp: "")
+                          name: "Invitation test", sdp: "", localPointer: localPointer)
         let payload = try JSONEncoder().encode(offer)
         return ["type": "offer", "from": viewer.id, "body": [
             "payload": payload.base64URL,
             "signature": try viewer.sign(payload, domain: "wai-remote/offer/v1"),
             "proof": DeviceIdentity.pairingProof(secret: try XCTUnwrap(invite.secret), payload: payload)
         ]]
+    }
+
+    func testLocalPointerIsOptInAndPartOfTheSignedOffer() throws {
+        let legacy = host()
+        defer { legacy.stop() }
+        legacy.receiveSignal(try request(legacy.invite))
+        XCTAssertNil(try XCTUnwrap(legacy.pending).offer.localPointer,
+                     "Existing viewers must retain the captured independent pointer.")
+
+        let desktop = host()
+        defer { desktop.stop() }
+        desktop.receiveSignal(try request(desktop.invite, localPointer: true))
+        XCTAssertEqual(try XCTUnwrap(desktop.pending).offer.localPointer, true)
+
+        let tampered = host()
+        defer { tampered.stop() }
+        var message = try request(tampered.invite)
+        var body = try XCTUnwrap(message["body"] as? [String: String])
+        let payload = try XCTUnwrap(Data(base64URL: try XCTUnwrap(body["payload"])))
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: payload) as? [String: Any])
+        object["localPointer"] = true
+        body["payload"] = try JSONSerialization.data(withJSONObject: object).base64URL
+        message["body"] = body
+        tampered.receiveSignal(message)
+        XCTAssertNil(tampered.pending, "Changing a capability invalidates the existing signature.")
     }
 
     func testInvitationHasNoTimeLimitAndStillNeedsOwnerApproval() throws {

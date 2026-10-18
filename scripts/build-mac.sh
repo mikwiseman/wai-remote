@@ -2,7 +2,8 @@
 set -euo pipefail
 cd "${0:A:h}/.."
 configuration="${WAI_CONFIGURATION:-debug}"
-build_args=(-c "$configuration")
+build_root="${WAI_SWIFT_SCRATCH_PATH:-$PWD/.build}"
+build_args=(-c "$configuration" --scratch-path "$build_root" --jobs "${WAI_BUILD_JOBS:-2}")
 if [[ "${WAI_UNIVERSAL:-0}" == 1 ]]; then build_args+=(--arch arm64 --arch x86_64); fi
 swift build "${build_args[@]}"
 bin_dir=$(swift build "${build_args[@]}" --show-bin-path)
@@ -24,8 +25,8 @@ cp "$bin_dir/WAIRemote" "$app_path/Contents/MacOS/WAIRemote"
 cp "$bin_dir/WAIRemoteWatchdog" "$app_path/Contents/MacOS/WAIRemoteWatchdog"
 mkdir -p "$app_path/Contents/Library/LaunchAgents"
 cp mac/is.wai.remote.recovery.plist "$app_path/Contents/Library/LaunchAgents/"
-ditto .build/artifacts/webrtc/WebRTC/WebRTC.xcframework/macos-x86_64_arm64/WebRTC.framework "$app_path/Contents/Frameworks/WebRTC.framework"
-ditto .build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework "$app_path/Contents/Frameworks/Sparkle.framework"
+ditto "$build_root/artifacts/webrtc/WebRTC/WebRTC.xcframework/macos-x86_64_arm64/WebRTC.framework" "$app_path/Contents/Frameworks/WebRTC.framework"
+ditto "$build_root/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework" "$app_path/Contents/Frameworks/Sparkle.framework"
 cp mac/Info.plist "$app_path/Contents/Info.plist"
 mkdir -p "$app_path/Contents/Resources/Licenses"
 cp LICENSE THIRD_PARTY.md "$app_path/Contents/Resources/Licenses/"

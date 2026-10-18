@@ -1,7 +1,8 @@
 .DS_Store
-.build/
+.build
 build/
 node_modules/
+__pycache__/
 web/dist/
 gateway/wai-gateway
 *.log
