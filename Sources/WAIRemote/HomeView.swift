@@ -11,6 +11,7 @@ struct HomeView: View {
     @State private var editing: SavedComputer?
     @State private var computerName = ""
     @State private var scanningQR = false
+    @State private var approvalDuration = ApprovalDuration.hour
     private let accent = Color.accentColor
     private func connectInvitation() { viewer.invitation = viewer.invitationDraft; connect() }
 
@@ -34,7 +35,9 @@ struct HomeView: View {
         .background { RemoteBackdrop() }
         .tint(accent)
         .onAppear { if host.starting || host.sharing || host.accessEnabled || host.permissionRequested { sharingTab = true } }
-        .onChange(of: host.pending?.id) { _, pending in if pending != nil { sharingTab = true } }
+        .onChange(of: host.pending?.id) { _, pending in
+            if pending != nil { sharingTab = true; approvalDuration = .hour }
+        }
         .sheet(item: $editing) { computer in
             VStack(alignment: .leading, spacing: 18) {
                 Text("Название компьютера").font(.title2.weight(.semibold))
@@ -127,11 +130,14 @@ struct HomeView: View {
                     Label("\(pending.offer.name) хочет подключиться", systemImage: "person.crop.circle.badge.questionmark").font(.headline)
                     Text("Разрешайте подключение, только если вы его ожидаете.").font(.callout).foregroundStyle(.secondary)
                     Text("При управлении также доступны текст, изображения и файлы, которые вы копируете в буфер обмена.").font(.caption).foregroundStyle(.secondary)
+                    Picker("Разрешить доступ", selection: $approvalDuration) {
+                        ForEach(ApprovalDuration.allCases) { duration in Text(duration.title).tag(duration) }
+                    }.pickerStyle(.segmented).accessibilityIdentifier("approvalDuration")
                     HStack {
                         Button("Отклонить") { host.reject() }
                         Spacer()
-                        Button("Только просмотр") { host.approve(control: false) }
-                        Button("Разрешить управление") { host.approve(control: true) }.remotePrimaryButton().disabled(!host.controlAllowed && !host.isLab)
+                        Button("Только просмотр") { host.approve(control: false, expiresAt: approvalDuration.expiresAt()) }
+                        Button("Разрешить управление") { host.approve(control: true, expiresAt: approvalDuration.expiresAt()) }.remotePrimaryButton().disabled(!host.controlAllowed && !host.isLab)
                     }
                 }.padding(20).remoteGlass()
             }
@@ -198,9 +204,22 @@ struct HomeView: View {
             }
             if !host.peers.isEmpty {
                 DisclosureGroup("Разрешённые устройства (\(host.peers.count))") {
-                    Text("Разрешение действует до отзыва. Новое приглашение не требуется.").foregroundStyle(.secondary).padding(.top, 8)
-                    ForEach(host.peers) { peer in
-                        HStack { Text(peer.name); Spacer(); Button("Отозвать доступ") { host.forget(peer.id) } }.padding(.top, 10)
+                    Text("До конца срока можно подключаться без нового приглашения.").foregroundStyle(.secondary).padding(.top, 8)
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        ForEach(host.peers) { peer in
+                            HStack {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(peer.name)
+                                    Text(peer.permissions.control ? "Просмотр и управление" : "Только просмотр").foregroundStyle(.secondary)
+                                    if let expiry = peer.expiresAt {
+                                        Text(peer.isAuthorized(at: context.date) ? "До \(expiry.formatted(date: .abbreviated, time: .shortened))" : "Срок доступа истёк")
+                                            .foregroundStyle(peer.isAuthorized(at: context.date) ? Color.secondary : Color.orange)
+                                    } else { Text("До отзыва").foregroundStyle(.secondary) }
+                                }
+                                Spacer()
+                                Button("Отозвать доступ") { host.forget(peer.id) }
+                            }.padding(.top, 10)
+                        }
                     }
                 }.font(.system(size: 12))
             }
@@ -213,5 +232,16 @@ struct HomeView: View {
             Spacer()
             Button("Разрешить…", action: action)
         }
+    }
+}
+
+private enum ApprovalDuration: String, CaseIterable, Identifiable {
+    case hour, day, untilRevoked
+    var id: Self { self }
+    var title: String {
+        switch self { case .hour: "1 час"; case .day: "24 часа"; case .untilRevoked: "До отзыва" }
+    }
+    func expiresAt(from now: Date = Date()) -> Date? {
+        switch self { case .hour: now.addingTimeInterval(3_600); case .day: now.addingTimeInterval(86_400); case .untilRevoked: nil }
     }
 }

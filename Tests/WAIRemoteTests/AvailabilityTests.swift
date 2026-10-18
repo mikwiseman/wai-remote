@@ -65,11 +65,11 @@ final class AvailabilityTests: XCTestCase {
         defaults.set(Data("{\"target\":{\"display\":{}}}".utf8), forKey: PersistentAccess.key)
         XCTAssertEqual(PersistentAccess.read(from: defaults)?.target, .display)
     }
-    func testDisplaySleepDoesNotCloseAccessAndSystemSleepPreservesConsent() {
-        let previous = UserDefaults.standard.data(forKey: PersistentAccess.key)
-        defer { UserDefaults.standard.set(previous, forKey: PersistentAccess.key) }
-        PersistentAccess.save(.init(target: .display))
-        let host = HostModel(identity: DeviceIdentity())
+    func testDisplaySleepDoesNotCloseAccessAndSystemSleepPreservesConsent() throws {
+        let suite = "sleep-consent-\(UUID())", defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        PersistentAccess.save(.init(target: .display), to: defaults)
+        let host = HostModel(identity: DeviceIdentity(), defaults: defaults, disableBackgroundAccess: {})
         host.sharing = true
         let center = NSWorkspace.shared.notificationCenter
         center.post(name: NSWorkspace.screensDidSleepNotification, object: nil)
@@ -77,9 +77,9 @@ final class AvailabilityTests: XCTestCase {
         center.post(name: NSWorkspace.willSleepNotification, object: nil)
         XCTAssertFalse(host.sharing, "Capture and input must stop before system sleep.")
         XCTAssertTrue(host.accessEnabled)
-        XCTAssertEqual(PersistentAccess.read()?.target, .display)
+        XCTAssertEqual(PersistentAccess.read(from: defaults)?.target, .display)
         host.stop()
         XCTAssertFalse(host.accessEnabled)
-        XCTAssertNil(PersistentAccess.read(), "An explicit Close Access must cancel every automatic restoration.")
+        XCTAssertNil(PersistentAccess.read(from: defaults), "An explicit Close Access must cancel every automatic restoration.")
     }
 }
