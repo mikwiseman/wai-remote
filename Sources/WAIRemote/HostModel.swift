@@ -30,6 +30,7 @@ final class HostModel: ObservableObject {
     @Published var sharing = false
     @Published var starting = false
     @Published private(set) var reconnecting = false
+    @Published private(set) var registered = false
     @Published private(set) var accessEnabled: Bool
     @Published var backgroundNotice: String?
     @Published private(set) var suspended = false
@@ -266,7 +267,7 @@ final class HostModel: ObservableObject {
         guard let base = URL(string: gateway), RemoteInvite.isAllowedGateway(base) else {
             status = "Укажите HTTPS-сервер или адрес в локальной сети"; return
         }
-        starting = true; reconnecting = false; isLab = lab; status = "Подготовка…"; connectionGeneration = UUID()
+        starting = true; reconnecting = false; registered = false; isLab = lab; status = "Подготовка…"; connectionGeneration = UUID()
         let generation = connectionGeneration
         let video = makeCapture(); capture = video
         Task { @MainActor in
@@ -309,22 +310,28 @@ final class HostModel: ObservableObject {
                 sharing = true; starting = false; status = "Подключаем сервер…"
                 rememberAccess()
                 let signal = Signaling(identity: identity); signaling = signal
-                var registered = false
-                signal.onRelayRefresh = { [weak self] configuration in self?.iceConfiguration = configuration }
+                var invitationCreated = false
+                signal.onRelayRefresh = { [weak self] configuration in
+                    guard let self, self.connectionGeneration == generation else { return }
+                    self.iceConfiguration = configuration
+                }
                 signal.onReady = { [weak self] configuration in
-                    guard let self else { return }
-                    self.iceConfiguration = configuration; self.reconnecting = false
+                    guard let self, self.connectionGeneration == generation else { return }
+                    self.iceConfiguration = configuration; self.reconnecting = false; self.registered = true
                     UserDefaults.standard.set(self.gateway, forKey: "signalingGateway")
                     self.status = self.transport?.isReady == true ? "Устройство подключено" : self.transport == nil ? "Доступ открыт" : "Соединяемся…"
                     self.detail = "Подключение нового устройства потребует вашего подтверждения."
-                    if !registered { registered = true; self.newInvite() }
+                    if !invitationCreated { invitationCreated = true; self.newInvite() }
                 }
                 signal.onReconnecting = { [weak self] in
-                    guard let self else { return }
-                    self.reconnecting = true
+                    guard let self, self.connectionGeneration == generation else { return }
+                    self.reconnecting = true; self.registered = false
                     if self.transport == nil { self.status = "Восстанавливаем связь…" }
                 }
-                signal.onMessage = { [weak self] object in self?.receiveSignal(object) }
+                signal.onMessage = { [weak self] object in
+                    guard let self, self.connectionGeneration == generation else { return }
+                    self.receiveSignal(object)
+                }
                 signal.onFailure = { [weak self] error in
                     guard let self, self.connectionGeneration == generation else { return }
                     self.signalingFailed(error)
@@ -596,7 +603,7 @@ final class HostModel: ObservableObject {
         }
         resumeAfter = ProcessInfo.processInfo.systemUptime + 2
         if sharing || starting { PerformanceLog.record("host-stop", ["cause": cause, "connected": transport?.isReady == true]) }
-        connectionGeneration = UUID(); sharing = false; starting = false; reconnecting = false
+        connectionGeneration = UUID(); sharing = false; starting = false; reconnecting = false; registered = false
         disconnectViewer(); machine?.stop(); machine = nil
         stopCapture(); capturedDisplay = nil; capturedScreenFrame = nil; overlay?.close(); overlay = nil; labWindow?.orderOut(nil)
         injector.setWindowTarget(nil); capturedWindow = nil; sharedWindowName = nil; resizingWindow = false

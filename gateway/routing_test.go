@@ -15,6 +15,36 @@ import (
 
 func httpHandler(h *hub) http.Handler { return http.HandlerFunc(h.serve) }
 
+func TestMalformedHandshakeIsNotReportedAsAnInvalidDeviceSignature(t *testing.T) {
+	h := newHub()
+	server := httptest.NewServer(httpHandler(h))
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	c, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.CloseNow()
+	var challenge map[string]string
+	if err = wsjson.Read(ctx, c, &challenge); err != nil {
+		t.Fatal(err)
+	}
+	if err = wsjson.Write(ctx, c, "not a hello object"); err != nil {
+		t.Fatal(err)
+	}
+	var reply map[string]any
+	err = wsjson.Read(ctx, c, &reply)
+	if err == nil || strings.Contains(err.Error(), "authentication failed") {
+		t.Fatalf("Malformed transport data must close without claiming an invalid signature: %v", err)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.hosts) != 0 || len(h.viewers) != 0 {
+		t.Fatal("Malformed hello registered a device")
+	}
+}
+
 func TestUDPRelayRequiresClientCapabilityAndPreservesReliableRouting(t *testing.T) {
 	for _, version := range []int{0, 2} {
 		h := newHub()

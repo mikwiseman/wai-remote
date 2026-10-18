@@ -114,7 +114,7 @@ struct HomeView: View {
     }
     private var shareContent: some View {
         VStack(alignment: .leading, spacing: 24) {
-            title(host.suspended ? "Доступ приостановлен" : host.reconnecting ? "Восстанавливаем соединение" : host.pending != nil ? "Запрос подключения" : host.sharing ? "Доступ открыт" : "Поделиться экраном", subtitle: host.suspended ? "Продолжим автоматически после разблокировки Mac." : host.reconnecting ? "Соединение восстановится автоматически, когда сервер станет доступен." : host.pending != nil || host.connectedName != nil ? "" : host.sharing ? "Сохранённые устройства могут подключаться в любой момент." : "Отправьте приглашение человеку, которому хотите показать экран.")
+            title(shareTitle, subtitle: shareSubtitle)
             if (!host.sharing || !host.isLab) && (!host.screenAllowed || !host.controlAllowed) {
                 VStack(alignment: .leading, spacing: 16) {
                     if !host.screenAllowed { permission("Запись экрана", detail: "Разрешите запись экрана для WAI Remote в настройках macOS.", action: host.requestScreen) }
@@ -142,7 +142,8 @@ struct HomeView: View {
                 }.padding(20).remoteGlass()
             }
             if host.accessEnabled && !host.sharing {
-                Label(host.status, systemImage: "moon.zzz").foregroundStyle(.secondary)
+                Label(host.status, systemImage: host.suspended ? "moon.zzz" : "arrow.trianglehead.2.clockwise.rotate.90").foregroundStyle(.secondary)
+                Text(host.detail).font(.callout).foregroundStyle(.secondary)
                 Button("Закрыть доступ", role: .destructive) { host.stop() }
             }
             if let notice = host.backgroundNotice {
@@ -190,7 +191,7 @@ struct HomeView: View {
                 }
                 Text("Доступ сохраняется после обновлений и перезапуска. Экран заблокированного Mac не передаётся.")
                     .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            } else {
+            } else if !host.accessEnabled {
                 Button { host.start(lab: false) } label: {
                     HStack { if host.starting { ProgressView().controlSize(.small) }; Text(host.starting ? "Открываем доступ…" : "Открыть доступ к экрану") }
                 }.remotePrimaryButton().controlSize(.large).disabled(host.starting || !host.screenAllowed)
@@ -224,6 +225,22 @@ struct HomeView: View {
                 }.font(.system(size: 12))
             }
         }
+    }
+    private var shareTitle: String {
+        if host.suspended { return "Доступ приостановлен" }
+        if host.pending != nil { return "Запрос подключения" }
+        if host.connectedName != nil { return host.status }
+        if host.reconnecting || host.accessEnabled && !host.sharing { return "Восстанавливаем соединение" }
+        if host.starting { return "Открываем доступ" }
+        if host.sharing { return host.registered ? "Доступ открыт" : "Подключаем сервер" }
+        return "Поделиться экраном"
+    }
+    private var shareSubtitle: String {
+        if host.suspended { return "Продолжим автоматически после разблокировки Mac." }
+        if host.pending != nil || host.connectedName != nil { return "" }
+        if host.reconnecting || host.accessEnabled && !host.sharing { return "Разрешение сохранено. Соединение восстановится автоматически." }
+        if host.sharing { return host.registered ? "Разрешённые устройства могут подключаться до конца своего срока доступа." : "Проверяем связь. Разрешённые устройства смогут подключиться после подтверждения сервера." }
+        return "Отправьте приглашение человеку, которому хотите показать экран."
     }
     private func permission(_ text: String, detail: String, action: @escaping () -> Void) -> some View {
         HStack(spacing: 14) {

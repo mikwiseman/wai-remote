@@ -78,7 +78,12 @@ func (h *hub) serve(w http.ResponseWriter, r *http.Request) {
 		err = wsjson.Read(ctx, c, &hello)
 	}
 	cancel()
-	if err != nil || !authenticate(hello, nonce) {
+	// An interrupted or timed-out handshake is a transport failure. Only a
+	// complete hello with an invalid signature is an authentication rejection.
+	if err != nil {
+		return
+	}
+	if !authenticate(hello, nonce) {
 		c.Close(websocket.StatusPolicyViolation, "authentication failed")
 		return
 	}
