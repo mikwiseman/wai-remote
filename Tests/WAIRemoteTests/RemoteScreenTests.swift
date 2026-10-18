@@ -306,14 +306,22 @@ final class RemoteScreenTests: XCTestCase {
             if appearances == 1 { first.fulfill() } else { resumed.fulfill() }
         }
         defer { observation.cancel(); screen.detach() }
-        let frame = RTCVideoFrame(buffer: RTCCVPixelBuffer(pixelBuffer: try pixels()), rotation: ._0, timeStampNs: 1)
-        renderer.renderFrame(frame)
+        let buffer = RTCCVPixelBuffer(pixelBuffer: try pixels())
+        // A busy native display may intentionally drop a frame. Feed a real
+        // sequence so the test measures recovery rather than one enqueue slot.
+        let frames = Task { @MainActor in
+            var timestamp: Int64 = 1
+            while !Task.isCancelled {
+                renderer.renderFrame(RTCVideoFrame(buffer: buffer, rotation: ._0, timeStampNs: timestamp))
+                timestamp += 66_666_667
+                do { try await Task.sleep(for: .milliseconds(67)) } catch { return }
+            }
+        }
+        defer { frames.cancel() }
         await fulfillment(of: [first], timeout: 2)
 
         model.receivedFrame = false // Temporary ICE interruption; the track survives.
         screen.update()
-        renderer.renderFrame(frame)
-
         await fulfillment(of: [resumed], timeout: 2)
         XCTAssertTrue(model.receivedFrame)
     }
