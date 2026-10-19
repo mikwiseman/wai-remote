@@ -138,7 +138,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc func diagnostics() {
         guard let model else { return }
         if diagnosticsWindow == nil {
-            let panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 430, height: 440), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            let panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 570), styleMask: [.titled, .closable], backing: .buffered, defer: false)
             panel.title = "Настройки WAI Remote"; panel.isReleasedWhenClosed = false
             panel.contentViewController = NSHostingController(rootView: DiagnosticsView(model: model, updater: updater))
             panel.center(); diagnosticsWindow = panel
@@ -163,8 +163,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 private struct DiagnosticsView: View {
     @ObservedObject var model: HostModel
     @ObservedObject var updater: AppUpdater
+    @AppStorage("performanceDiagnostics") private var diagnosticsEnabled = false
     var body: some View {
         Form {
+            Section("Управление вашим Mac") {
+                Toggle("Независимая мышь", isOn: $model.independentPointerPreferred)
+                    .accessibilityIdentifier("independentPointerPreferred")
+                Text("У гостя свой указатель. Ваша мышь остаётся на месте. Если выключить, указатель будет общим.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if model.sharing { Text("Изменение применится при следующем подключении.").font(.caption).foregroundStyle(.secondary) }
+            }
             Section("Обновления") {
                 LabeledContent("Версия", value: "\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "") (\(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""))")
                 Toggle("Проверять автоматически", isOn: Binding(get: { updater.automaticChecksEnabled }, set: { updater.automaticChecksEnabled = $0 }))
@@ -173,13 +181,16 @@ private struct DiagnosticsView: View {
             }
             Section {
                 DisclosureGroup("Диагностика") {
+                    Toggle("Локальный журнал диагностики", isOn: $diagnosticsEnabled)
+                    Text("Только времена, счётчики и причины сбоев. Без текста, нажатых клавиш, изображения экрана и содержимого буфера. Ничего не отправляется автоматически. Изменение применится после перезапуска приложения.")
+                        .font(.caption).foregroundStyle(.secondary)
                     TextField("Сервер подключения", text: $model.gateway).disabled(model.sharing || model.starting)
                     Text("Для собственного сервера или проверки соединения.").font(.caption).foregroundStyle(.secondary)
                     Button("Проверка изображения") { model.start(lab: true) }.disabled(model.sharing || model.starting)
                     Button("Проверка мыши и клавиатуры") { model.showInputTest() }
                 }
             }
-        }.formStyle(.grouped).frame(width: 430, height: 440)
+        }.formStyle(.grouped).frame(width: 470, height: 570)
     }
 }
 

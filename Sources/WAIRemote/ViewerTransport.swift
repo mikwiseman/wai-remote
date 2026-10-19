@@ -96,6 +96,7 @@ final class ViewerTransport: NSObject, RTCPeerConnectionDelegate, RTCDataChannel
     func peerConnection(_ peerConnection: RTCPeerConnection, didRemove candidates: [RTCIceCandidate]) {}
     func peerConnection(_ peerConnection: RTCPeerConnection, didOpen dataChannel: RTCDataChannel) { dataChannel.close() }
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCPeerConnectionState) {
+        PerformanceLog.record("transport-state", ["role": "viewer", "state": newState.rawValue])
         DispatchQueue.main.async { [weak self] in guard let self, !self.closed else { return }; self.onState?(newState) }
     }
     func peerConnection(_ peerConnection: RTCPeerConnection, didStartReceivingOn transceiver: RTCRtpTransceiver) {

@@ -1,10 +1,14 @@
-import Foundation
+import AppKit
 import RemoteCore
 import XCTest
 @testable import WAIRemote
 
 @MainActor
 final class PeerAuthorizationTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        _ = NSApplication.shared
+    }
     private func withHost(peers: [TrustedPeer] = [], _ check: (HostModel, URL) throws -> Void) throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("peer-expiry-\(UUID())")
         let url = directory.appendingPathComponent("peers.json")

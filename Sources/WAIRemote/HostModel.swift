@@ -49,6 +49,9 @@ final class HostModel: ObservableObject {
     @Published private(set) var peers: [TrustedPeer]
     @Published private(set) var sharedWindowName: String?
     @Published private(set) var independentPointer = false
+    @Published var independentPointerPreferred: Bool {
+        didSet { defaults.set(independentPointerPreferred, forKey: "independentPointerPreferred") }
+    }
     let identity: DeviceIdentity
     private let defaults: UserDefaults
     private let peersURL: URL
@@ -64,6 +67,7 @@ final class HostModel: ObservableObject {
     private var iceConfiguration = ICEConfiguration.local
     private var machine: SessionMachine?
     private var activePeer: TrustedPeer?
+    private var sessionStartedAt: TimeInterval?
     private let injector = InputInjector()
     private var remotePointer: RemotePointer?
     private var viewerHasLocalPointer = false
@@ -88,6 +92,7 @@ final class HostModel: ObservableObject {
          disableBackgroundAccess: @escaping () -> Void = BackgroundAccess.disable) {
         self.identity = identity
         self.defaults = defaults
+        self.independentPointerPreferred = defaults.object(forKey: "independentPointerPreferred") as? Bool ?? true
         self.peersURL = peersURL
         self.peers = KeyStore.peers(at: peersURL)
         self.disableBackgroundAccess = disableBackgroundAccess
@@ -151,8 +156,7 @@ final class HostModel: ObservableObject {
         suspended = false
         resumeAfter = ProcessInfo.processInfo.systemUptime + 5
         switch saved.target {
-        case .display: start(lab: false)
-        case .independentDisplay: start(lab: false, independentPointer: true)
+        case .display, .independentDisplay: start(lab: false)
         case .window(let pid, let id, let launchedAt, let boot):
             guard SharingRelaunch.currentBootSession == boot,
                   NSRunningApplication(processIdentifier: pid)?.launchDate == launchedAt else {
@@ -236,7 +240,7 @@ final class HostModel: ObservableObject {
             guard id == CGMainDisplayID() else {
                 status = "Общий экран изменился. Откройте доступ ещё раз."; return
             }
-            start(lab: false, independentPointer: target == .independentDisplay(id))
+            start(lab: false)
         case .window(let pid, let id, let launchedAt):
             let generation = connectionGeneration
             Task { @MainActor in
@@ -259,10 +263,11 @@ final class HostModel: ObservableObject {
         do { try helper.run(); NSApp.terminate(nil) }
         catch { UserDefaults.standard.removeObject(forKey: resumeKey); status = "Не удалось перезапустить. Закройте WAI Remote и откройте снова." }
     }
-    func start(lab: Bool, window: SCWindow? = nil, independentPointer: Bool = false) {
+    func start(lab: Bool, window: SCWindow? = nil, independentPointer: Bool? = nil) {
         guard !sharing, !starting else { return }
+        let independentPointer = !lab && window == nil && (independentPointer ?? independentPointerPreferred)
         guard !independentPointer || DesktopInputTarget.isSupported else {
-            status = "Независимая мышь недоступна в этой версии macOS."; return
+            status = "Независимая мышь недоступна в этой версии macOS. Общую мышь можно включить в настройках WAI Remote."; return
         }
         refreshPermissions()
         if !lab && !screenAllowed { status = "Нужно разрешение на запись экрана"; return }
@@ -381,7 +386,7 @@ final class HostModel: ObservableObject {
         // A signed retry from the same device can replace its unfinished attempt.
         // An established session or another device still owns the connection.
         if transport != nil, machine?.author == from,
-           transport?.isReady == false || machine?.stalled == true || machine?.state.reason == "transport-disconnected" { disconnectViewer() }
+           transport?.isReady == false || machine?.stalled == true || machine?.state.reason == "transport-disconnected" { disconnectViewer(cause: "replaced") }
         guard transport == nil, pending == nil else { signaling?.send(["type":"reject","to":from,"body":["reason":"busy"]]); return }
         seenNonces[offer.nonce] = Date()
         if let trusted, isLab || !trusted.labOnly { connect(offer, permissions: trusted.permissions) }
@@ -400,6 +405,8 @@ final class HostModel: ObservableObject {
         var updated = peers.filter { $0.id != peer.id }; updated.append(peer)
         do { try KeyStore.save(updated, to: peersURL); peers = updated }
         catch { status = "Не удалось сохранить устройство"; return }
+        PerformanceLog.record("peer-approval", ["indefinite": expiresAt == nil,
+            "seconds": max(0, expiresAt?.timeIntervalSinceNow ?? 0), "control": control])
         secret = nil; invite = ""; connect(offer, permissions: permission)
     }
     func reject() { if let pending { signaling?.send(["type":"reject","to":pending.id,"body":["reason":"declined"]]) }; pending = nil }
@@ -408,6 +415,23 @@ final class HostModel: ObservableObject {
             $0.id == offer.peerID && $0.publicKey == offer.publicKey && $0.isAuthorized() && (isLab || !$0.labOnly)
         }) else { return }
         let permissions = Permissions(control: permissions.control, annotate: capturedWindow == nil && permissions.annotate)
+        // Changing this preference affects the next viewer, never a held gesture.
+        // Old display grants use the new default; an explicit Settings opt-out
+        // survives relaunch. No existing peer's scope or expiry is changed.
+        if !isLab, capturedDisplay != nil, independentPointer != independentPointerPreferred {
+            guard !independentPointerPreferred || DesktopInputTarget.isSupported else {
+                signaling?.send(["type": "reject", "to": offer.peerID, "body": ["reason": "network"]])
+                status = "Независимая мышь недоступна. Проверьте настройки WAI Remote."; return
+            }
+            independentPointer = independentPointerPreferred
+            injector.setIndependentPointer(independentPointer)
+            remotePointer?.hide()
+            if independentPointer && remotePointer == nil { remotePointer = RemotePointer() }
+            injector.excludedWindows = Set((overlay.map { [CGWindowID($0.panel.windowNumber)] } ?? []) + (remotePointer.map { [$0.windowID] } ?? []))
+            PersistentAccess.save(.init(target: independentPointer ? .independentDisplay : .display), to: defaults)
+        }
+        PerformanceLog.record("input-mode", ["independent": independentPointer, "window": capturedWindow != nil,
+            "supported": DesktopInputTarget.isSupported, "control": permissions.control && controlAllowed, "lab": isLab])
         if !isLab {
             // Match the viewer's lifetime: connection resources and network
             // workers belong to this session, not the lifetime of the app.
@@ -432,6 +456,9 @@ final class HostModel: ObservableObject {
             guard let self, self.transport === peer else { return }
             guard !self.expireViewerIfNeeded() else { return }
             self.connectionDeadline = nil
+            self.sessionStartedAt = ProcessInfo.processInfo.systemUptime
+            PerformanceLog.record("host-session-open", ["indefinite": self.activePeer?.expiresAt == nil,
+                "remainingSeconds": max(0, self.activePeer?.expiresAt?.timeIntervalSinceNow ?? 0)])
             self.status = "Устройство подключено"; self.sendState(); self.sendSnapshot()
             guard self.transport === peer, self.capture === capture, self.sharing else { return }
             self.activity = ProcessInfo.processInfo.beginActivity(options: .userInteractive, reason: "WAI Remote active session")
@@ -461,7 +488,7 @@ final class HostModel: ObservableObject {
         peer.onMessage = { [weak self, weak peer] data in guard let self, self.transport === peer else { return }; self.receiveInteraction(data) }
         peer.onState = { [weak self, weak peer] state in
             guard let self, self.transport === peer else { return }
-            if state == .failed || state == .closed { self.disconnectViewer() }
+            if state == .failed || state == .closed { self.disconnectViewer(cause: "transport") }
             if state == .disconnected { if let machine = self.machine { self.apply(machine.transportInterrupted()) } }
             if state == .connected { if let machine = self.machine { self.apply(machine.transportRestored()) } }
         }
@@ -470,7 +497,7 @@ final class HostModel: ObservableObject {
             switch result {
             case .failure:
                 self.signaling?.send(["type":"reject","to":offer.peerID,"body":["reason":"network"]])
-                self.disconnectViewer(); self.status = "Не удалось установить соединение. Можно попробовать снова."
+                self.disconnectViewer(cause: "negotiation"); self.status = "Не удалось установить соединение. Можно попробовать снова."
             case .success(let sdp):
                 let answer: [String: Any] = ["hostID":self.identity.id,"peerID":offer.peerID,"nonce":offer.nonce,"sdp":sdp,"lab":self.isLab,"name":String((Host.current().localizedName ?? "Mac").prefix(60))]
                 guard let data = try? JSONSerialization.data(withJSONObject: answer), let sig = try? self.identity.sign(data, domain: "wai-remote/answer/v1") else { return }
@@ -485,7 +512,7 @@ final class HostModel: ObservableObject {
         let effects = machine.handle(m, now: ProcessInfo.processInfo.systemUptime)
         if effects.accepted {
             if m.type == "heartbeat" { _ = transport?.send(["type": "heartbeatAck"]) }
-            if m.type.hasPrefix("stroke") { if transport?.send(["type":"ink","author":machine.author,"op":m.jsonObject()]) != true { disconnectViewer(); return } }
+            if m.type.hasPrefix("stroke") { if transport?.send(["type":"ink","author":machine.author,"op":m.jsonObject()]) != true { disconnectViewer(cause: "send-failed"); return } }
             apply(effects)
             if PerformanceLog.enabled && (m.type == "heartbeat" || m.type == "pointer" && m.action != "move") {
                 PerformanceLog.record("input-applied", ["kind": m.type, "action": m.action ?? "", "handlingMs": (ProcessInfo.processInfo.systemUptime - handlingStart) * 1000])
@@ -494,6 +521,9 @@ final class HostModel: ObservableObject {
         } else if m.type != "heartbeat" { sendState(); sendSnapshot() }
     }
     private func apply(_ e: SessionEffects) {
+        if e.stateChanged, let machine, machine.stalled || machine.state.mode == .paused {
+            PerformanceLog.record("host-session-pause", ["cause": machine.state.reason])
+        }
         transport?.clipboard.setEnabled(!isLab && sharing && machine?.connected == true &&
             machine?.stalled == false && machine?.state.permissions.control == true && machine?.state.mode != .paused)
         if e.releaseInput { injector.releaseAll(); remotePointer?.hide() }
@@ -523,16 +553,16 @@ final class HostModel: ObservableObject {
     private func sendState() { if let machine { _ = transport?.send(["type":"state","state":machine.state.jsonObject(),"lab":isLab]) } }
     private func sendSnapshot() {
         guard let machine, let transport else { return }
-        guard transport.send(["type":"snapshotBegin","layerEpoch":machine.ink.epoch]) else { disconnectViewer(); return }
+        guard transport.send(["type":"snapshotBegin","layerEpoch":machine.ink.epoch]) else { disconnectViewer(cause: "send-failed"); return }
         for stroke in machine.ink.committed {
             var metadata = stroke; metadata.points = []; metadata.complete = false
-            guard transport.send(["type":"snapshotStroke","stroke":metadata.jsonObject()]) else { disconnectViewer(); return }
+            guard transport.send(["type":"snapshotStroke","stroke":metadata.jsonObject()]) else { disconnectViewer(cause: "send-failed"); return }
             for start in stride(from: 0, to: stroke.points.count, by: 128) {
                 let points = Array(stroke.points[start..<min(start+128,stroke.points.count)])
-                guard transport.send(["type":"snapshotPoints","id":stroke.id,"points":points.jsonObject()]) else { disconnectViewer(); return }
+                guard transport.send(["type":"snapshotPoints","id":stroke.id,"points":points.jsonObject()]) else { disconnectViewer(cause: "send-failed"); return }
             }
         }
-        guard transport.send(["type":"snapshotEnd"]) else { disconnectViewer(); return }
+        guard transport.send(["type":"snapshotEnd"]) else { disconnectViewer(cause: "send-failed"); return }
     }
     private func refreshInk() { let strokes = machine?.ink.visible ?? []; overlay?.view.strokes = strokes; labInk?.strokes = strokes }
     func toggleLocalDraw() {
@@ -570,7 +600,12 @@ final class HostModel: ObservableObject {
             video?.stop()
         }
     }
-    func disconnectViewer() {
+    func disconnectViewer(cause: String = "owner") {
+        if activePeer != nil || transport != nil {
+            PerformanceLog.record("host-session-close", ["cause": cause,
+                "seconds": sessionStartedAt.map { max(0, ProcessInfo.processInfo.systemUptime - $0) } ?? 0])
+        }
+        sessionStartedAt = nil
         remotePointer?.hide()
         connectionDeadline = nil
         injector.releaseAll(); machine?.disconnect(); transport?.close(); transport = nil; connectedName = nil
@@ -582,7 +617,7 @@ final class HostModel: ObservableObject {
         if sharing { status = reconnecting ? "Восстанавливаем связь…" : "Доступ открыт"; detail = "Устройство отключено. Новое подключение возможно до закрытия доступа." }
     }
     func forget(_ id: String) {
-        if machine?.author == id { disconnectViewer() }
+        if machine?.author == id { disconnectViewer(cause: "peer-revoked") }
         let updated = peers.filter { $0.id != id }
         do { try KeyStore.save(updated, to: peersURL); peers = updated }
         catch {
@@ -593,7 +628,7 @@ final class HostModel: ObservableObject {
     @discardableResult private func expireViewerIfNeeded(now: Date = Date()) -> Bool {
         guard let activePeer, !activePeer.isAuthorized(at: now) else { return false }
         signaling?.send(["type":"reject", "to":activePeer.id, "body":["reason":"new-invite-required"]])
-        disconnectViewer()
+        disconnectViewer(cause: "approval-expired")
         status = "Срок доступа устройства истёк"
         detail = "Для этого устройства нужно новое приглашение и ваше подтверждение."
         return true
@@ -615,7 +650,7 @@ final class HostModel: ObservableObject {
         resumeAfter = ProcessInfo.processInfo.systemUptime + 2
         if sharing || starting { PerformanceLog.record("host-stop", ["cause": cause, "connected": transport?.isReady == true]) }
         connectionGeneration = UUID(); sharing = false; starting = false; reconnecting = false; registered = false
-        disconnectViewer(); machine?.stop(); machine = nil
+        disconnectViewer(cause: "host-stop"); machine?.stop(); machine = nil
         stopCapture(); capturedDisplay = nil; capturedScreenFrame = nil; overlay?.close(); overlay = nil; labWindow?.orderOut(nil)
         injector.setWindowTarget(nil); capturedWindow = nil; sharedWindowName = nil; resizingWindow = false
         independentPointer = false; injector.excludedWindows.removeAll()
@@ -635,7 +670,7 @@ final class HostModel: ObservableObject {
         if sharing && !isLab && !screenAllowed { stop(reason: "Разрешение на экран отозвано", cause: "screen-permission-revoked"); return }
         if let deadline = connectionDeadline, ProcessInfo.processInfo.systemUptime >= deadline {
             if let author = machine?.author { signaling?.send(["type":"reject","to":author,"body":["reason":"network"]]) }
-            disconnectViewer(); status = "Не удалось установить соединение. Можно попробовать снова."
+            disconnectViewer(cause: "connect-timeout"); status = "Не удалось установить соединение. Можно попробовать снова."
         }
         if let machine { apply(machine.tick(now: ProcessInfo.processInfo.systemUptime)) }
         if let pending, pending.offer.expiresAt < now.timeIntervalSince1970 * 1000 { reject() }

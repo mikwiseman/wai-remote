@@ -11,7 +11,7 @@ struct HomeView: View {
     @State private var editing: SavedComputer?
     @State private var computerName = ""
     @State private var scanningQR = false
-    @State private var approvalDuration = ApprovalDuration.hour
+    @State private var approvalDuration = ApprovalDuration.untilRevoked
     private let accent = Color.accentColor
     private func connectInvitation() { viewer.invitation = viewer.invitationDraft; connect() }
 
@@ -36,7 +36,7 @@ struct HomeView: View {
         .tint(accent)
         .onAppear { if host.starting || host.sharing || host.accessEnabled || host.permissionRequested { sharingTab = true } }
         .onChange(of: host.pending?.id) { _, pending in
-            if pending != nil { sharingTab = true; approvalDuration = .hour }
+            if pending != nil { sharingTab = true; approvalDuration = .untilRevoked }
         }
         .sheet(item: $editing) { computer in
             VStack(alignment: .leading, spacing: 18) {
@@ -195,12 +195,8 @@ struct HomeView: View {
                 Button { host.start(lab: false) } label: {
                     HStack { if host.starting { ProgressView().controlSize(.small) }; Text(host.starting ? "Открываем доступ…" : "Открыть доступ к экрану") }
                 }.remotePrimaryButton().controlSize(.large).disabled(host.starting || !host.screenAllowed)
-                if DesktopInputTarget.isSupported {
-                    Button { host.start(lab: false, independentPointer: true) } label: {
-                        Label("Независимая мышь", systemImage: "cursorarrow.motionlines")
-                    }.controlSize(.large)
-                        .disabled(host.starting || !host.screenAllowed)
-                }
+                Text(host.independentPointerPreferred ? "Независимая мышь включена. Вы продолжаете пользоваться своей мышью." : "Общая мышь включена в настройках. Удалённое управление перемещает ваш указатель.")
+                    .font(.callout).foregroundStyle(.secondary)
                 if host.status != "Доступ закрыт" { Text(host.status).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
             }
             if !host.peers.isEmpty {

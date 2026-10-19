@@ -19,7 +19,7 @@ final class ViewerSignaling {
         guard let task = socket, let data = try? JSONSerialization.data(withJSONObject: object),
               data.count <= 131_072, let text = String(data: data, encoding: .utf8) else { return }
         task.send(.string(text)) { [weak self, weak task] error in
-            if error != nil { DispatchQueue.main.async { guard let self, self.socket === task else { return }; self.onFailure?() } }
+            if let error { DispatchQueue.main.async { guard let self, let task, self.socket === task else { return }; self.failed(task, error: error) } }
         }
     }
     private func receive(_ current: URLSessionWebSocketTask) {
@@ -27,7 +27,7 @@ final class ViewerSignaling {
             DispatchQueue.main.async {
                 guard let self, self.socket === current else { return }
                 switch result {
-                case .failure: self.onFailure?()
+                case .failure(let error): self.failed(current, error: error)
                 case .success(let message):
                     let data: Data
                     switch message { case .data(let d): data = d; case .string(let s): data = Data(s.utf8); @unknown default: return }
@@ -45,6 +45,11 @@ final class ViewerSignaling {
                 }
             }
         }
+    }
+    private func failed(_ task: URLSessionWebSocketTask, error: Error) {
+        PerformanceLog.record("viewer-signaling-lost", ["closeCode": task.closeCode.rawValue,
+            "domain": (error as NSError).domain, "code": (error as NSError).code])
+        onFailure?()
     }
     func close() { ping?.invalidate(); ping = nil; let task = socket; socket = nil; task?.cancel(with: .goingAway, reason: nil) }
 }

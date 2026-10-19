@@ -38,7 +38,7 @@ final class Signaling {
             DispatchQueue.main.async {
                 guard let self, self.socket === current else { return }
                 switch result {
-                case .failure: self.reconnect(after: current)
+                case .failure(let error): self.reconnect(after: current, error: error)
                 case .success(let message):
                     self.lastReply = ProcessInfo.processInfo.systemUptime
                     let data: Data
@@ -49,14 +49,16 @@ final class Signaling {
             }
         }
     }
-    private func reconnect(after current: URLSessionWebSocketTask) {
+    private func reconnect(after current: URLSessionWebSocketTask, error: Error? = nil) {
         guard socket === current else { return }
         // A duplicate registration may remain on the gateway until its old socket
         // times out. Retry that rejection too; only explicit authentication failure
         // is terminal. Never tear down an established WebRTC session here.
         let authenticationFailed = current.closeCode == .policyViolation &&
             current.closeReason.flatMap { String(data: $0, encoding: .utf8) } == "authentication failed"
-        PerformanceLog.record("host-signaling-lost", ["closeCode": current.closeCode.rawValue])
+        var diagnostic: [String: Any] = ["closeCode": current.closeCode.rawValue]
+        if let error = error as NSError? { diagnostic["domain"] = error.domain; diagnostic["code"] = error.code }
+        PerformanceLog.record("host-signaling-lost", diagnostic)
         socket = nil; ping?.invalidate(); ping = nil
         current.cancel(with: .goingAway, reason: nil)
         if authenticationFailed {
@@ -95,7 +97,7 @@ final class Signaling {
             guard error != nil else { return }
             DispatchQueue.main.async {
                 guard let self, let current, self.socket === current else { return }
-                self.reconnect(after: current)
+                self.reconnect(after: current, error: error)
             }
         }
     }

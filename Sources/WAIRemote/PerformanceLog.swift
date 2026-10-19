@@ -33,7 +33,8 @@ enum PerformanceLog {
     ]
     static func record(_ event: String, _ values: [String: Any] = [:]) {
         guard enabled else { return }
-        let row = values.merging(["event": event, "time": Date().timeIntervalSince1970]) { _, new in new }
+        guard let safe = DiagnosticPrivacy.sanitize(event, values: values) else { return }
+        let row = safe.merging(["event": event, "time": Date().timeIntervalSince1970]) { _, new in new }
         guard let data = try? JSONSerialization.data(withJSONObject: row, options: [.sortedKeys]) else { return }
         queue.async {
             // Keep recent evidence for long-lived hosts without growing forever.
