@@ -1,6 +1,6 @@
 # Independent desktop input
 
-The independent mouse shares the main display and selects the application window under each remote click. The owner no longer has to choose one window before connecting. Ordinary screen access continues to use the system mouse.
+The independent mouse shares the main display and selects the application window under each remote click. The owner no longer has to choose one window before connecting. From build 65, this is the default for ordinary screen access. Settings → Independent Mouse can explicitly enable the shared system pointer instead.
 
 ## Basis
 
@@ -10,11 +10,11 @@ The independent mouse shares the main display and selects the application window
 
 ## Routing
 
-WindowServer hit-testing selects the actual input window. Bounding-box scans are insufficient: on both test machines the Dock exposes a transparent rectangle covering the whole display. `SLSFindWindowAndOwner` follows the window regions and can continue below an explicitly excluded window. The pointer and ink panels must be skipped this way: `ignoresMouseEvents` alone does not remove them from geometric hit-testing. The lookup never skips an unrelated or unaddressable window, and validates the result's current process ID and bounds. Missing SPI disables the independent-mode entry point.
+WindowServer hit-testing selects the actual input window. Bounding-box scans are insufficient: on both test machines the Dock exposes a transparent rectangle covering the whole display. `SLSFindWindowAndOwner` follows the window regions and can continue below an explicitly excluded window. The pointer and ink panels must be skipped this way: `ignoresMouseEvents` alone does not remove them from geometric hit-testing. The lookup never skips an unrelated or unaddressable window, and validates the result's current process ID and bounds. Missing SPI prevents independent sharing with an explanation; the owner can explicitly select the shared system pointer in Settings.
 
 A button-down pins its window until all held buttons are released. Hover and scroll do not redirect keyboard input. Each held key retains its original destination for key-up, even after another window is clicked. Empty or closed targets never fall through to the global HID queue. Disconnect, pause and permission loss cancel pending work, release held input and hide the remote pointer.
 
-The existing single-window grants remain scoped to their original window. Independent display grants have their own persisted case, so restarting or updating cannot silently turn them into control of the owner's system mouse.
+The existing single-window grants remain scoped to their original window. Full-display restoration uses the persistent pointer preference, whose default is independent. Switching to the owner's system mouse requires an explicit Settings opt-out; that choice applies to the next connection and survives relaunch.
 
 ## Verification
 
