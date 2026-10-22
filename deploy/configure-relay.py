@@ -36,7 +36,6 @@ allowed-peer-ip=65.108.215.2
 user-quota=4
 total-quota=64
 max-bps=5000000
-bps-capacity=20000000
 max-allocate-lifetime=3600
 stale-nonce=600
 relay-threads=2
