@@ -604,3 +604,50 @@ The previous new-device approval picker defaulted to one hour, which could end a
 The Mini's local build-61 journal spans 18 October 10:19 UTC through 19 October 04:13 UTC: 330 signaling-loss records, 97 ready records, and one `signaling-invalid` host stop while no viewer was connected. All but one close code were zero (no received WebSocket close code); one was 1008. These counts include retries and do not count 330 video-session drops. The gateway's only recorded restart on 18 October was the documented deployment at 09:31 UTC; TURN remained running from 11 October. The old records lack URL-loading error codes and cannot identify the network failure's cause or attribute it to the reported lesson.
 
 The next build adds mode, approval-expiry, session-end and numeric network-error records, and enforces the [diagnostic privacy schema](DIAGNOSTICS.md) at the write boundary. The full native suite passed 144 tests with one explicit integration skip. Nineteen focused privacy, preference, authorization, consent and signaling tests passed after the last code edit. An initial isolated authorization run exposed missing NSApplication initialization in its test fixture; it is now initialized explicitly.
+
+
+## 25 October 2026: constrained Retina video and foreground clicks (build 66)
+
+The supplied lesson screenshots show compression blocks and damaged text. The
+Mini journal is a different session and cannot identify that lesson. Its latest
+host session nevertheless recorded H264 interval QP as high as 51, confirming
+that severe quantization is possible with the old fixed-cadence policy.
+
+The host now samples outbound H264 counters once a second independently of
+optional disk logging. Two intervals at mean QP >= 34, or one at >= 42, lower the
+frame-rate ceiling through 60/45/30/20/15/10 fps, taking measured input cadence
+into account. Eight clear intervals at QP <= 28 restore one step. Sparse frames,
+missing codec data and reset counters do not count as quality recovery. Native
+resolution and the 32 Mbps maximum remain unchanged; no minimum bitrate is
+forced onto a congested network. Hardware encoding's asynchronous wall time is
+still not treated as a CPU overload signal. See WebRTC's
+[quality-scaler configuration](https://webrtc.googlesource.com/src/+/refs/heads/main/video/adaptation/video_stream_encoder_resource_manager.cc):
+the built-in QP scaler depends on resolution scaling being enabled, which is
+unsuitable for preserving desktop text pixels here.
+
+`WAI_QUALITY_BENCH=1 swift test --filter ScreenQualityBenchmarkTests` generates a
+3200x2000 monochrome scrolling text page and uses the real VideoToolbox encoder
+and WebRTC decoder, with ScreenCaptureKit's NV12 video-range input. At a 1 Mbps
+configured bitrate for four seconds, 30 fps encoded/decoded 120 frames,
+488,624 bytes, median QP 46; 10 fps encoded/decoded 40 frames, 486,887 bytes,
+median QP 37. Sampled luma PSNR increased from 21.603 to 22.238 dB. These are
+codec measurements from a synthetic scene, not a subjective AnyDesk comparison,
+physical latency measurement or a network-session acceptance test.
+
+A separate experimental keyframe refresh sent more data without improving this
+fixture's recovered static text. It was removed before release. The production
+encoder remains the standard WebRTC VideoToolbox implementation.
+
+Foreground-app pointer-down no longer performs the background activation
+sequence (50+15+1+100 ms and an off-window down/up). Such an activation click can
+dismiss existing menus/popovers before the intended click. Background delivery
+retains the compatibility sequence; its actual event is addressed using freshly
+read geometry after the waits. Tests cover exact foreground event count, retained
+background ordering, changed window origin during activation, and revocation.
+They do not establish compatibility with every native or Electron control.
+
+Local validation: 151 Swift tests, one pre-existing optional integration skip,
+zero failures, including the opt-in hardware benchmark; web production build
+passed. Private evidence is in `.runtime/release66-tests.log`. A two-device
+lesson on the affected network remains necessary to confirm the reported
+symptoms end to end. Install the host update on the Mac being viewed.

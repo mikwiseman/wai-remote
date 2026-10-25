@@ -89,10 +89,24 @@ struct WindowInputTarget: Equatable {
         }
         return true
     }
-    func post(_ event: CGEvent, permitted: () -> Bool) {
-        guard permitted(), let frame, address(event, frame: frame) else { return }
-        if event.type == .leftMouseDown || event.type == .rightMouseDown || event.type == .otherMouseDown {
-            prepareWindow()
+    struct Delivery {
+        var frame: (WindowInputTarget) -> CGRect?
+        var frontmostPID: () -> pid_t?
+        var prepare: (WindowInputTarget) -> Void
+        var pointer: (pid_t, CGEvent) -> Void
+        var pause: (TimeInterval) -> Void
+        static let system = Delivery(frame: { $0.frame },
+            frontmostPID: { NSWorkspace.shared.frontmostApplication?.processIdentifier },
+            prepare: { $0.prepareWindow() }, pointer: { WindowInputTarget.postPointer?($0, $1) },
+            pause: { Thread.sleep(forTimeInterval: $0) })
+    }
+    func post(_ event: CGEvent, permitted: () -> Bool, delivery: Delivery = .system) {
+        guard permitted(), delivery.frame(self) != nil else { return }
+        let down = [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(event.type)
+        // An active app needs no synthetic activation. An off-window primer
+        // here dismisses its open menus/popovers before the real click arrives.
+        if down && delivery.frontmostPID() != pid {
+            delivery.prepare(self)
             // Chromium also requires a complete background activation gesture.
             // The primer stays outside the window, so it hits no real control.
             // Its group is shared with the actual down/up; never post globally.
@@ -103,7 +117,7 @@ struct WindowInputTarget: Equatable {
                 (.leftMouseUp, CGPoint(x: -1, y: -1), 2, 0.1)
             ]
             for (type, point, phase, delay) in steps {
-                guard permitted(), self.frame != nil,
+                guard permitted(), let frame = delivery.frame(self),
                       let primer = CGEvent(mouseEventSource: nil, mouseType: type,
                                            mouseCursorPosition: point, mouseButton: .left) else { return }
                 primer.flags = event.flags
@@ -111,17 +125,19 @@ struct WindowInputTarget: Equatable {
                 guard address(primer, frame: frame) else { return }
                 primer.setIntegerValueField(.mouseEventNumber, value: phase)
                 primer.setIntegerValueField(.mouseEventClickState, value: type == .mouseMoved ? 0 : 1)
-                Self.postPointer?(pid, primer)
-                Thread.sleep(forTimeInterval: delay)
+                delivery.pointer(pid, primer)
+                delivery.pause(delay)
             }
         }
-        guard permitted(), self.frame != nil else { return }
+        // Activation may move a window or lay out a sheet. Recompute the local
+        // point immediately before delivery instead of keeping its old origin.
+        guard permitted(), let frame = delivery.frame(self), address(event, frame: frame) else { return }
         switch event.type {
         case .keyDown, .keyUp, .flagsChanged: event.postToPid(pid)
         default:
             // The public PID path misses Chromium's background mouse handler.
             // Deliver once through SkyLight, never through global HID.
-            Self.postPointer?(pid, event)
+            delivery.pointer(pid, event)
         }
     }
     private func prepareWindow() {

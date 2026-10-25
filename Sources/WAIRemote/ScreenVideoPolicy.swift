@@ -28,14 +28,14 @@ enum ScreenVideoPolicy {
         // Use VideoToolbox on Macs, while retaining the codecs offered by other clients.
         supported.filter { $0.name == "H264" } + supported.filter { $0.name != "H264" }
     }
-    static func configure(_ sender: RTCRtpSender) {
+    static func configure(_ sender: RTCRtpSender, frameRate: Int = 60) {
         let parameters = sender.parameters
         // Hardware encoding is asynchronous; its wall time is not CPU load.
         // Keep the native display cadence instead of reducing it on that heuristic.
         parameters.degradationPreference = NSNumber(value: RTCDegradationPreference.maintainFramerateAndResolution.rawValue)
         for encoding in parameters.encodings {
             encoding.maxBitrateBps = 32_000_000
-            encoding.maxFramerate = 60
+            encoding.maxFramerate = NSNumber(value: frameRate)
             encoding.scaleResolutionDownBy = 1
         }
         sender.parameters = parameters
