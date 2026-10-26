@@ -193,6 +193,38 @@ final class WindowInputTests: XCTestCase {
         XCTAssertNotNil(target.button(climbingFrom: button, at: try center(button)))
     }
 
+    /// The host's own window is a target in independent mode. Delivery runs on the
+    /// input queue, and same-process AX calls run AppKit on the caller's thread.
+    @MainActor
+    func testOwnWindowTransientCheckRunsAppKitOnTheMainThread() throws {
+        if !Self.launched { NSApplication.shared.finishLaunching(); Self.launched = true }
+        let window = NSWindow(contentRect: NSRect(x: -30_000, y: -30_000, width: 300, height: 200),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        let target = WindowInputTarget(pid: getpid(), windowID: CGWindowID(window.windowNumber))
+        let selector = #selector(NSApplication.accessibilityHitTest(_:))
+        let method = try XCTUnwrap(class_getInstanceMethod(NSApplication.self, selector))
+        typealias HitTest = @convention(c) (NSApplication, Selector, NSPoint) -> AnyObject?
+        let original = unsafeBitCast(method_getImplementation(method), to: HitTest.self)
+        let lock = NSLock()
+        var onMain: [Bool] = []
+        let recording: @convention(block) (NSApplication, NSPoint) -> AnyObject? = { app, point in
+            lock.withLock { onMain.append(Thread.isMainThread) }
+            return original(app, selector, point)
+        }
+        let previous = method_setImplementation(method, imp_implementationWithBlock(recording))
+        defer { method_setImplementation(method, previous) }
+        let checked = expectation(description: "transient check")
+        DispatchQueue(label: "is.wai.remote.input", qos: .userInteractive).async {
+            _ = target.isTransient(at: CGPoint(x: 100, y: 100)); checked.fulfill()
+        }
+        wait(for: [checked], timeout: 5)
+        let threads = lock.withLock { onMain }
+        XCTAssertFalse(threads.isEmpty, "The check must reach AppKit's own hit test.")
+        XCTAssertEqual(threads, threads.map { _ in true }, "AppKit accessibility of our own views runs on their main thread.")
+    }
+
     func testAReusedWindowNumberDoesNotGrantAccessToAnotherProcess() {
         let target = WindowInputTarget(pid: 123, windowID: 456)
         let frame = CGRect(x: 10, y: 20, width: 800, height: 600)

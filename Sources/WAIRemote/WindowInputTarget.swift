@@ -222,6 +222,9 @@ struct WindowInputTarget: Equatable {
     /// Menus and pop-ups sit above the normal window layer; popovers and some
     /// menus are only recognizable by their accessibility role.
     func isTransient(at point: CGPoint) -> Bool {
+        if pid == ProcessInfo.processInfo.processIdentifier && !Thread.isMainThread {
+            return DispatchQueue.main.sync { isTransient(at: point) }
+        }
         if let windows = CGWindowListCopyWindowInfo(.optionIncludingWindow, windowID) as? [[String: Any]],
            let window = windows.first(where: { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == windowID }),
            ((window[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0) > 0 { return true }
