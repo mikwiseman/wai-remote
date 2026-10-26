@@ -120,4 +120,28 @@ final class SessionMachineTests: XCTestCase {
         XCTAssertNil(host.handle(bad, now: 1).input)
         bad.x = .nan; XCTAssertNil(host.handle(bad, now: 1).input)
     }
+    func testRejectionsNameTheCheckThatFailed() {
+        let host = machine(.init(control: false, annotate: true))
+        let stale = pointer(host.state)
+        XCTAssertEqual(host.handle(stale, now: 1).rejected, "permission")
+        _ = host.setPermissions(.init())
+        XCTAssertEqual(host.handle(stale, now: 1).rejected, "epoch")
+        var wrongSurface = pointer(host.state); wrongSurface.geometryRevision += 1
+        XCTAssertEqual(host.handle(wrongSurface, now: 1).rejected, "geometry")
+        var otherSession = pointer(host.state); otherSession.sessionID = "other"
+        XCTAssertEqual(host.handle(otherSession, now: 1).rejected, "session")
+        let accepted = pointer(host.state)
+        XCTAssertNil(host.handle(accepted, now: 1).rejected)
+        XCTAssertEqual(host.handle(accepted, now: 1.1).rejected, "sequence")
+        var draw = WireMessage(type: "mode", state: host.state); draw.sequence = 1; draw.mode = .draw; draw.modeGeneration += 1
+        XCTAssertTrue(host.handle(draw, now: 1.2).accepted)
+        var click = pointer(host.state); click.sequence = 2; click.modeGeneration = 1
+        XCTAssertEqual(host.handle(click, now: 1.3).rejected, "mode")
+        var stroke = WireMessage(type: "strokeAppend", state: host.state); stroke.sequence = 2; stroke.modeGeneration = 1; stroke.strokeID = "unknown"
+        XCTAssertEqual(host.handle(stroke, now: 1.4).rejected, "ink")
+        var bad = WireMessage(type: "teleport", state: host.state); bad.sequence = 2
+        XCTAssertEqual(host.handle(bad, now: 1.5).rejected, "invalid")
+        host.stop()
+        XCTAssertEqual(host.handle(click, now: 2).rejected, "stopped")
+    }
 }

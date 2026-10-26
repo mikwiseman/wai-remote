@@ -14,7 +14,7 @@ final class WindowInputTests: XCTestCase {
             prepare: { _ in XCTFail("An active app must not be activated again") },
             pointer: { _, event in delivered.append(event.type); XCTAssertEqual(event.location, CGPoint(x: 250, y: 420)) },
             pause: { _ in XCTFail("Active-app clicks must not wait for a background activation") })
-        target.post(event, permitted: { true }, delivery: delivery)
+        XCTAssertEqual(target.post(event, permitted: { true }, delivery: delivery), .window)
         XCTAssertEqual(delivered, [.leftMouseDown], "Exactly the user's down, with no synthetic off-window click.")
     }
 
@@ -29,7 +29,7 @@ final class WindowInputTests: XCTestCase {
             prepare: { _ in frame.origin = CGPoint(x: 120, y: 230) },
             pointer: { _, event in delivered.append(event.type) },
             pause: { _ in pauses += 1; frame.origin.x += 10 })
-        target.post(event, permitted: { true }, delivery: delivery)
+        XCTAssertEqual(target.post(event, permitted: { true }, delivery: delivery), .primer)
         XCTAssertEqual(delivered, [.mouseMoved, .leftMouseDown, .leftMouseUp, .leftMouseDown])
         XCTAssertEqual(pauses, 3)
         XCTAssertEqual(windowLocation(event), CGPoint(x: 150, y: 220),
@@ -75,8 +75,13 @@ final class WindowInputTests: XCTestCase {
         let delivery = WindowInputTarget.Delivery(frame: { _ in CGRect(x: 100, y: 200, width: 800, height: 600) },
             frontmostPID: { 999 }, transient: { _, _ in false }, prepare: { _ in },
             pointer: { _, event in delivered.append(event.type) }, pause: { _ in allowed = false })
-        target.post(event, permitted: { allowed }, delivery: delivery)
+        XCTAssertEqual(target.post(event, permitted: { allowed }, delivery: delivery), .cancelled)
         XCTAssertEqual(delivered, [.mouseMoved])
+        var open = true
+        let closing = WindowInputTarget.Delivery(frame: { _ in open ? CGRect(x: 100, y: 200, width: 800, height: 600) : nil },
+            frontmostPID: { 999 }, transient: { _, _ in false }, prepare: { _ in open = false },
+            pointer: { _, _ in XCTFail("A closed window receives nothing") }, pause: { _ in })
+        XCTAssertEqual(target.post(event, permitted: { true }, delivery: closing), .frameGone)
     }
 
     func testBackgroundEventAddressesOnlyTheSelectedWindow() throws {

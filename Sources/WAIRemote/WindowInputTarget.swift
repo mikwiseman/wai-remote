@@ -104,10 +104,11 @@ struct WindowInputTarget: Equatable {
     }
     /// `hover` places the pointer over the target first, for a press that no
     /// move preceded (touch taps). Hover-armed controls ignore a bare press.
-    func post(_ event: CGEvent, permitted: () -> Bool, hover: Bool = false, delivery: Delivery = .system) {
+    @discardableResult func post(_ event: CGEvent, permitted: () -> Bool, hover: Bool = false, delivery: Delivery = .system) -> InputOutcome {
         // A point inside a window does not move with the window. Address the
         // event with the geometry the user aimed at, even if activation moves it.
-        guard permitted(), let frame = delivery.frame(self), address(event, frame: frame) else { return }
+        guard permitted() else { return .cancelled }
+        guard let frame = delivery.frame(self), address(event, frame: frame) else { return .frameGone }
         let down = [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(event.type)
         var primed = false
         // An active app needs no synthetic activation. An open menu or popover is
@@ -125,12 +126,12 @@ struct WindowInputTarget: Equatable {
                 (.leftMouseUp, CGPoint(x: -1, y: -1), 2, 0.1)
             ]
             for (type, point, phase, delay) in steps {
-                guard permitted(), delivery.frame(self) != nil,
-                      let primer = CGEvent(mouseEventSource: nil, mouseType: type,
-                                           mouseCursorPosition: point, mouseButton: .left) else { return }
+                guard permitted() else { return .cancelled }
+                guard delivery.frame(self) != nil, let primer = CGEvent(mouseEventSource: nil, mouseType: type,
+                                                                        mouseCursorPosition: point, mouseButton: .left) else { return .frameGone }
                 primer.flags = event.flags
                 primer.setIntegerValueField(CGEventField(rawValue: 58)!, value: group)
-                guard address(primer, frame: frame) else { return }
+                guard address(primer, frame: frame) else { return .frameGone }
                 primer.setIntegerValueField(.mouseEventNumber, value: phase)
                 primer.setIntegerValueField(.mouseEventClickState, value: type == .mouseMoved ? 0 : 1)
                 delivery.pointer(pid, primer)
@@ -143,7 +144,8 @@ struct WindowInputTarget: Equatable {
             move.setIntegerValueField(CGEventField(rawValue: 58)!, value: event.getIntegerValueField(CGEventField(rawValue: 58)!))
             if address(move, frame: frame) { delivery.pointer(pid, move) }
         }
-        guard permitted(), delivery.frame(self) != nil else { return }
+        guard permitted() else { return .cancelled }
+        guard delivery.frame(self) != nil else { return .frameGone }
         switch event.type {
         case .keyDown, .keyUp, .flagsChanged: event.postToPid(pid)
         default:
@@ -151,6 +153,7 @@ struct WindowInputTarget: Equatable {
             // Deliver once through SkyLight, never through global HID.
             delivery.pointer(pid, event)
         }
+        return primed ? .primer : .window
     }
     private func prepareWindow() {
         guard let processNumber = Self.processNumber, let focusRecord = Self.focusRecord else { return }

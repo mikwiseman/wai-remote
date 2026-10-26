@@ -25,14 +25,20 @@ final class InputInjector {
             let started = ProcessInfo.processInfo.systemUptime
             events.apply(message)
             if message.type == "text" || message.type == "pointer" && message.action != "move" {
-                PerformanceLog.record("input-delivery", ["kind": message.type, "action": message.action ?? "",
+                var row: [String: Any] = ["kind": message.type, "action": message.action ?? "",
                     "textUnits": message.text?.utf16.count ?? 0, "queueMs": (started - received) * 1000,
-                    "handlingMs": (ProcessInfo.processInfo.systemUptime - started) * 1000])
+                    "handlingMs": (ProcessInfo.processInfo.systemUptime - started) * 1000]
+                row["outcome"] = events.outcome?.rawValue
+                PerformanceLog.record("input-delivery", row)
             }
         }
     }
     static let keyCodes = InjectedEvents.keyCodes
 }
+
+/// Where a click or text went, as a fixed diagnostic label. The host
+/// acknowledges input before delivery, so the acknowledgement cannot say.
+enum InputOutcome: String { case system, window, axPress = "ax-press", primer, noTarget = "no-target", frameGone = "frame-gone", cancelled }
 
 private enum InputDestination: Equatable {
     case system, window(WindowInputTarget), unavailable
@@ -48,6 +54,7 @@ private final class InjectedEvents {
     private var desktop = DesktopInputTarget()
     private var lastPoint = CGPoint.zero
     private var hovered: CGPoint?
+    private(set) var outcome: InputOutcome?
     private var clickSequence = ClickSequence()
     private var clickCounts: [Int: Int] = [:]
     private var windowButton: WindowInputTarget.Button?
@@ -60,19 +67,20 @@ private final class InjectedEvents {
     var isCurrent: () -> Bool = { true }
     var allowed: Bool { CGPreflightPostEventAccess() }
     private func post(_ event: CGEvent?, to target: InputDestination? = nil, releasing: Bool = false, hover: Bool = false) {
-        guard releasing || isCurrent() else { return }
+        guard releasing || isCurrent() else { outcome = .cancelled; return }
         event?.setIntegerValueField(.eventSourceUserData, value: 0x574149)
         guard let event else { return }
         switch target ?? destination {
-        case .window(let window): window.post(event, permitted: { releasing || isCurrent() }, hover: hover)
-        case .system: event.post(tap: .cghidEventTap)
-        case .unavailable: break
+        case .window(let window): outcome = window.post(event, permitted: { releasing || isCurrent() }, hover: hover)
+        case .system: event.post(tap: .cghidEventTap); outcome = .system
+        case .unavailable: outcome = .noTarget
         }
     }
     func apply(_ m: WireMessage) {
-        guard allowed else { liftHeld(); return }
+        outcome = nil
+        guard allowed else { liftHeld(); outcome = .cancelled; return }
         if let windowTarget {
-            guard let frame = windowTarget.frame else { liftHeld(); return }
+            guard let frame = windowTarget.frame else { liftHeld(); outcome = .frameGone; return }
             bounds = frame
         }
         destination = windowTarget.map(InputDestination.window) ?? (independentPointer ? .unavailable : .system)
@@ -90,6 +98,7 @@ private final class InjectedEvents {
                     // A press in empty space stays empty until release. Never
                     // substitute a global event or another app for a lost target.
                     if !buttons.isEmpty || windowButton != nil { liftHeld() }
+                    outcome = target == nil ? .noTarget : .frameGone
                     return
                 }
             }
@@ -100,7 +109,7 @@ private final class InjectedEvents {
             }
             if action == "up", b == 0, let pressed = windowButton {
                 windowButton = nil
-                if pressed.frame.contains(p) { _ = pressed.press(if: isCurrent) }
+                outcome = pressed.frame.contains(p) && pressed.press(if: isCurrent) ? .axPress : isCurrent() ? .noTarget : .cancelled
                 return
             }
             if action == "down", b == 0 {
@@ -113,7 +122,7 @@ private final class InjectedEvents {
                         "accessibilityTrusted": AXIsProcessTrusted(),
                         "lookupMs": (ProcessInfo.processInfo.systemUptime - lookupStarted) * 1000])
                 }
-                if let pressed { windowButton = pressed; return }
+                if let pressed { windowButton = pressed; outcome = .axPress; return }
             }
             if windowButton != nil {
                 if action == "move" { return }

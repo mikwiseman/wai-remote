@@ -23,7 +23,7 @@ final class AvailabilityTests: XCTestCase {
         model.invitation = "a different invitation in the editor"
         let restored = expectation(description: "The same trusted Mac is retried")
         model.onReconnect = { target in XCTAssertEqual(target, saved); restored.fulfill() }
-        model.recover(message: "Recovery")
+        model.recover(message: "Recovery", cause: "peer-failed")
         XCTAssertFalse(model.connected)
         XCTAssertFalse(model.receivedFrame)
         XCTAssertFalse(model.canControl)
@@ -36,14 +36,14 @@ final class AvailabilityTests: XCTestCase {
         model.begin(); model.connecting = false; model.connected = true
         let restored = expectation(description: "Never reconnect after cancellation"); restored.isInverted = true
         model.onReconnect = { _ in restored.fulfill() }
-        model.recover(message: "Recovery"); model.disconnect()
+        model.recover(message: "Recovery", cause: "peer-failed"); model.disconnect()
         wait(for: [restored], timeout: 1.2)
         XCTAssertFalse(model.connecting)
     }
     func testAnUnapprovedPairingDoesNotRetryInTheBackground() {
         let model = viewer()
         model.begin()
-        model.recover(message: "Network lost")
+        model.recover(message: "Network lost", cause: "peer-failed")
         XCTAssertFalse(model.connecting)
         XCTAssertFalse(model.connected)
     }

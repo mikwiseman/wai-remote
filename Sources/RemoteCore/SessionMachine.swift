@@ -21,6 +21,11 @@ public final class SessionMachine {
     }
 
     public func handle(_ m: WireMessage, now: Double) -> SessionEffects {
+        var e = accept(m, now: now)
+        if !e.accepted { e.rejected = rejection(of: m) }
+        return e
+    }
+    private func accept(_ m: WireMessage, now: Double) -> SessionEffects {
         var e = SessionEffects()
         guard connected, m.v == 1, m.sessionID == state.sessionID,
               m.controllerEpoch == state.controllerEpoch, m.inputEpoch == state.inputEpoch,
@@ -87,6 +92,18 @@ public final class SessionMachine {
         return e
     }
 
+    private func rejection(of m: WireMessage) -> String {
+        guard connected else { return "stopped" }
+        guard m.v == 1, m.sessionID == state.sessionID, m.controllerEpoch == state.controllerEpoch else { return "session" }
+        guard m.inputEpoch == state.inputEpoch else { return "epoch" }
+        guard m.surfaceID == state.surface.id, m.geometryRevision == state.surface.revision else { return "geometry" }
+        guard m.sequence >= state.nextSequence else { return "sequence" }
+        let control = ["pointer", "key", "text"].contains(m.type)
+        let ink = m.type.hasPrefix("stroke") || ["laser", "erase", "undo", "redo", "clear"].contains(m.type)
+        if control && !state.permissions.control || ink && !state.permissions.annotate { return "permission" }
+        if control && !canControl(m) || m.type == "mode" { return "mode" }
+        return ink ? "ink" : "invalid"
+    }
     private func canControl(_ m: WireMessage) -> Bool {
         !locallyPaused && state.permissions.control && state.mode == .control && m.modeGeneration == state.modeGeneration
     }

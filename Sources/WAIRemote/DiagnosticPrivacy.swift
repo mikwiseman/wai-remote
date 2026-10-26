@@ -13,6 +13,7 @@ enum DiagnosticPrivacy {
     private static let roles: Rule = .label(["host", "viewer"])
     private static let kinds: Rule = .label(["pointer", "text", "heartbeat", "key", "scroll"])
     private static let actions: Rule = .label(["", "down", "up", "move"])
+    private static let measured: Rule = .label(["heartbeat", "down", "up", "scroll"])
     private static let domains: Rule = .label(["NSURLErrorDomain", "NSCocoaErrorDomain", "NSOSStatusErrorDomain",
         "kCFErrorDomainCFNetwork", "SCStreamErrorDomain", "Capture", "WebRTC", "Clipboard", "KeyStore", "SUErrorDomain"])
     private static func numbers(_ names: String) -> [String: Rule] {
@@ -26,9 +27,14 @@ enum DiagnosticPrivacy {
     }
     private static let schemas: [String: [String: Rule]] = [
         "input-dispatch": numbers("queueMs"),
-        "input-delivery": combine(numbers("textUnits queueMs handlingMs"), ["kind": kinds, "action": actions]),
+        "input-delivery": combine(numbers("textUnits queueMs handlingMs"), ["kind": kinds, "action": actions,
+            "outcome": .label(["system", "window", "ax-press", "primer", "no-target", "frame-gone", "cancelled"])]),
+        "input-rejected": numbers("stopped session epoch geometry sequence permission mode ink invalid"),
         "input-applied": ["kind": kinds, "action": actions, "handlingMs": .number],
-        "input-roundtrip": ["kind": kinds, "ms": .number],
+        "input-roundtrip": ["kind": measured, "ms": .number],
+        "input-unacknowledged": ["kind": measured],
+        "viewer-recover": ["connected": .boolean, "cause": .label(["signaling-failed", "connect-timeout", "peer-failed", "channel-closed",
+            "interruption-timeout", "negotiation", "host-busy", "host-network", "host-unavailable", "transmit-failed", "heartbeat-timeout"])],
         "input-button-lookup": combine(numbers("heldKeys heldButtons modifiers lookupMs"), flags("eligible found accessibilityTrusted")),
         "input-mode": flags("independent window supported control lab"),
         "text-submit": numbers("units"),

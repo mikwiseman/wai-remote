@@ -94,5 +94,7 @@ public struct SessionEffects: Sendable {
     public var input: WireMessage?
     public var laser: InkPoint?
     public var error: String?
+    /// A fixed label naming the check a rejected message failed, for diagnostics.
+    public var rejected: String?
     public init() {}
 }

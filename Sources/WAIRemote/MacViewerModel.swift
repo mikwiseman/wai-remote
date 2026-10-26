@@ -54,6 +54,7 @@ class MacViewerModel: ObservableObject {
     private var activeStroke: String?
     private var erasedIDs = Set<String>()
     private var pendingMeasurements: [String: (time: Double, kind: String)] = [:]
+    private var hostMeasures = false
     private var nonce = ""
     private var answerAccepted = false
     private var offerStarted = false
@@ -138,10 +139,10 @@ class MacViewerModel: ObservableObject {
             signal.onMessage = { [weak self] message in guard let self, self.attempt == token else { return }; self.signal(message, invite: invite, token: token) }
             signal.onFailure = { [weak self] in
                 guard let self, self.attempt == token else { return }
-                if !self.connected { self.recover(message: "Ожидаем Mac…") }
+                if !self.connected { self.recover(message: "Ожидаем Mac…", cause: "signaling-failed") }
             }
             timeout = Timer.connectionTimer(withTimeInterval: 110, repeats: false) { [weak self] _ in
-                guard let self, self.attempt == token else { return }; self.recover(message: "Mac пока не отвечает…")
+                guard let self, self.attempt == token else { return }; self.recover(message: "Mac пока не отвечает…", cause: "connect-timeout")
             }
             signal.connect()
         } catch { status = "Нужно приглашение с Mac"; detail = "Скопируйте ссылку целиком из WAI Remote. Для первого подключения нужна новая ссылка." }
@@ -153,7 +154,7 @@ class MacViewerModel: ObservableObject {
         peer.onMessage = { [weak self] data in guard let self, self.attempt == token else { return }; self.receive(data) }
         peer.onState = { [weak self] state in
             guard let self, self.attempt == token else { return }
-            if state == .failed || state == .closed { self.recover(message: "Восстанавливаем соединение…") }
+            if state == .failed || state == .closed { self.recover(message: "Восстанавливаем соединение…", cause: state == .failed ? "peer-failed" : "channel-closed") }
             if state == .disconnected {
                 self.liftHeldInput(); self.session.interrupt()
                 self.connectionInterrupted = true; self.receivedFrame = false
@@ -161,7 +162,7 @@ class MacViewerModel: ObservableObject {
                 if self.interruptionTimer == nil {
                     self.interruptionTimer = Timer.connectionTimer(withTimeInterval: 5, repeats: false) { [weak self] _ in
                         guard let self, self.attempt == token, self.connectionInterrupted else { return }
-                        self.recover(message: "Восстанавливаем соединение…")
+                        self.recover(message: "Восстанавливаем соединение…", cause: "interruption-timeout")
                     }
                 }
             }
@@ -181,7 +182,7 @@ class MacViewerModel: ObservableObject {
                 if let secret = invite.secret { body["proof"] = DeviceIdentity.pairingProof(secret: secret, payload: payload) }
                 self.signaling?.send(["type": "offer", "body": body])
                 self.status = invite.secret == nil ? "Подключаемся к Mac…" : "Подтвердите на другом Mac"; self.detail = "При первом подключении владелец Mac разрешает просмотр или управление."
-            } catch { self.recover(message: "Ищем сетевой маршрут…") }
+            } catch { self.recover(message: "Ищем сетевой маршрут…", cause: "negotiation") }
         }
     }
     private func signal(_ message: [String: Any], invite: RemoteInvite, token: UUID) {
@@ -199,18 +200,19 @@ class MacViewerModel: ObservableObject {
             status = "Подключаем экран…"
             transport?.answer(sdp) { [weak self] error in
                 guard let self, self.attempt == token else { return }
-                if error != nil { self.recover(message: "Восстанавливаем изображение…") }
+                if error != nil { self.recover(message: "Восстанавливаем изображение…", cause: "negotiation") }
             }
             if let name = payload["name"] as? String, !name.isEmpty, name.utf8.count <= 200,
                !computers.contains(where: { $0.id == invite.hostID }) { computerName = String(name.prefix(60)) }
-        } else if message["type"] as? String == "unavailable" { recover(message: "Ожидаем Mac…") }
+        } else if message["type"] as? String == "unavailable" { recover(message: "Ожидаем Mac…", cause: "host-unavailable") }
         else if message["type"] as? String == "reject" {
             let reason = (message["body"] as? [String: Any])?["reason"] as? String
-            if reason == "network" || reason == "busy" { recover(message: reason == "busy" ? "Mac занят. Ожидаем освобождения…" : "Восстанавливаем соединение…"); return }
+            if reason == "network" || reason == "busy" { recover(message: reason == "busy" ? "Mac занят. Ожидаем освобождения…" : "Восстанавливаем соединение…", cause: reason == "busy" ? "host-busy" : "host-network"); return }
             disconnect(message: reason == "busy" ? "К Mac уже подключено другое устройство." : reason == "network" ? "Не удалось установить соединение через интернет. Попробуйте подключиться снова." : reason == "new-invite-required" ? "Откройте доступ к экрану Mac и создайте новое приглашение." : "Подключение отклонено на Mac.")
         }
     }
-    func recover(message: String) {
+    func recover(message: String, cause: String) {
+        PerformanceLog.record("viewer-recover", ["cause": cause, "connected": connected])
         let target = currentInvite.flatMap { invite in
             invite.secret == nil || connected || answerAccepted ? invite.savedURL.absoluteString : nil
         } ?? recoveryInvitation
@@ -239,7 +241,7 @@ class MacViewerModel: ObservableObject {
         connecting = false; connected = false; connectionInterrupted = false; receivedFrame = false; track = nil; session = ViewerSession()
         strokes = []; previews = [:]; snapshot = nil; hiddenIDs = []; erasedIDs = []; activeStroke = nil; selectedID = nil
         answerAccepted = false; offerStarted = false; gestureRevision += 1; heldKeys = []; heldButtons = []
-        currentInvite = nil; pendingMeasurements.removeAll(); pasteFailure = nil
+        currentInvite = nil; pendingMeasurements.removeAll(); hostMeasures = false; pasteFailure = nil
         if !message.isEmpty { status = message; detail = "" }
     }
     /// The explicit release: the host lifts everything and starts a new epoch.
@@ -255,10 +257,14 @@ class MacViewerModel: ObservableObject {
         guard let operation, let data = try? JSONEncoder().encode(operation) else { return false }
         if PerformanceLog.enabled && (operation.type == "heartbeat" || operation.type == "pointer" && operation.action != "move") {
             let now = ProcessInfo.processInfo.systemUptime
-            pendingMeasurements = pendingMeasurements.filter { now - $0.value.time < 30 }
+            // Only a host that acknowledges input at all can leave it unacknowledged.
+            for (id, sent) in pendingMeasurements where now - sent.time >= 5 {
+                if hostMeasures { PerformanceLog.record("input-unacknowledged", ["kind": sent.kind]) }
+                pendingMeasurements[id] = nil
+            }
             pendingMeasurements[operation.operationID] = (now, operation.action ?? operation.type)
         }
-        guard transport?.send(data) == true else { recover(message: "Восстанавливаем соединение…"); return false }
+        guard transport?.send(data) == true else { recover(message: "Восстанавливаем соединение…", cause: "transmit-failed"); return false }
         return true
     }
     @discardableResult func send(_ type: String, edit: (inout WireMessage) -> Void = { _ in }) -> Bool {
@@ -272,6 +278,7 @@ class MacViewerModel: ObservableObject {
             switch m["type"] as? String {
             case "heartbeatAck": heartbeatAcknowledged = true
             case "performanceAck":
+                hostMeasures = true
                 if let id = m["id"] as? String, let sent = pendingMeasurements.removeValue(forKey: id) {
                     PerformanceLog.record("input-roundtrip", ["kind": sent.kind, "ms": (ProcessInfo.processInfo.systemUptime - sent.time) * 1000])
                 }
@@ -288,7 +295,7 @@ class MacViewerModel: ObservableObject {
                     heartbeat = Timer.connectionTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
                         guard let self else { return }
                         if self.heartbeatAcknowledged && ProcessInfo.processInfo.systemUptime - self.lastReply > 8 {
-                            self.recover(message: "Восстанавливаем соединение…")
+                            self.recover(message: "Восстанавливаем соединение…", cause: "heartbeat-timeout")
                         } else { _ = self.send("heartbeat") }
                     }
                 }

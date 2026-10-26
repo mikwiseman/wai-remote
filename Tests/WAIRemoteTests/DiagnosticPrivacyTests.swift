@@ -53,4 +53,27 @@ final class DiagnosticPrivacyTests: XCTestCase {
             "closeCode": 0, "domain": "NSURLErrorDomain", "code": -1005, "description": "private URL"] ))
         XCTAssertEqual(Set(transport.keys), ["closeCode", "domain", "code"])
     }
+
+    func testEachClickCanBeTracedToWhereItDiedWithoutContent() throws {
+        let delivery = try XCTUnwrap(DiagnosticPrivacy.sanitize("input-delivery", values: [
+            "kind": "pointer", "action": "down", "outcome": "primer", "queueMs": 1, "handlingMs": 166, "x": 0.4, "windowTitle": "private"]))
+        XCTAssertEqual(Set(delivery.keys), ["kind", "action", "outcome", "queueMs", "handlingMs"])
+        for outcome in ["system", "window", "ax-press", "primer", "no-target", "frame-gone", "cancelled"] {
+            XCTAssertEqual(DiagnosticPrivacy.sanitize("input-delivery", values: ["outcome": outcome])?["outcome"] as? String, outcome)
+        }
+        XCTAssertNil(DiagnosticPrivacy.sanitize("input-delivery", values: ["outcome": "Safari"])?["outcome"])
+        let rejected = try XCTUnwrap(DiagnosticPrivacy.sanitize("input-rejected", values: [
+            "epoch": 3, "sequence": 1, "mode": 2, "permission": 1, "session": 1, "geometry": 1, "ink": 1, "invalid": 1, "stopped": 1,
+            "text": "private", "key": "KeyA"]))
+        XCTAssertEqual(Set(rejected.keys), ["epoch", "sequence", "mode", "permission", "session", "geometry", "ink", "invalid", "stopped"])
+        XCTAssertEqual(DiagnosticPrivacy.sanitize("input-unacknowledged", values: ["kind": "down", "x": 0.5]) as? [String: String], ["kind": "down"])
+        XCTAssertEqual(DiagnosticPrivacy.sanitize("input-roundtrip", values: ["kind": "up", "ms": 418])?["kind"] as? String, "up")
+        let recover = try XCTUnwrap(DiagnosticPrivacy.sanitize("viewer-recover", values: [
+            "cause": "heartbeat-timeout", "connected": true, "message": "private", "host": "private"]))
+        XCTAssertEqual(Set(recover.keys), ["cause", "connected"])
+        for cause in ["signaling-failed", "connect-timeout", "peer-failed", "channel-closed", "interruption-timeout", "negotiation",
+                      "host-busy", "host-network", "host-unavailable", "transmit-failed", "heartbeat-timeout"] {
+            XCTAssertEqual(DiagnosticPrivacy.sanitize("viewer-recover", values: ["cause": cause])?["cause"] as? String, cause)
+        }
+    }
 }

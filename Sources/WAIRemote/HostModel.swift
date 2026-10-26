@@ -79,6 +79,7 @@ final class HostModel: ObservableObject {
     private var secret: Data?
     private var seenNonces: [String: Date] = [:]
     private var tick: Timer?
+    private var rejectedInput: [String: Int] = [:]
     private var observers: [NSObjectProtocol] = []
     private var localStrokeID: String?
     private var activity: NSObjectProtocol?
@@ -517,7 +518,10 @@ final class HostModel: ObservableObject {
                 PerformanceLog.record("input-applied", ["kind": m.type, "action": m.action ?? "", "handlingMs": (ProcessInfo.processInfo.systemUptime - handlingStart) * 1000])
                 _ = transport?.send(["type": "performanceAck", "id": m.operationID])
             }
-        } else if m.type != "heartbeat" { sendState(); sendSnapshot() }
+        } else {
+            if PerformanceLog.enabled, let reason = effects.rejected { rejectedInput[reason, default: 0] += 1 }
+            if m.type != "heartbeat" { sendState(); sendSnapshot() }
+        }
     }
     private func apply(_ e: SessionEffects) {
         if e.stateChanged, let machine, machine.stalled || machine.state.mode == .paused {
@@ -672,6 +676,7 @@ final class HostModel: ObservableObject {
             disconnectViewer(cause: "connect-timeout"); status = "Не удалось установить соединение. Можно попробовать снова."
         }
         if let machine { apply(machine.tick(now: ProcessInfo.processInfo.systemUptime)) }
+        if !rejectedInput.isEmpty { PerformanceLog.record("input-rejected", rejectedInput); rejectedInput = [:] }
         if let pending, pending.offer.expiresAt < now.timeIntervalSince1970 * 1000 { reject() }
         seenNonces = seenNonces.filter { now.timeIntervalSince($0.value) < 150 }
     }
