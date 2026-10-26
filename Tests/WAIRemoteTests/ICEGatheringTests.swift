@@ -36,6 +36,22 @@ final class ICEGatheringTests: XCTestCase {
         }
         wait(for: [rejected], timeout: 14)
     }
+    func testDirectRoutesSkipLoopbackAndTunnelsButKeepTheRelay() throws {
+        let sdp = ["v=0", "m=application 9 UDP/DTLS/SCTP webrtc-datachannel",
+            "a=candidate:1 1 udp 2122260223 192.168.1.66 50000 typ host generation 0",
+            "a=candidate:2 1 udp 2122194687 127.0.0.1 50001 typ host generation 0",
+            "a=candidate:3 1 udp 2122129151 172.19.0.1 50002 typ host generation 0",
+            "a=candidate:4 1 udp 1686052607 212.80.205.91 50003 typ srflx raddr 172.19.0.1 rport 50002 generation 0",
+            "a=candidate:5 1 udp 41885439 65.108.215.2 49200 typ relay raddr 172.19.0.1 rport 50002 generation 0",
+            "a=candidate:6 1 tcp 1518280447 ::1 9 typ host tcptype active generation 0",
+            "a=end-of-candidates", ""].joined(separator: "\r\n")
+        let kept = try ICEGatheringDeadline.result(for: sdp, tunnels: ["172.19.0.1"]).get()
+        XCTAssertEqual(kept.components(separatedBy: "\r\n").filter { $0.hasPrefix("a=candidate:") }.map { $0.prefix(13) },
+                       ["a=candidate:1", "a=candidate:5"])
+        XCTAssertTrue(kept.hasPrefix("v=0\r\n") && kept.hasSuffix("a=end-of-candidates\r\n"))
+        let unusable = ["v=0", "a=candidate:2 1 udp 2122194687 127.0.0.1 50001 typ host generation 0", ""].joined(separator: "\r\n")
+        XCTAssertThrowsError(try ICEGatheringDeadline.result(for: unusable, tunnels: []).get())
+    }
     func testAnUnresponsiveInterfaceDoesNotDiscardAvailableCandidates() throws {
         _ = NSApplication.shared
         // TEST-NET never answers STUN. Local candidates are still useful on a LAN.

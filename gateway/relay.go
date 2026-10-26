@@ -17,6 +17,7 @@ import (
 
 type relayIssuer struct {
 	secret []byte
+	stun   string
 	urls   []string
 }
 
@@ -40,7 +41,7 @@ func loadRelay(path, address, publicIP string) (*relayIssuer, error) {
 	if len(secret) < 32 || len(secret) > 256 {
 		return nil, errors.New("relay secret must contain 32 to 256 bytes")
 	}
-	return &relayIssuer{secret: secret, urls: []string{"turn:" + ip.String() + ":3478?transport=udp", "turn:" + ip.String() + ":3478?transport=tcp"}}, nil
+	return &relayIssuer{secret: secret, stun: "stun:" + ip.String() + ":3478", urls: []string{"turn:" + ip.String() + ":3478?transport=udp", "turn:" + ip.String() + ":3478?transport=tcp"}}, nil
 }
 
 func (r *relayIssuer) issue(peer string, now time.Time) *iceConfiguration {
@@ -56,7 +57,12 @@ func (r *relayIssuer) issue(peer string, now time.Time) *iceConfiguration {
 
 func (r *relayIssuer) forClient(hello Hello, now time.Time) *iceConfiguration {
 	ice := r.issue(hello.PeerID, now)
-	if hello.ICEVersion < 2 {
+	if hello.ICEVersion >= 3 {
+		// These apps skip VPN adapters, whose direct routes stalled SCTP input.
+		// Try the physical network first; the relays remain the fallback.
+		ice.Policy = "all"
+		ice.Servers[0].URLs = append([]string{r.stun}, r.urls...)
+	} else if hello.ICEVersion < 2 {
 		// Released clients require every interface to finish gathering. Preserve
 		// their working relay configuration until the desktop app is updated.
 		ice.Policy = "relay"

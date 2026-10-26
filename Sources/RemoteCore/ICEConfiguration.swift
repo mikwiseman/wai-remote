@@ -29,11 +29,11 @@ public struct ICEConfiguration: Decodable {
     }
     private static func validURL(_ text: String) -> Bool {
         guard text.utf8.count <= 512, let colon = text.firstIndex(of: ":"),
-              ["turn", "turns"].contains(String(text[..<colon])),
+              ["stun", "turn", "turns"].contains(String(text[..<colon])),
               let url = URLComponents(string: String(text[..<colon]) + "://" + text[text.index(after: colon)...]),
               let host = url.host, !host.isEmpty, url.user == nil, url.password == nil,
               url.path.isEmpty, url.fragment == nil,
               url.port == nil || (1...65535).contains(url.port!) else { return false }
-        return url.query == nil || ["transport=udp", "transport=tcp"].contains(url.query!)
+        return url.query == nil || url.scheme != "stun" && ["transport=udp", "transport=tcp"].contains(url.query!)
     }
 }

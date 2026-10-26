@@ -46,9 +46,9 @@ func TestMalformedHandshakeIsNotReportedAsAnInvalidDeviceSignature(t *testing.T)
 }
 
 func TestUDPRelayRequiresClientCapabilityAndPreservesReliableRouting(t *testing.T) {
-	for _, version := range []int{0, 2} {
+	for _, version := range []int{0, 2, 3} {
 		h := newHub()
-		h.relay = &relayIssuer{secret: []byte(strings.Repeat("s", 32)), urls: []string{"turn:203.0.113.1:3478?transport=udp", "turn:203.0.113.1:3478?transport=tcp"}}
+		h.relay = &relayIssuer{secret: []byte(strings.Repeat("s", 32)), stun: "stun:203.0.113.1:3478", urls: []string{"turn:203.0.113.1:3478?transport=udp", "turn:203.0.113.1:3478?transport=tcp"}}
 		server := httptest.NewServer(httpHandler(h))
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		c, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http"), nil)
@@ -78,6 +78,9 @@ func TestUDPRelayRequiresClientCapabilityAndPreservesReliableRouting(t *testing.
 		}
 		if version == 2 && (ready.ICE.Policy != "relay" || len(ready.ICE.Servers[0].URLs) != 2) {
 			t.Error("Updated apps need UDP with TCP fallback, while avoiding direct VPN routes that stall SCTP input")
+		}
+		if version == 3 && (ready.ICE.Policy != "all" || strings.Join(ready.ICE.Servers[0].URLs, " ") != "stun:203.0.113.1:3478 turn:203.0.113.1:3478?transport=udp turn:203.0.113.1:3478?transport=tcp") {
+			t.Errorf("Apps that skip VPN adapters should try a direct route first and keep both relays, got %+v", ready.ICE)
 		}
 		c.CloseNow()
 		cancel()

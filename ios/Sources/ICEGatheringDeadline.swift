@@ -25,11 +25,36 @@ final class ICEGatheringDeadline {
             completion(Self.result(for: sdp))
         }
     }
-    static func result(for sdp: String) -> Result<String, Error> {
-        guard sdp.components(separatedBy: .newlines).contains(where: { $0.hasPrefix("a=candidate:") }) else {
+    /// A direct route through a VPN tunnel stalled SCTP input for seconds, and loopback
+    /// reaches nobody. Offer the physical network directly; relays keep every path.
+    static func result(for sdp: String, tunnels: Set<String> = tunnelAddresses()) -> Result<String, Error> {
+        let lines = sdp.components(separatedBy: "\r\n").filter { line in
+            guard line.hasPrefix("a=candidate:") else { return true }
+            let fields = line.split(separator: " ").map(String.init)
+            guard fields.count > 7, fields[7] != "relay" else { return true }
+            let base = fields.firstIndex(of: "raddr").flatMap { fields.indices.contains($0 + 1) ? fields[$0 + 1] : nil } ?? fields[4]
+            return !(base.hasPrefix("127.") || base == "::1" || tunnels.contains(base))
+        }
+        guard lines.contains(where: { $0.hasPrefix("a=candidate:") }) else {
             return .failure(NSError(domain: "WebRTC", code: 1, userInfo: [NSLocalizedDescriptionKey: "Не найден сетевой маршрут"]))
         }
-        return .success(sdp)
+        return .success(lines.joined(separator: "\r\n"))
+    }
+    static func tunnelAddresses() -> Set<String> {
+        var addresses = Set<String>(), list: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&list) == 0 else { return [] }
+        defer { freeifaddrs(list) }
+        var next = list
+        while let entry = next?.pointee {
+            next = entry.ifa_next
+            let name = String(cString: entry.ifa_name)
+            guard ["utun", "ipsec", "ppp", "tun", "tap"].contains(where: name.hasPrefix), let address = entry.ifa_addr,
+                  [AF_INET, AF_INET6].contains(Int32(address.pointee.sa_family)) else { continue }
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            guard getnameinfo(address, socklen_t(address.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0 else { continue }
+            addresses.insert(String(cString: host).components(separatedBy: "%")[0])
+        }
+        return addresses
     }
     func cancel() { timer?.invalidate(); timer = nil }
     deinit { cancel() }
