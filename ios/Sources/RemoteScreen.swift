@@ -5,8 +5,9 @@ import RemoteCore
 
 struct RemoteScreen: UIViewRepresentable {
     @ObservedObject var model: PhoneModel
-    func makeUIView(context: Context) -> ScreenView { ScreenView(model: model) }
-    func updateUIView(_ view: ScreenView, context: Context) { view.update() }
+    var onZoom: (Bool) -> Void = { _ in }
+    func makeUIView(context: Context) -> ScreenView { let view = ScreenView(model: model); view.onZoom = onZoom; return view }
+    func updateUIView(_ view: ScreenView, context: Context) { view.onZoom = onZoom; view.update() }
     static func dismantleUIView(_ view: ScreenView, coordinator: ()) { view.detach() }
 }
 
@@ -32,10 +33,12 @@ final class ScreenView: UIView, RTCVideoViewDelegate {
     private var revision = -1
     private var zoomRevision = -1
     private var erasePrevious: CGPoint?
+    private var reportedZoom = false
+    var onZoom: ((Bool) -> Void)?
 
     init(model: PhoneModel) {
         self.model = model; super.init(frame: .zero)
-        isMultipleTouchEnabled = true; clipsToBounds = true; backgroundColor = UIColor(white: 0.08, alpha: 1)
+        isMultipleTouchEnabled = true; clipsToBounds = true; backgroundColor = .black
         content.isUserInteractionEnabled = false; content.clipsToBounds = true
         video.videoContentMode = .scaleAspectFit; video.delegate = self
         frameObserver.onFrame = { [weak self] in
@@ -71,6 +74,24 @@ final class ScreenView: UIView, RTCVideoViewDelegate {
         offset.y = max(-max(0, (size.height - bounds.height) / 2), min(max(0, (size.height - bounds.height) / 2), offset.y))
         content.frame = CGRect(x: (bounds.width - size.width) / 2 + offset.x, y: (bounds.height - size.height) / 2 + offset.y, width: size.width, height: size.height)
         video.frame = content.bounds; ink.frame = content.bounds; ink.setNeedsDisplay()
+        if (zoom > 1.01) != reportedZoom {
+            reportedZoom.toggle(); let zoomed = reportedZoom, report = onZoom
+            DispatchQueue.main.async { report?(zoomed) }
+        }
+    }
+    /// Answers the finger at once; the Mac's picture follows a round trip later.
+    private func ripple(at point: CGPoint) {
+        let ring = CAShapeLayer()
+        ring.path = UIBezierPath(ovalIn: CGRect(x: -22, y: -22, width: 44, height: 44)).cgPath
+        ring.position = point; ring.fillColor = UIColor.clear.cgColor; ring.lineWidth = 2
+        ring.strokeColor = UIColor(red: 0.875, green: 0.949, blue: 0.784, alpha: 0.95).cgColor
+        layer.addSublayer(ring)
+        let scale = CABasicAnimation(keyPath: "transform.scale"); scale.fromValue = 0.35; scale.toValue = 1.15
+        let fade = CABasicAnimation(keyPath: "opacity"); fade.fromValue = 1; fade.toValue = 0
+        let group = CAAnimationGroup(); group.animations = [scale, fade]; group.duration = 0.42
+        group.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        CATransaction.begin(); CATransaction.setCompletionBlock { ring.removeFromSuperlayer() }
+        ring.opacity = 0; ring.add(group, forKey: "ripple"); CATransaction.commit()
     }
     func videoView(_ videoView: RTCVideoRenderer, didChangeVideoSize size: CGSize) {
         // Size negotiation is not proof of a fresh frame.
@@ -104,6 +125,7 @@ final class ScreenView: UIView, RTCVideoViewDelegate {
             else if model.tool == .select { model.selectedID = hit(at: p)?.id }
             else { model.beginStroke(at: normalized(p)) }
         } else {
+            if !UIAccessibility.isReduceMotionEnabled { ripple(at: p) }
             longPress = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: false) { [weak self] _ in
                 guard let self, self.touches.count == 1, !self.moved, self.model.canControl else { return }
                 self.dragging = true; self.model.pointer("down", at: self.normalized(self.start))
