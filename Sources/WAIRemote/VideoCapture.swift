@@ -14,6 +14,7 @@ final class VideoCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private var lastCapturedTime = 0.0
     private var largestCaptureGap = 0.0
     private var labTimer: Timer?
+    private var refinement: StaticRefinement?
     var onError: ((String) -> Void)?
     var onLabImage: ((NSImage) -> Void)?
     var clicks = 0
@@ -23,6 +24,7 @@ final class VideoCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         source = factory.videoSource(forScreenCast: true)
         capturer = RTCVideoCapturer(delegate: source)
         super.init()
+        refinement = StaticRefinement(queue: queue) { [weak self] buffer, time in self?.push(buffer, at: time) }
     }
     func startDisplay(_ display: SCDisplay, excluding windowIDs: [CGWindowID]) async throws {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
@@ -94,10 +96,10 @@ final class VideoCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                 largestCaptureGap = 0
             }
         }
-        push(buffer, timestamp: sampleBuffer.presentationTimeStamp)
+        let time = sampleBuffer.presentationTimeStamp
+        refinement?.frame(buffer, at: time.isNumeric && time.seconds.isFinite ? time.seconds : ProcessInfo.processInfo.systemUptime)
     }
-    private func push(_ buffer: CVPixelBuffer, timestamp: CMTime? = nil) {
-        let seconds = timestamp.flatMap { $0.isNumeric && $0.seconds.isFinite ? $0.seconds : nil } ?? ProcessInfo.processInfo.systemUptime
+    private func push(_ buffer: CVPixelBuffer, at seconds: Double = ProcessInfo.processInfo.systemUptime) {
         let frame = RTCVideoFrame(buffer: RTCCVPixelBuffer(pixelBuffer: buffer), rotation: ._0,
                                  timeStampNs: Int64(seconds * 1_000_000_000))
         source.capturer(capturer, didCapture: frame)
@@ -106,6 +108,7 @@ final class VideoCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     func stop() {
         labTimer?.invalidate(); labTimer = nil
         if let stream { Task { try? await stream.stopCapture() } }; stream = nil
+        queue.async { [refinement] in refinement?.stop() }
     }
     func startLab() {
         labTimer = Timer.connectionTimer(withTimeInterval: 1.0/15, repeats: true) { [weak self] _ in self?.renderLab() }

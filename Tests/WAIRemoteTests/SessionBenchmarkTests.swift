@@ -11,8 +11,8 @@ import XCTest
 ///
 ///     WAI_SESSION_BENCH=1 swift test --filter SessionBenchmarkTests
 ///
-/// WAI_SESSION_POLICY=all compares the direct path. Results go to WAI_BENCH_DIR,
-/// or .runtime/bench in this package.
+/// WAI_SESSION_POLICY=all compares the direct path, WAI_SESSION_REFINEMENT=0 a source
+/// without StaticRefinement. Results go to WAI_BENCH_DIR, or .runtime/bench in this package.
 @MainActor
 final class SessionBenchmarkTests: XCTestCase {
     private static let gateway = URL(string: "wss://waiwai.is/remote/connect/signal")!
@@ -34,7 +34,8 @@ final class SessionBenchmarkTests: XCTestCase {
         let host = PeerTransport(factory: factory, source: capture.source, ice: hostICE)
         let viewer = ViewerTransport(ice: viewerICE)
         defer { host.close(); viewer.close() }
-        let screen = Screen(desktop: desktop, timeline: Timeline(), source: capture.source)
+        let screen = Screen(desktop: desktop, timeline: Timeline(), source: capture.source,
+                            refined: environment["WAI_SESSION_REFINEMENT"] != "0")
         // Like MacViewerModel, hold the track: releasing it detaches its renderers.
         var track: RTCVideoTrack?
         viewer.onVideo = { track = $0; $0.add(screen) }
@@ -175,7 +176,7 @@ final class SessionBenchmarkTests: XCTestCase {
         let motion = rows.filter { ($0["src"] as? Int ?? 0) >= 30 }
         let last = samples.last, roundTrips = input.snapshot()
         let summary: [String: Any] = [
-            "policy": policy, "durationS": Bench.round(timeline.duration, 0),
+            "policy": policy, "refined": screen.refined, "durationS": Bench.round(timeline.duration, 0),
             "path": ["host": last?.host["local"] ?? NSNull(), "hostRemote": last?.host["remote"] ?? NSNull(), "viewer": last?.viewer["local"] ?? NSNull(),
                      "codec": last?.host["codec"] ?? NSNull(), "encoder": last?.host["encoderImplementation"] ?? NSNull(),
                      "decoder": last?.viewer["decoderImplementation"] ?? NSNull(),
@@ -247,14 +248,15 @@ private final class Screen: NSObject, RTCVideoRenderer, @unchecked Sendable {
     struct Quality { let kind: String; let reference: Int; let shown: Int; let time: Double; let psnr: Double }
     let desktop: SyntheticDesktop, timeline: Timeline
     private let source: RTCVideoSource
+    let refined: Bool
     private let finals: Set<Int>
     private let lock = NSLock()
     private var pushed: [Double], shown: [Shown] = [], quality: [Quality] = []
     private var latest: RTCVideoFrame?
     private var pending = 0, motion = 0, skipped = 0
     private let queue = DispatchQueue(label: "is.wai.remote.bench.psnr", qos: .utility)
-    init(desktop: SyntheticDesktop, timeline: Timeline, source: RTCVideoSource) {
-        self.desktop = desktop; self.timeline = timeline; self.source = source
+    init(desktop: SyntheticDesktop, timeline: Timeline, source: RTCVideoSource, refined: Bool) {
+        self.desktop = desktop; self.timeline = timeline; self.source = source; self.refined = refined
         finals = Set(timeline.changes.map(\.final)); pushed = Array(repeating: .nan, count: timeline.pushes.count)
     }
     func snapshot() -> (pushed: [Double], shown: [Shown], quality: [Quality], skipped: Int) {
@@ -287,9 +289,15 @@ private final class Screen: NSObject, RTCVideoRenderer, @unchecked Sendable {
             lock.unlock()
         }
     }
-    /// Like VideoCapture: ScreenCaptureKit delivers frames only when pixels change.
+    /// Like VideoCapture: ScreenCaptureKit delivers frames only when pixels change,
+    /// and the same StaticRefinement re-sends the last one while static.
     func play(from start: Double) {
         let capturer = RTCVideoCapturer(delegate: source), pool = SyntheticDesktop.pool()
+        let queue = DispatchQueue(label: "is.wai.remote.bench.capture", qos: .userInteractive)
+        let refinement = StaticRefinement(queue: queue, window: refined ? StaticRefinement.window : 0) { [source] buffer, time in
+            source.capturer(capturer, didCapture: RTCVideoFrame(buffer: RTCCVPixelBuffer(pixelBuffer: buffer), rotation: ._0,
+                                                                timeStampNs: Int64(time * 1_000_000_000)))
+        }
         func wait(until deadline: Double) {
             let delay = deadline - ProcessInfo.processInfo.systemUptime
             if delay > 0 { Thread.sleep(forTimeInterval: delay) }
@@ -312,10 +320,10 @@ private final class Screen: NSObject, RTCVideoRenderer, @unchecked Sendable {
             guard let buffer = desktop.frame(push.state, index: index, pool: pool) else { continue }
             let now = ProcessInfo.processInfo.systemUptime
             lock.lock(); pushed[index] = now; lock.unlock()
-            source.capturer(capturer, didCapture: RTCVideoFrame(buffer: RTCCVPixelBuffer(pixelBuffer: buffer), rotation: ._0,
-                                                                timeStampNs: Int64(now * 1_000_000_000)))
+            queue.sync { refinement.frame(buffer, at: now) }
         }
         settle(before: .infinity)
+        queue.sync { refinement.stop() }
     }
 }
 
