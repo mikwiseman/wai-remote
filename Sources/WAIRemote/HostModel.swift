@@ -490,7 +490,6 @@ final class HostModel: ObservableObject {
             guard let self, self.transport === peer else { return }
             if state == .failed || state == .closed { self.disconnectViewer(cause: "transport") }
             if state == .disconnected { if let machine = self.machine { self.apply(machine.transportInterrupted()) } }
-            if state == .connected { if let machine = self.machine { self.apply(machine.transportRestored()) } }
         }
         peer.answer(offer: offer.sdp) { [weak self, weak peer] result in
             guard let self, self.connectionGeneration == generation, self.transport === peer else { return }
@@ -526,7 +525,7 @@ final class HostModel: ObservableObject {
         }
         transport?.clipboard.setEnabled(!isLab && sharing && machine?.connected == true &&
             machine?.stalled == false && machine?.state.permissions.control == true && machine?.state.mode != .paused)
-        if e.releaseInput { injector.releaseAll(); remotePointer?.hide() }
+        if e.releaseInput { injector.liftHeld(); remotePointer?.hide() }
         if machine?.stalled == true, let activity { ProcessInfo.processInfo.endActivity(activity); self.activity = nil }
         if e.accepted, machine?.connected == true, machine?.stalled == false, transport?.isReady == true, activity == nil {
             activity = ProcessInfo.processInfo.beginActivity(options: .userInteractive, reason: "WAI Remote active session")
@@ -608,7 +607,7 @@ final class HostModel: ObservableObject {
         sessionStartedAt = nil
         remotePointer?.hide()
         connectionDeadline = nil
-        injector.releaseAll(); machine?.disconnect(); transport?.close(); transport = nil; connectedName = nil
+        injector.resetSession(); machine?.disconnect(); transport?.close(); transport = nil; connectedName = nil
         activePeer = nil
         viewerHasLocalPointer = false
         if !isLab { stopCapture() }

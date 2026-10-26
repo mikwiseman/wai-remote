@@ -9,9 +9,13 @@ final class InputInjector {
     var allowed: Bool { CGPreflightPostEventAccess() }
     private let delivery = InputDeliveryQueue()
     private let events = InjectedEvents()
-    func setWindowTarget(_ target: WindowInputTarget?) { releaseAll(); windowTarget = target; independentPointer = false }
-    func setIndependentPointer(_ enabled: Bool) { releaseAll(); windowTarget = nil; independentPointer = enabled }
-    func releaseAll() { delivery.cancel { [events] in events.releaseAll() } }
+    func setWindowTarget(_ target: WindowInputTarget?) { resetSession(); windowTarget = target; independentPointer = false }
+    func setIndependentPointer(_ enabled: Bool) { resetSession(); windowTarget = nil; independentPointer = enabled }
+    /// Stalls, pauses and focus loss end held buttons and keys. Typing still
+    /// follows the last clicked window, so a paste after the pause arrives.
+    func liftHeld() { delivery.cancel { [events] in events.liftHeld() } }
+    /// Only a disconnect or a new input mode or target forgets that window.
+    func resetSession() { delivery.cancel { [events] in events.resetSession() } }
     func apply(_ message: WireMessage) {
         let target = windowTarget, bounds = bounds, independent = independentPointer, excluded = excludedWindows
         let received = ProcessInfo.processInfo.systemUptime
@@ -65,9 +69,9 @@ private final class InjectedEvents {
         }
     }
     func apply(_ m: WireMessage) {
-        guard allowed else { releaseAll(); return }
+        guard allowed else { liftHeld(); return }
         if let windowTarget {
-            guard let frame = windowTarget.frame else { releaseAll(); return }
+            guard let frame = windowTarget.frame else { liftHeld(); return }
             bounds = frame
         }
         destination = windowTarget.map(InputDestination.window) ?? (independentPointer ? .unavailable : .system)
@@ -84,7 +88,7 @@ private final class InjectedEvents {
                 guard let target, target.frame != nil else {
                     // A press in empty space stays empty until release. Never
                     // substitute a global event or another app for a lost target.
-                    if !buttons.isEmpty || windowButton != nil { releaseAll() }
+                    if !buttons.isEmpty || windowButton != nil { liftHeld() }
                     return
                 }
             }
@@ -173,7 +177,7 @@ private final class InjectedEvents {
             flush()
         }
     }
-    func releaseAll() {
+    func liftHeld() {
         windowButton = nil
         for b in buttons {
             let type: CGEventType = b == 2 ? .rightMouseUp : b == 1 ? .otherMouseUp : .leftMouseUp
@@ -183,8 +187,9 @@ private final class InjectedEvents {
         }
         for (code, target) in keys { let event = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: false); event?.flags = []; post(event, to: target, releasing: true) }
         buttons.removeAll(); keys.removeAll(); clickCounts.removeAll(); clickSequence.reset()
-        desktop.reset(); destination = .unavailable; buttonDestination = .unavailable; lastClickDestination = .unavailable
+        desktop.liftHeld(); destination = .unavailable; buttonDestination = .unavailable; lastClickDestination = .unavailable
     }
+    func resetSession() { liftHeld(); desktop.reset() }
     private static func flags(_ modifiers: [String]) -> CGEventFlags {
         var f: CGEventFlags = []
         for m in modifiers { switch m { case "Meta": f.insert(.maskCommand); case "Control": f.insert(.maskControl); case "Alt": f.insert(.maskAlternate); case "Shift": f.insert(.maskShift); default: break } }

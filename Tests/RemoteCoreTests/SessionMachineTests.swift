@@ -37,18 +37,22 @@ final class SessionMachineTests: XCTestCase {
         _ = host.setSystemControlAllowed(true)
         XCTAssertFalse(host.state.permissions.control, "A revoked owner grant must stay revoked after macOS permission returns.")
     }
-    func testTransportRecoveryNeedsNewEpochAndPreservesLocalPause() {
+    func testTransportInterruptionLiftsHeldInputAndKeepsLateInputAndLocalPause() {
         let host = machine()
-        let old = pointer(host.state)
-        XCTAssertTrue(host.transportInterrupted().releaseInput)
-        XCTAssertEqual(host.state.mode, .paused)
-        XCTAssertFalse(host.handle(pointer(host.state), now: 1).accepted)
-        XCTAssertTrue(host.transportRestored().releaseInput)
+        let queued = pointer(host.state), epoch = host.state.inputEpoch
+        let interrupted = host.transportInterrupted()
+        XCTAssertTrue(interrupted.releaseInput)
+        XCTAssertTrue(interrupted.stateChanged)
+        XCTAssertTrue(host.stalled)
+        XCTAssertEqual(host.state.inputEpoch, epoch, "The ordered channel may still deliver input sent before the interruption.")
         XCTAssertEqual(host.state.mode, .control)
-        XCTAssertFalse(host.handle(old, now: 2).accepted)
-        XCTAssertTrue(host.handle(pointer(host.state), now: 2.1).accepted)
+        XCTAssertFalse(host.transportInterrupted().releaseInput)
+        let late = host.handle(queued, now: 1)
+        XCTAssertEqual(late.input?.action, "down", "Input that arrives after the path recovers is delivered, in order.")
+        XCTAssertTrue(late.stateChanged)
+        XCTAssertFalse(host.stalled)
         _ = host.pause(reason: "host-drawing")
-        _ = host.transportInterrupted(); _ = host.transportRestored()
+        _ = host.transportInterrupted()
         XCTAssertEqual(host.state.mode, .paused)
         XCTAssertFalse(host.handle(pointer(host.state), now: 3).accepted)
     }
@@ -71,15 +75,25 @@ final class SessionMachineTests: XCTestCase {
         let host = machine(.init(control: false, annotate: true))
         XCTAssertNil(host.handle(pointer(host.state), now: 1).input)
     }
-    func testDeadManInvalidatesQueuedInputAndHeartbeat() {
+    func testStallLiftsHeldInputButDeliversLateInputInOrder() {
         let host = machine()
         let oldState = host.state
         XCTAssertNotNil(host.handle(pointer(oldState), now: 1).input)
-        let timeout = host.tick(now: 3.01)
-        XCTAssertTrue(timeout.releaseInput)
-        XCTAssertGreaterThan(host.state.inputEpoch, oldState.inputEpoch)
-        XCTAssertNil(host.handle(pointer(oldState), now: 3.1).input)
-        XCTAssertFalse(host.handle(WireMessage(type: "heartbeat", state: oldState), now: 3.2).accepted)
+        var heartbeat = WireMessage(type: "heartbeat", state: oldState); heartbeat.sequence = 1
+        var up = pointer(oldState); up.sequence = 2; up.action = "up"
+        let stall = host.tick(now: 3.01)
+        XCTAssertTrue(stall.releaseInput, "A silent viewer must not leave a button or key held.")
+        XCTAssertTrue(stall.stateChanged)
+        XCTAssertTrue(host.stalled)
+        XCTAssertEqual(host.state.inputEpoch, oldState.inputEpoch)
+        XCTAssertEqual(host.state.nextSequence, 1)
+        XCTAssertFalse(host.tick(now: 4).releaseInput)
+        let resumed = host.handle(heartbeat, now: 5.3)
+        XCTAssertTrue(resumed.accepted)
+        XCTAssertTrue(resumed.stateChanged)
+        XCTAssertFalse(host.stalled)
+        XCTAssertEqual(host.handle(up, now: 5.4).input?.action, "up", "A click sent before the uplink stalled must arrive, not vanish.")
+        XCTAssertFalse(host.handle(up, now: 5.5).accepted, "Replays stay rejected.")
     }
     func testLocalDrawingCannotBeOverriddenByRemoteModeChange() {
         let host = machine()

@@ -76,11 +76,13 @@ final class DesktopInputTests: XCTestCase {
         XCTAssertNil(routing.keyboardTarget)
     }
 
-    func testReleaseClearsTypingDestinationAndAnyHeldGesture() {
+    func testLiftingHeldInputKeepsTypingDestinationAndOnlyResetForgetsIt() {
         var routing = DesktopInputTarget()
         _ = routing.pointer(action: "down", button: 0, at: point, hitTest: { _ in self.first })
+        routing.liftHeld()
+        XCTAssertEqual(routing.keyboardTarget, first, "A stall or focus change must not drop the next paste.")
+        XCTAssertEqual(routing.pointer(action: "move", button: 0, at: point, hitTest: { _ in self.second }), second)
         routing.reset()
         XCTAssertNil(routing.keyboardTarget)
-        XCTAssertEqual(routing.pointer(action: "move", button: 0, at: point, hitTest: { _ in self.second }), second)
     }
 }

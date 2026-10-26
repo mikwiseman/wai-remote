@@ -20,7 +20,8 @@ struct DesktopInputTarget {
         return target
     }
 
-    mutating func reset() { keyboardTarget = nil; gestureTarget = nil; buttons.removeAll() }
+    mutating func liftHeld() { gestureTarget = nil; buttons.removeAll() }
+    mutating func reset() { liftHeld(); keyboardTarget = nil }
 
     // WindowServer hit-testing respects input regions. Bounding-box scans do
     // not: the Dock has a transparent window covering the entire display.

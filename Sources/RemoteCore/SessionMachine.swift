@@ -9,7 +9,6 @@ public final class SessionMachine {
     public private(set) var ink = InkStore()
     private var lastActivity: Double?
     private var locallyPaused = false
-    private var transportAvailable = true
     private var approvedPermissions: Permissions
     private var systemControlAllowed = true
 
@@ -23,7 +22,7 @@ public final class SessionMachine {
 
     public func handle(_ m: WireMessage, now: Double) -> SessionEffects {
         var e = SessionEffects()
-        guard connected, transportAvailable, m.v == 1, m.sessionID == state.sessionID,
+        guard connected, m.v == 1, m.sessionID == state.sessionID,
               m.controllerEpoch == state.controllerEpoch, m.inputEpoch == state.inputEpoch,
               m.surfaceID == state.surface.id, m.geometryRevision == state.surface.revision,
               m.sequence >= state.nextSequence, m.sequence < Int.max,
@@ -93,26 +92,18 @@ public final class SessionMachine {
     }
     public func tick(now: Double) -> SessionEffects {
         guard connected, !stalled, let lastActivity, now - lastActivity > 2 else { return .init() }
-        stalled = true
-        return invalidate(reason: "connection-stalled")
+        return stall(reason: "connection-stalled")
     }
     public func transportInterrupted() -> SessionEffects {
-        guard connected, transportAvailable else { return .init() }
-        transportAvailable = false; state.mode = .paused
-        return invalidate(reason: "transport-disconnected")
-    }
-    public func transportRestored() -> SessionEffects {
-        guard connected, !transportAvailable else { return .init() }
-        transportAvailable = true; stalled = false; lastActivity = nil
-        state.mode = locallyPaused ? .paused : .control
-        return invalidate(reason: locallyPaused ? "host-drawing" : "transport-restored")
+        guard connected, !stalled else { return .init() }
+        return stall(reason: "transport-disconnected")
     }
     @discardableResult public func pause(reason: String) -> SessionEffects {
         locallyPaused = true; state.mode = .paused
         return invalidate(reason: reason)
     }
     @discardableResult public func resume() -> SessionEffects {
-        locallyPaused = false; state.mode = transportAvailable ? .control : .paused
+        locallyPaused = false; state.mode = .control
         return invalidate(reason: "host-resumed")
     }
     @discardableResult public func resizeSurface(width: Int, height: Int) -> SessionEffects {
@@ -137,7 +128,7 @@ public final class SessionMachine {
         return invalidate(reason: "permissions-changed")
     }
     @discardableResult public func reconnect() -> SessionEffects {
-        connected = true; transportAvailable = true; locallyPaused = false; stalled = false; state.mode = .control
+        connected = true; locallyPaused = false; stalled = false; state.mode = .control
         state.controllerEpoch += 1; lastActivity = nil
         return invalidate(reason: "reconnected")
     }
@@ -148,8 +139,18 @@ public final class SessionMachine {
         var e = invalidate(reason: "host-cleared"); e.snapshot = true
         return e
     }
+    /// A silent viewer must not leave input held, but the ordered channel may
+    /// still deliver what it sent before the stall. Keep the epoch for that input.
+    private func stall(reason: String) -> SessionEffects {
+        stalled = true
+        return lift(reason: reason)
+    }
     private func invalidate(reason: String) -> SessionEffects {
-        state.inputEpoch += 1; state.nextSequence = 0; state.reason = reason; ink.cancelAll()
+        state.inputEpoch += 1; state.nextSequence = 0
+        return lift(reason: reason)
+    }
+    private func lift(reason: String) -> SessionEffects {
+        state.reason = reason; ink.cancelAll()
         var e = SessionEffects(); e.accepted = true; e.releaseInput = true
         e.stateChanged = true; e.inkChanged = true; e.snapshot = true
         return e

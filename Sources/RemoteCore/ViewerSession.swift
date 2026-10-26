@@ -4,6 +4,7 @@ public struct ViewerSession {
     public private(set) var state: HostState?
     public private(set) var mode: RemoteMode = .control
     public private(set) var invalidated = false
+    private var interrupted = false
     private var sequence = 0
     private var generation = 0
     public init() {}
@@ -21,18 +22,18 @@ public struct ViewerSession {
             sequence = max(sequence, next.nextSequence)
             if next.modeGeneration >= generation { generation = next.modeGeneration; mode = next.mode }
         }
-        state = next
+        state = next; interrupted = false
         return changed || layerChanged
     }
     public mutating func make(_ type: String) -> WireMessage? {
-        guard let state, !invalidated, sequence < Int.max else { return nil }
+        guard let state, !invalidated, !interrupted, sequence < Int.max else { return nil }
         if mode == .paused && !["heartbeat", "release", "resync"].contains(type) { return nil }
         var message = WireMessage(type: type, state: state)
         message.sequence = sequence; sequence += 1; message.modeGeneration = generation
         return message
     }
     public mutating func changeMode(_ next: RemoteMode) -> WireMessage? {
-        guard let state, !invalidated, mode != .paused, next != .paused,
+        guard let state, !invalidated, !interrupted, mode != .paused, next != .paused,
               next != .draw || state.permissions.annotate else { return nil }
         generation += 1; mode = next
         var message = make("mode"); message?.mode = next; return message
@@ -40,5 +41,7 @@ public struct ViewerSession {
     public mutating func release() -> WireMessage? {
         let message = make("release"); invalidated = true; return message
     }
-    public mutating func interrupt() { invalidated = true }
+    /// Transport loss pauses output until the host's next state. Unlike a release,
+    /// it needs no new epoch: a stalled host keeps the input the channel still holds.
+    public mutating func interrupt() { interrupted = true }
 }
