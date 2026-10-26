@@ -2,6 +2,12 @@
 
 Work in progress, 15 October 2026. Video comparisons use the user's MacBook and **waiMini**. The update requested for Mark's Mac is a separate installation task.
 
+## Direct routes before the relay, 26 October
+
+Every session went through the Helsinki relay, even with both Macs on one home LAN (5 ms apart). From that LAN a UDP STUN round trip to the relay took a median **230 ms** from the MacBook and **124 ms** from the Mini, both behind Clash Verge in TUN mode; the relay saw the home ISP address either way. A relay path is two such legs. The production-relay session benchmark on the MacBook measured RTT p50/p90 **458/551 ms** and input round trip p50/p95 **441/624 ms**, with both ends on `relay/udp/vpn`.
+
+Skipping VPN adapters in WebRTC (`ignoreVPNNetworkAdapter`) was tried first and rejected: under a TUN VPN only the tunnel reaches the internet, so the offer kept no relay candidate and the session failed with no route. Apps that advertise `iceVersion: 3` instead gather on every interface and remove host and reflexive candidates on loopback or VPN tunnels from their one signed SDP. Relay candidates always stay. In one process against the production relay, the filtered offer kept the LAN and relay candidates and ICE selected the direct host pair (RTT 1 ms). A two-Mac LAN session needs both apps updated and has not been measured yet. Sessions across different networks still use Helsinki; a relay inside Russia is the remaining lever for those.
+
 ## Published 0.2.1 (50), 15 October
 
 At the owner's request, build 50 is now the latest public [GitHub release](https://github.com/mikwiseman/wai-remote/releases/tag/v0.2.1) and the update offered by the [main Sparkle feed](https://waiwai.is/remote/updates/appcast.xml). The previous main-feed item was 0.2.0 (3); builds through 49 were published only in separate preview feeds. That explains why a 0.2.0 installation using the main feed had no newer version to find.
