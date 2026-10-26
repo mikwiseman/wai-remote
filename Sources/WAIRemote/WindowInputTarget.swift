@@ -92,21 +92,29 @@ struct WindowInputTarget: Equatable {
     struct Delivery {
         var frame: (WindowInputTarget) -> CGRect?
         var frontmostPID: () -> pid_t?
+        var transient: (WindowInputTarget, CGPoint) -> Bool
         var prepare: (WindowInputTarget) -> Void
         var pointer: (pid_t, CGEvent) -> Void
         var pause: (TimeInterval) -> Void
         static let system = Delivery(frame: { $0.frame },
             frontmostPID: { NSWorkspace.shared.frontmostApplication?.processIdentifier },
+            transient: { $0.isTransient(at: $1) },
             prepare: { $0.prepareWindow() }, pointer: { WindowInputTarget.postPointer?($0, $1) },
             pause: { Thread.sleep(forTimeInterval: $0) })
     }
-    func post(_ event: CGEvent, permitted: () -> Bool, delivery: Delivery = .system) {
-        guard permitted(), delivery.frame(self) != nil else { return }
+    /// `hover` places the pointer over the target first, for a press that no
+    /// move preceded (touch taps). Hover-armed controls ignore a bare press.
+    func post(_ event: CGEvent, permitted: () -> Bool, hover: Bool = false, delivery: Delivery = .system) {
+        // A point inside a window does not move with the window. Address the
+        // event with the geometry the user aimed at, even if activation moves it.
+        guard permitted(), let frame = delivery.frame(self), address(event, frame: frame) else { return }
         let down = [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(event.type)
-        // An active app needs no synthetic activation. An off-window primer
-        // here dismisses its open menus/popovers before the real click arrives.
-        if down && delivery.frontmostPID() != pid {
-            delivery.prepare(self)
+        var primed = false
+        // An active app needs no synthetic activation. An open menu or popover is
+        // already tracking, and an off-window primer would dismiss it first.
+        if down && delivery.frontmostPID() != pid { delivery.prepare(self) }
+        if down && delivery.frontmostPID() != pid && !delivery.transient(self, event.location) {
+            primed = true
             // Chromium also requires a complete background activation gesture.
             // The primer stays outside the window, so it hits no real control.
             // Its group is shared with the actual down/up; never post globally.
@@ -117,7 +125,7 @@ struct WindowInputTarget: Equatable {
                 (.leftMouseUp, CGPoint(x: -1, y: -1), 2, 0.1)
             ]
             for (type, point, phase, delay) in steps {
-                guard permitted(), let frame = delivery.frame(self),
+                guard permitted(), delivery.frame(self) != nil,
                       let primer = CGEvent(mouseEventSource: nil, mouseType: type,
                                            mouseCursorPosition: point, mouseButton: .left) else { return }
                 primer.flags = event.flags
@@ -129,9 +137,13 @@ struct WindowInputTarget: Equatable {
                 delivery.pause(delay)
             }
         }
-        // Activation may move a window or lay out a sheet. Recompute the local
-        // point immediately before delivery instead of keeping its old origin.
-        guard permitted(), let frame = delivery.frame(self), address(event, frame: frame) else { return }
+        if down && hover && !primed, let move = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved,
+                                                       mouseCursorPosition: event.location, mouseButton: .left) {
+            move.flags = event.flags
+            move.setIntegerValueField(CGEventField(rawValue: 58)!, value: event.getIntegerValueField(CGEventField(rawValue: 58)!))
+            if address(move, frame: frame) { delivery.pointer(pid, move) }
+        }
+        guard permitted(), delivery.frame(self) != nil else { return }
         switch event.type {
         case .keyDown, .keyUp, .flagsChanged: event.postToPid(pid)
         default:
@@ -159,40 +171,68 @@ struct WindowInputTarget: Equatable {
         if pid == ProcessInfo.processInfo.processIdentifier && !Thread.isMainThread {
             return DispatchQueue.main.sync { button(at: point) }
         }
-        guard let frame, frame.contains(point) else { return nil }
-        guard let windowNumber = Self.windowNumber else { return nil }
+        guard let frame, frame.contains(point), let hit = element(at: point) else { return nil }
+        return button(climbingFrom: hit, at: point)
+    }
+    /// The app's own hit test returns the topmost element, so sheets, overlays and
+    /// web modals win over the controls they cover, whatever their tree order.
+    private func element(at point: CGPoint) -> AXUIElement? {
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.05)
-        var windows: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &windows) == .success,
-              let list = windows as? [AXUIElement],
-              let window = list.first(where: { var id: CGWindowID = 0; return windowNumber($0, &id) == .success && id == windowID }) else { return nil }
-        // App-level hit testing can be unimplemented and may follow occlusion.
-        // Inspect only the selected window, with bounded work on a background queue.
-        let deadline = ProcessInfo.processInfo.systemUptime + 0.05
-        let names = [kAXRoleAttribute, kAXPositionAttribute, kAXSizeAttribute, kAXChildrenAttribute, kAXEnabledAttribute] as CFArray
-        var pending = [window], visited = 0
-        while let element = pending.popLast(), visited < 128, ProcessInfo.processInfo.systemUptime < deadline {
-            visited += 1
+        var hit: AXUIElement?
+        return AXUIElementCopyElementAtPosition(app, Float(point.x), Float(point.y), &hit) == .success ? hit : nil
+    }
+    /// The hit is often a title or image inside the button. Climb a few parents
+    /// to an enabled button of this window; anything else gets ordinary events.
+    func button(climbingFrom hit: AXUIElement, at point: CGPoint) -> Button? {
+        guard let windowNumber = Self.windowNumber else { return nil }
+        let names = [kAXRoleAttribute, kAXPositionAttribute, kAXSizeAttribute, kAXEnabledAttribute, kAXWindowAttribute, kAXParentAttribute] as CFArray
+        var element = hit
+        for _ in 0...3 {
             AXUIElementSetMessagingTimeout(element, 0.05)
             var raw: CFArray?
             guard AXUIElementCopyMultipleAttributeValues(element, names, [], &raw) == .success,
-                  let values = raw as? [AnyObject], values.count == 5 else { continue }
-            var origin = CGPoint.zero, size = CGSize.zero
-            let positioned = CFGetTypeID(values[1]) == AXValueGetTypeID() && CFGetTypeID(values[2]) == AXValueGetTypeID() &&
-                AXValueGetValue(values[1] as! AXValue, .cgPoint, &origin) && AXValueGetValue(values[2] as! AXValue, .cgSize, &size)
-            let bounds = CGRect(origin: origin, size: size)
-            if positioned, size.width > 0, size.height > 0, !bounds.contains(point) { continue }
-            if values[0] as? String == kAXButtonRole, positioned, bounds.contains(point), values[4] as? Bool == true {
-                var actions: CFArray?
-                guard AXUIElementCopyActionNames(element, &actions) == .success,
-                      (actions as? [String])?.contains(kAXPressAction) == true else { continue }
+                  let values = raw as? [AnyObject], values.count == 6 else { return nil }
+            if values[0] as? String == kAXButtonRole, values[3] as? Bool == true, let bounds = Self.rect(values[1], values[2]),
+               bounds.contains(point), CFGetTypeID(values[4]) == AXUIElementGetTypeID() {
+                var id: CGWindowID = 0, actions: CFArray?
+                guard windowNumber(values[4] as! AXUIElement, &id) == .success, id == windowID,
+                      AXUIElementCopyActionNames(element, &actions) == .success,
+                      (actions as? [String])?.contains(kAXPressAction) == true else { return nil }
+                let pressed = element
                 return Button(frame: bounds, requiresMainThread: pid == ProcessInfo.processInfo.processIdentifier, action: {
-                    AXUIElementPerformAction(element, kAXPressAction as CFString) == .success
+                    AXUIElementPerformAction(pressed, kAXPressAction as CFString) == .success
                 })
             }
-            if let children = values[3] as? [AXUIElement] { pending.append(contentsOf: children.reversed()) }
+            guard CFGetTypeID(values[5]) == AXUIElementGetTypeID() else { return nil }
+            element = values[5] as! AXUIElement
         }
         return nil
+    }
+    private static func rect(_ position: AnyObject, _ size: AnyObject) -> CGRect? {
+        var origin = CGPoint.zero, extent = CGSize.zero
+        guard CFGetTypeID(position) == AXValueGetTypeID(), CFGetTypeID(size) == AXValueGetTypeID(),
+              AXValueGetValue(position as! AXValue, .cgPoint, &origin), AXValueGetValue(size as! AXValue, .cgSize, &extent),
+              extent.width > 0, extent.height > 0 else { return nil }
+        return CGRect(origin: origin, size: extent)
+    }
+    /// Menus and pop-ups sit above the normal window layer; popovers and some
+    /// menus are only recognizable by their accessibility role.
+    func isTransient(at point: CGPoint) -> Bool {
+        if let windows = CGWindowListCopyWindowInfo(.optionIncludingWindow, windowID) as? [[String: Any]],
+           let window = windows.first(where: { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == windowID }),
+           ((window[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0) > 0 { return true }
+        let names = [kAXRoleAttribute, kAXParentAttribute] as CFArray
+        var element = element(at: point)
+        for _ in 0..<8 {
+            guard let current = element else { return false }
+            AXUIElementSetMessagingTimeout(current, 0.05)
+            var raw: CFArray?
+            guard AXUIElementCopyMultipleAttributeValues(current, names, [], &raw) == .success,
+                  let values = raw as? [AnyObject], values.count == 2 else { return false }
+            if let role = values[0] as? String, [kAXMenuRole, "AXPopover"].contains(role) { return true }
+            element = CFGetTypeID(values[1]) == AXUIElementGetTypeID() ? (values[1] as! AXUIElement) : nil
+        }
+        return false
     }
 }

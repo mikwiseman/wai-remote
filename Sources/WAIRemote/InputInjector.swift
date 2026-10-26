@@ -47,6 +47,7 @@ private final class InjectedEvents {
     private var lastClickDestination = InputDestination.unavailable
     private var desktop = DesktopInputTarget()
     private var lastPoint = CGPoint.zero
+    private var hovered: CGPoint?
     private var clickSequence = ClickSequence()
     private var clickCounts: [Int: Int] = [:]
     private var windowButton: WindowInputTarget.Button?
@@ -58,12 +59,12 @@ private final class InjectedEvents {
     var excludedWindows = Set<CGWindowID>()
     var isCurrent: () -> Bool = { true }
     var allowed: Bool { CGPreflightPostEventAccess() }
-    private func post(_ event: CGEvent?, to target: InputDestination? = nil, releasing: Bool = false) {
+    private func post(_ event: CGEvent?, to target: InputDestination? = nil, releasing: Bool = false, hover: Bool = false) {
         guard releasing || isCurrent() else { return }
         event?.setIntegerValueField(.eventSourceUserData, value: 0x574149)
         guard let event else { return }
         switch target ?? destination {
-        case .window(let window): window.post(event, permitted: { releasing || isCurrent() })
+        case .window(let window): window.post(event, permitted: { releasing || isCurrent() }, hover: hover)
         case .system: event.post(tap: .cghidEventTap)
         case .unavailable: break
         }
@@ -147,7 +148,9 @@ private final class InjectedEvents {
                     event?.setIntegerValueField(.mouseEventDeltaX, value: Int64((p.x - previousPoint.x).rounded()))
                     event?.setIntegerValueField(.mouseEventDeltaY, value: Int64((p.y - previousPoint.y).rounded()))
                 }
-                post(event)
+                // Taps from touch viewers arrive without a preceding move.
+                post(event, hover: action == "down" && hovered != p)
+                hovered = p
                 if action == "up" { buttons.remove(b); clickCounts[b] = nil }
                 if action == "move" && !buttons.isEmpty { clickSequence.reset() }
             }
