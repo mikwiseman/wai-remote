@@ -133,7 +133,7 @@ private final class InjectedEvents {
                     buttons.insert(b)
                     windowGesture = Int64(DispatchTime.now().uptimeNanoseconds)
                     clickCounts[b] = clickSequence.down(x: p.x, y: p.y, button: b,
-                        now: ProcessInfo.processInfo.systemUptime, interval: NSEvent.doubleClickInterval)
+                        now: ProcessInfo.processInfo.systemUptime, interval: NSEvent.doubleClickInterval, reported: m.clickCount)
                 }
                 if action == "up" && !buttons.contains(b) { return }
                 let type: CGEventType = action == "down" ? down : action == "up" ? up : buttons.isEmpty ? .mouseMoved : drag

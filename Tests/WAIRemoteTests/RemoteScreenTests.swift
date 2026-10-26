@@ -133,6 +133,21 @@ final class RemoteScreenTests: XCTestCase {
         XCTAssertEqual(model.operations.map(\.modifiers), [["Shift"], []])
     }
 
+    func testDoubleClickCarriesTheViewersClickCount() throws {
+        let model = InputRecorder(identity: DeviceIdentity())
+        let screen = RemoteScreenView(model: model)
+        screen.frame = NSRect(x: 0, y: 0, width: 1920, height: 1080)
+        for count in [1, 2] {
+            for type: NSEvent.EventType in [.leftMouseDown, .leftMouseUp] {
+                let event = try XCTUnwrap(NSEvent.mouseEvent(with: type, location: NSPoint(x: 100, y: 100), modifierFlags: [],
+                    timestamp: 0, windowNumber: 0, context: nil, eventNumber: 0, clickCount: count, pressure: 1))
+                if type == .leftMouseDown { screen.mouseDown(with: event) } else { screen.mouseUp(with: event) }
+            }
+        }
+        XCTAssertEqual(model.operations.map(\.clickCount), [1, nil, 2, nil])
+        XCTAssertEqual(model.operations.map(\.action), ["down", "up", "down", "up"])
+    }
+
     func testCommandEquivalentReleasesItsKeyWithoutWaitingForKeyUp() throws {
         _ = NSApplication.shared
         let model = InputRecorder(identity: DeviceIdentity())

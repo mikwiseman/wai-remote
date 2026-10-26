@@ -51,6 +51,7 @@ public struct WireMessage: Codable, Sendable {
     public var x: Double?
     public var y: Double?
     public var button: Int?
+    public var clickCount: Int?
     public var deltaX: Double?
     public var deltaY: Double?
     public var key: String?

@@ -57,6 +57,14 @@ let touchStart:{x:number;y:number;t:number}|undefined,dragging=false,dragButton=
 let pinchDistance=0,pinchZoom=1,touchMoved=false;
 let navigationGesture:'pending'|'pan'|'zoom'|undefined,navigationStart:Point|undefined;
 let invalidated=false;
+// Chromium reports PointerEvent.detail as 0 on pointerdown, so count clicks
+// here, where they happen. Network delay must not merge or split them.
+let lastPress:{x:number;y:number;t:number;button:number;count:number}|undefined;
+function clickCount(event:PointerEvent,button:number){
+  const now=performance.now(),slop=event.pointerType==='touch'?22:4;
+  const count=lastPress&&lastPress.button===button&&now-lastPress.t<=500&&Math.hypot(event.clientX-lastPress.x,event.clientY-lastPress.y)<=slop?Math.min(lastPress.count+1,3):1;
+  lastPress={x:event.clientX,y:event.clientY,t:now,button,count};return count;
+}
 const pressedPhysical=new Set<string>();
 
 function updateConnectButton(){
@@ -376,7 +384,7 @@ canvas.addEventListener('pointerdown',event=>{
     longPress=window.setTimeout(()=>{if(touchPointers.size===1&&mode==='control'){dragging=true;dragButton=0;send('pointer',{action:'down',...lastCursor,button:0});}},400);
   }else{
     if(!matchMedia('(pointer:coarse)').matches){el('typingPanel').classList.add('hidden');typing.focus({preventScroll:true});}
-    lastCursor=locationPoint(event);send('pointer',{action:'down',...lastCursor,button:event.button,modifiers:modifiers(event)});dragging=true;dragButton=event.button;
+    lastCursor=locationPoint(event);send('pointer',{action:'down',...lastCursor,button:event.button,modifiers:modifiers(event),clickCount:clickCount(event,event.button)});dragging=true;dragButton=event.button;
   }
 });
 canvas.addEventListener('pointermove',event=>{
@@ -419,7 +427,7 @@ canvas.addEventListener('pointerup',event=>{
     if(mode==='draw'&&el<HTMLSelectElement>('tool').value==='eraser'){const ids=[...erasingIDs];erasingIDs.clear();erasePoint=undefined;eraseObjects(ids);}
     else if(preview){const stroke=preview;pendingStrokes.set(stroke.id,stroke);send('strokeEnd',{strokeID:stroke.id});preview=undefined;currentStrokeID=undefined;}
     else if(mode==='control'&&count<2){
-      if(event.pointerType==='touch'&&!dragging&&!touchMoved&&touchStart&&performance.now()-touchStart.t<500){send('pointer',{action:'down',...lastCursor,button:0});send('pointer',{action:'up',...lastCursor,button:0});}
+      if(event.pointerType==='touch'&&!dragging&&!touchMoved&&touchStart&&performance.now()-touchStart.t<500){send('pointer',{action:'down',...lastCursor,button:0,clickCount:clickCount(event,0)});send('pointer',{action:'up',...lastCursor,button:0});}
       else if(dragging)send('pointer',{action:'up',...lastCursor,button:event.pointerType==='touch'?0:event.button,modifiers:modifiers(event)});
     }
     activePointer=undefined;dragging=false;touchStart=undefined;

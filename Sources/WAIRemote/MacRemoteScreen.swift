@@ -160,7 +160,7 @@ final class RemoteScreenView: NSView, NSTextInputClient {
         if action == "down" { window?.makeFirstResponder(self); pointerDown = true }
         if model.canDraw, button == 0 {
             switch action { case "down": model.beginStroke(at: point); case "move" where pointerDown: model.appendStroke(at: point); case "up": model.endStroke(); default: break }
-        } else { model.pointer(action, at: point, button: button, modifiers: modifiers(event)) }
+        } else { model.pointer(action, at: point, button: button, modifiers: modifiers(event), clickCount: action == "down" ? event.clickCount : nil) }
         if action == "up" { pointerDown = false }
     }
     override func mouseDown(with event: NSEvent) { pointer("down", event) }
