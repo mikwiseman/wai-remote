@@ -14,9 +14,6 @@ final class PeerTransport: NSObject, RTCPeerConnectionDelegate, RTCDataChannelDe
     var onState: ((RTCPeerConnectionState) -> Void)?
     private var closed = false
     private var statisticsTimer: Timer?
-    private var videoSender: RTCRtpSender?
-    private var screenQuality = ScreenQualityController()
-    private var statisticsPending = false
     private var opened = false
     var isReady: Bool { !closed && channel?.readyState == .open }
     init(factory: RTCPeerConnectionFactory, source: RTCVideoSource, ice: ICEConfiguration, clipboard: ClipboardSync = .init()) {
@@ -40,31 +37,18 @@ final class PeerTransport: NSObject, RTCPeerConnectionDelegate, RTCDataChannelDe
         pc = factory.peerConnection(with: config, constraints: RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil), delegate: self)
         PerformanceLog.startNetworkTrace(pc, role: "host")
         let track = factory.videoTrack(with: source, trackId: "screen")
-        videoSender = pc.add(track, streamIds: ["wai-screen"])
-        if let videoSender { ScreenVideoPolicy.configure(videoSender) }
+        if let sender = pc.add(track, streamIds: ["wai-screen"]) { ScreenVideoPolicy.configure(sender) }
         for transceiver in pc.transceivers where transceiver.mediaType == .video {
             transceiver.setCodecPreferences(ScreenVideoPolicy.codecs(factory.rtpSenderCapabilities(forKind: "video").codecs))
         }
         _ = pc.setBweMinBitrateBps(nil, currentBitrateBps: 4_000_000, maxBitrateBps: 32_000_000)
     }
     private func startMeasurements() {
-        guard statisticsTimer == nil else { return }
+        guard PerformanceLog.enabled, statisticsTimer == nil else { return }
         let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
-            guard let self, !self.closed, !self.statisticsPending else { return }
-            self.statisticsPending = true
+            guard let self, !self.closed else { return }
             let buffered = self.channel?.bufferedAmount ?? 0
-            self.pc.statistics { [weak self] report in
-                PerformanceLog.record(report, role: "host", buffered: buffered)
-                DispatchQueue.main.async {
-                    guard let self, !self.closed else { return }
-                    self.statisticsPending = false
-                    if let fps = self.screenQuality.sample(report, now: ProcessInfo.processInfo.systemUptime),
-                       let sender = self.videoSender {
-                        ScreenVideoPolicy.configure(sender, frameRate: fps)
-                        PerformanceLog.record("screen-quality", ["fps": fps])
-                    }
-                }
-            }
+            self.pc.statistics { report in PerformanceLog.record(report, role: "host", buffered: buffered) }
         }
         statisticsTimer = timer
         RunLoop.main.add(timer, forMode: .common)

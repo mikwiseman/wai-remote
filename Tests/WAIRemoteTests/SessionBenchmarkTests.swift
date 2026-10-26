@@ -65,8 +65,7 @@ final class SessionBenchmarkTests: XCTestCase {
                   message["type"] as? String == "performanceAck", let id = message["id"] as? String else { return }
             input.acknowledged(id)
         }
-        let statistics = Statistics(host: try XCTUnwrap(child(host, "pc")), viewer: try XCTUnwrap(child(viewer, "peer")),
-                                    sender: child(host, "videoSender"))
+        let statistics = Statistics(host: try XCTUnwrap(child(host, "pc")), viewer: try XCTUnwrap(child(viewer, "peer")))
         // HostModel starts capture once the interaction channel opens.
         let start = ProcessInfo.processInfo.systemUptime + 0.25
         let played = expectation(description: "Desktop timeline played")
@@ -145,7 +144,6 @@ final class SessionBenchmarkTests: XCTestCase {
                     "lost": Bench.round(delta(a.viewer, b.viewer, "packetsLost"), 0),
                     "nack": Bench.round(delta(a.viewer, b.viewer, "nackCount"), 0), "pli": Bench.round(delta(a.viewer, b.viewer, "pliCount"), 0),
                     "jitterBufferMs": Bench.round(buffered > 0 ? delta(a.viewer, b.viewer, "jitterBufferDelay").map { $0 / buffered * 1000 } : nil, 0),
-                    "maxFps": b.maxFramerate.map { $0 as Any } ?? NSNull(),
                     "pair": "\(b.host["local"] ?? "-") > \(b.host["remote"] ?? "-")",
                     "limitation": b.host["qualityLimitationReason"] ?? NSNull()]
         }
@@ -322,17 +320,16 @@ private final class Screen: NSObject, RTCVideoRenderer, @unchecked Sendable {
 }
 
 private final class Statistics: @unchecked Sendable {
-    struct Sample { let time: Double; let maxFramerate: Int?; var host: [String: Any] = [:], viewer: [String: Any] = [:] }
-    private let host: RTCPeerConnection, viewer: RTCPeerConnection, sender: RTCRtpSender?
+    struct Sample { let time: Double; var host: [String: Any] = [:], viewer: [String: Any] = [:] }
+    private let host: RTCPeerConnection, viewer: RTCPeerConnection
     private let lock = NSLock()
     private var samples: [Sample] = []
-    init(host: RTCPeerConnection, viewer: RTCPeerConnection, sender: RTCRtpSender?) { self.host = host; self.viewer = viewer; self.sender = sender }
+    init(host: RTCPeerConnection, viewer: RTCPeerConnection) { self.host = host; self.viewer = viewer }
     func snapshot() -> [Sample] { lock.lock(); defer { lock.unlock() }; return samples }
-    /// Main thread, where PeerTransport also changes the sender's frame-rate cap.
     func sample() {
         lock.lock()
         let index = samples.count
-        samples.append(Sample(time: ProcessInfo.processInfo.systemUptime, maxFramerate: sender?.parameters.encodings.first?.maxFramerate?.intValue))
+        samples.append(Sample(time: ProcessInfo.processInfo.systemUptime))
         lock.unlock()
         host.statistics { [self] report in let values = Self.values(report, "outbound-rtp"); lock.lock(); samples[index].host = values; lock.unlock() }
         viewer.statistics { [self] report in let values = Self.values(report, "inbound-rtp"); lock.lock(); samples[index].viewer = values; lock.unlock() }
