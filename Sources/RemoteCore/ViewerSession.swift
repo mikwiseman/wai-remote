@@ -38,8 +38,10 @@ public struct ViewerSession {
         generation += 1; mode = next
         var message = make("mode"); message?.mode = next; return message
     }
+    /// Wait for the host's new epoch only if the release reached it. An interrupted
+    /// viewer already lifted its held input, and the host lifts it on the stall.
     public mutating func release() -> WireMessage? {
-        let message = make("release"); invalidated = true; return message
+        let message = make("release"); if message != nil { invalidated = true }; return message
     }
     /// Transport loss pauses output until the host's next state. Unlike a release,
     /// it needs no new epoch: a stalled host keeps the input the channel still holds.

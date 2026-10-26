@@ -82,6 +82,18 @@ final class ViewerTests: XCTestCase {
         XCTAssertFalse(host.stalled)
     }
 
+    func testReleaseDuringAnInterruptionDoesNotWaitForAnEpochTheHostNeverStarts() throws {
+        let host = SessionMachine(surface: .init(id: "s", width: 1280, height: 800))
+        var viewer = ViewerSession()
+        _ = try viewer.accept(host.state)
+        XCTAssertTrue(host.handle(try XCTUnwrap(viewer.make("heartbeat")), now: 1).accepted)
+        viewer.interrupt()
+        XCTAssertNil(viewer.release(), "Nothing reaches the host while the transport is down.")
+        XCTAssertTrue(host.tick(now: 3.1).stateChanged)
+        _ = try viewer.accept(host.state)
+        XCTAssertNotNil(viewer.make("heartbeat"), "An unsent release must not block input until a heartbeat timeout.")
+    }
+
     func testViewOnlyGuestCanFinishDrawingWithoutGainingControl() throws {
         let host = SessionMachine(surface: .init(id: "s", width: 1280, height: 800),
                                   permissions: .init(control: false, annotate: true))
