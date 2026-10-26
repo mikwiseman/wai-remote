@@ -17,8 +17,11 @@ struct ClipboardContent: Codable {
     /// Dictation apps temporarily conceal text to keep it out of clipboard
     /// history. An explicit Paste inserts that text through the input channel,
     /// without exporting it to the remote clipboard or a clipboard cache.
+    /// A background app performs Command-V only while it is in front; typed text always arrives.
+    /// Text is typed, without its formatting. Files and images keep the transfer and Command-V.
     static func textForExplicitInsertion(from board: NSPasteboard) -> String? {
-        guard (board.types ?? []).contains(concealed) else { return nil }
+        let types = board.types ?? []
+        guard !types.contains(.fileURL), !types.contains(where: { NSImage.imageTypes.contains($0.rawValue) }) else { return nil }
         return board.string(forType: .string)
     }
     struct Snapshot {

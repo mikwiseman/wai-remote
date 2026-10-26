@@ -20,7 +20,19 @@ final class ClipboardTests: XCTestCase {
         XCTAssertEqual(ClipboardContent.textForExplicitInsertion(from: source), text)
         XCTAssertEqual(source.changeCount, change, "Insertion must not overwrite the dictation app's temporary clipboard.")
         source.clearContents(); source.setString("previous clipboard restored", forType: .string)
-        XCTAssertNil(ClipboardContent.textForExplicitInsertion(from: source), "Ordinary clipboard contents keep their normal rich paste path.")
+        XCTAssertEqual(ClipboardContent.textForExplicitInsertion(from: source), "previous clipboard restored")
+    }
+
+    func testPasteTypesTextBecauseBackgroundAppsIgnoreCommandV() throws {
+        let source = board(); defer { source.releaseGlobally() }
+        let rich = NSPasteboardItem()
+        rich.setString("Rich text", forType: .string); rich.setData(Data("{\\rtf1 Rich text}".utf8), forType: .rtf)
+        source.writeObjects([rich])
+        XCTAssertEqual(ClipboardContent.textForExplicitInsertion(from: source), "Rich text", "Formatting is traded for text that arrives.")
+        source.clearContents(); source.writeObjects([URL(fileURLWithPath: "/tmp/report.pdf") as NSURL])
+        XCTAssertNil(ClipboardContent.textForExplicitInsertion(from: source), "Files keep the clipboard transfer and Command-V.")
+        source.clearContents(); source.setData(Data([0x4D, 0x4D, 0, 42]), forType: .tiff); source.setString("caption", forType: .string)
+        XCTAssertNil(ClipboardContent.textForExplicitInsertion(from: source), "Images keep the clipboard transfer and Command-V.")
     }
 
     @MainActor
