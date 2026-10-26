@@ -217,6 +217,9 @@ async function createOffer(name:string,token:number,configuration:RTCConfigurati
 
 function send(type:string,fields:Record<string,unknown>={}):boolean{
   if(!host||!channel||channel.readyState!=='open'||invalidated)return false;
+  // Hover can skip a beat; a backlog of stale positions would delay the next
+  // click and then overflow, closing the channel.
+  if(type==='pointer'&&fields.action==='move'&&channel.bufferedAmount>16384)return false;
   if(channel.bufferedAmount>128000){invalidated=true;channel.close();return false;}
   const op:Operation={v:1,type,sessionID:host.sessionID,controllerEpoch:host.controllerEpoch,inputEpoch:host.inputEpoch,modeGeneration:generation,
     surfaceID:host.surface.id,geometryRevision:host.surface.revision,layerEpoch:host.layerEpoch,operationID:crypto.randomUUID(),sequence:sequence++,...fields};

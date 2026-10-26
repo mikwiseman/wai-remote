@@ -14,6 +14,8 @@ final class RemoteScreenTests: XCTestCase {
             operations.filter { $0.type == "key" }.map { ($0.key ?? "", $0.action ?? "", $0.modifiers ?? []) }
         }
         var releases = 0
+        var outgoing: UInt64 = 0
+        override var outgoingBytes: UInt64 { outgoing }
         let host = SessionMachine(surface: Surface(id: "test", width: 1920, height: 1080))
         override var canControl: Bool { true }
         override func releaseInput() { releases += 1; super.releaseInput() }
@@ -146,6 +148,22 @@ final class RemoteScreenTests: XCTestCase {
         }
         XCTAssertEqual(model.operations.map(\.clickCount), [1, nil, 2, nil])
         XCTAssertEqual(model.operations.map(\.action), ["down", "up", "down", "up"])
+    }
+
+    func testCongestedChannelDropsHoverMovesButNeverClicksOrKeys() {
+        let model = InputRecorder(identity: DeviceIdentity())
+        model.outgoing = 20_000
+        model.pointer("move", at: InkPoint(0.2, 0.2))
+        model.pointer("down", at: InkPoint(0.3, 0.3))
+        model.pointer("move", at: InkPoint(0.4, 0.4))
+        model.pointer("up", at: InkPoint(0.5, 0.5))
+        model.key("KeyA")
+        XCTAssertEqual(model.sent, ["pointer 0 down", "pointer 0 up", "key KeyA down", "key KeyA up"],
+                       "A queued backlog of positions must not delay the click or force a reconnect.")
+        XCTAssertEqual(model.lastCursor, InkPoint(0.5, 0.5))
+        model.outgoing = 8_000
+        model.pointer("move", at: InkPoint(0.6, 0.6))
+        XCTAssertEqual(model.sent.last, "pointer 0 move")
     }
 
     func testCommandEquivalentReleasesItsKeyWithoutWaitingForKeyUp() throws {

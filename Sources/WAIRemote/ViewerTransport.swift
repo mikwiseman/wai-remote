@@ -75,6 +75,7 @@ final class ViewerTransport: NSObject, RTCPeerConnectionDelegate, RTCDataChannel
         guard !closed else { return }; gathering.cancel()
         let callback = completion; completion = nil; callback?(result)
     }
+    var bufferedAmount: UInt64 { closed ? 0 : channel.bufferedAmount }
     @discardableResult func send(_ data: Data) -> Bool {
         guard !closed, channel.readyState == .open, channel.bufferedAmount < 128_000, data.count <= 32_768 else { return false }
         return channel.sendData(RTCDataBuffer(data: data, isBinary: false))

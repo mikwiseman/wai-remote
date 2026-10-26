@@ -294,6 +294,9 @@ final class PhoneModel: ObservableObject {
     func pointer(_ action: String, at point: InkPoint, button: Int = 0, dx: Double = 0, dy: Double = 0, clickCount: Int? = nil) {
         // Ending a held button needs no control: it can only release.
         guard action == "up" ? heldButtons.remove(button) != nil : canControl else { return }; lastCursor = point
+        // A congested channel would queue stale drag positions ahead of the
+        // release and then fail a send, forcing a reconnect.
+        if action == "move" && (transport?.bufferedAmount ?? 0) > 16_384 { return }
         if send("pointer", edit: { $0.action = action; $0.x = point.x; $0.y = point.y; $0.button = button; $0.deltaX = min(2000, max(-2000, dx)); $0.deltaY = min(2000, max(-2000, dy)); $0.clickCount = clickCount }),
            action == "down" { heldButtons.insert(button) }
     }

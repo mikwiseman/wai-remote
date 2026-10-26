@@ -520,7 +520,7 @@ final class HostModel: ObservableObject {
             }
         } else {
             if PerformanceLog.enabled, let reason = effects.rejected { rejectedInput[reason, default: 0] += 1 }
-            if m.type != "heartbeat" { sendState(); sendSnapshot() }
+            if effects.resync { sendState(); sendSnapshot() }
         }
     }
     private func apply(_ e: SessionEffects) {

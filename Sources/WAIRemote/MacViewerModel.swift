@@ -253,6 +253,7 @@ class MacViewerModel: ObservableObject {
         for button in heldButtons.sorted() { pointer("up", at: lastCursor, button: button) }
         for key in heldKeys.sorted() { keyEvent(key, action: "up") }
     }
+    var outgoingBytes: UInt64 { transport?.bufferedAmount ?? 0 }
     @discardableResult private func transmit(_ operation: WireMessage?) -> Bool {
         guard let operation, let data = try? JSONEncoder().encode(operation) else { return false }
         if PerformanceLog.enabled && (operation.type == "heartbeat" || operation.type == "pointer" && operation.action != "move") {
@@ -335,6 +336,9 @@ class MacViewerModel: ObservableObject {
     func pointer(_ action: String, at point: InkPoint, button: Int = 0, dx: Double = 0, dy: Double = 0, modifiers: [String] = [], clickCount: Int? = nil) {
         // Ending a held button needs no control: it can only release.
         guard action == "up" ? heldButtons.remove(button) != nil : canControl else { return }; lastCursor = point
+        // A congested channel would queue stale positions ahead of the next click
+        // and then fail a send, forcing a reconnect. Hover can skip a beat.
+        if action == "move" && outgoingBytes > 16_384 { return }
         if send("pointer", edit: { $0.action = action; $0.x = point.x; $0.y = point.y; $0.button = button; $0.deltaX = min(2000, max(-2000, dx)); $0.deltaY = min(2000, max(-2000, dy)); $0.modifiers = modifiers; $0.clickCount = clickCount }),
            action == "down" { heldButtons.insert(button) }
     }

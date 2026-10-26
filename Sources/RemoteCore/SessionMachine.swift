@@ -11,6 +11,7 @@ public final class SessionMachine {
     private var locallyPaused = false
     private var approvedPermissions: Permissions
     private var systemControlAllowed = true
+    private var resynced = false
 
     public init(surface: Surface, permissions: Permissions = .init(), author: String = "remote") {
         self.author = author
@@ -22,7 +23,11 @@ public final class SessionMachine {
 
     public func handle(_ m: WireMessage, now: Double) -> SessionEffects {
         var e = accept(m, now: now)
-        if !e.accepted { e.rejected = rejection(of: m) }
+        if e.accepted { resynced = false; return e }
+        e.rejected = rejection(of: m)
+        // A backlog of hundreds of stale moves must not become hundreds of
+        // snapshots; the burst ends when the viewer's input is accepted again.
+        if m.type != "heartbeat" && !resynced { resynced = true; e.resync = true }
         return e
     }
     private func accept(_ m: WireMessage, now: Double) -> SessionEffects {

@@ -144,4 +144,16 @@ final class SessionMachineTests: XCTestCase {
         host.stop()
         XCTAssertEqual(host.handle(click, now: 2).rejected, "stopped")
     }
+    func testABurstOfStaleMessagesGetsOneResync() {
+        let host = machine()
+        let old = host.state
+        let stale = (0..<500).map { index -> WireMessage in
+            var move = pointer(old); move.action = "move"; move.sequence = index; return move
+        }
+        _ = host.resizeSurface(width: 800, height: 600)
+        XCTAssertEqual(stale.filter { host.handle($0, now: 1).resync }.count, 1, "One state and ink snapshot answers the whole burst.")
+        XCTAssertFalse(host.handle(WireMessage(type: "heartbeat", state: old), now: 1.1).resync)
+        XCTAssertTrue(host.handle(WireMessage(type: "heartbeat", state: host.state), now: 1.2).accepted)
+        XCTAssertTrue(host.handle(stale[0], now: 1.3).resync, "After the viewer caught up, a new stale message is answered again.")
+    }
 }
