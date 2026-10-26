@@ -58,6 +58,8 @@ class MacViewerModel: ObservableObject {
     private var answerAccepted = false
     private var offerStarted = false
     private(set) var lastCursor = InkPoint(0.5, 0.5)
+    private(set) var heldKeys = Set<String>()
+    private var heldButtons = Set<Int>()
     var mode: RemoteMode { session.mode }
     var canControl: Bool { connected && receivedFrame && !connectionInterrupted && !session.invalidated && mode == .control && session.state?.permissions.control == true }
     var canDraw: Bool { connected && receivedFrame && !connectionInterrupted && !session.invalidated && mode == .draw && session.state?.permissions.annotate == true }
@@ -153,7 +155,7 @@ class MacViewerModel: ObservableObject {
             guard let self, self.attempt == token else { return }
             if state == .failed || state == .closed { self.recover(message: "Восстанавливаем соединение…") }
             if state == .disconnected {
-                self.cancelGesture(notify: false); self.session.interrupt()
+                self.liftHeldInput(); self.session.interrupt()
                 self.connectionInterrupted = true; self.receivedFrame = false
                 self.status = "Восстанавливаем соединение…"
                 if self.interruptionTimer == nil {
@@ -236,11 +238,19 @@ class MacViewerModel: ObservableObject {
         if let activity { ProcessInfo.processInfo.endActivity(activity); self.activity = nil }
         connecting = false; connected = false; connectionInterrupted = false; receivedFrame = false; track = nil; session = ViewerSession()
         strokes = []; previews = [:]; snapshot = nil; hiddenIDs = []; erasedIDs = []; activeStroke = nil; selectedID = nil
-        answerAccepted = false; offerStarted = false; gestureRevision += 1
+        answerAccepted = false; offerStarted = false; gestureRevision += 1; heldKeys = []; heldButtons = []
         currentInvite = nil; pendingMeasurements.removeAll(); pasteFailure = nil
         if !message.isEmpty { status = message; detail = "" }
     }
-    func releaseInput() { cancelGesture(notify: true); _ = transmit(session.release()) }
+    /// The explicit release: the host lifts everything and starts a new epoch.
+    func releaseInput() { cancelGesture(notify: true); heldKeys = []; heldButtons = []; _ = transmit(session.release()) }
+    /// Focus left the remote screen. End only what this viewer holds and keep
+    /// the session valid, so the next click needs no round trip to the host.
+    func liftHeldInput() {
+        cancelGesture(notify: true)
+        for button in heldButtons.sorted() { pointer("up", at: lastCursor, button: button) }
+        for key in heldKeys.sorted() { keyEvent(key, action: "up") }
+    }
     @discardableResult private func transmit(_ operation: WireMessage?) -> Bool {
         guard let operation, let data = try? JSONEncoder().encode(operation) else { return false }
         if PerformanceLog.enabled && (operation.type == "heartbeat" || operation.type == "pointer" && operation.action != "move") {
@@ -313,16 +323,18 @@ class MacViewerModel: ObservableObject {
             }
         } catch { disconnect(message: "Не удалось продолжить соединение. Подключитесь снова.") }
     }
-    func changeMode(_ mode: RemoteMode) { cancelGesture(notify: true); _ = transmit(session.changeMode(mode)); selectedID = nil }
+    func changeMode(_ mode: RemoteMode) { liftHeldInput(); _ = transmit(session.changeMode(mode)); selectedID = nil }
     func changeTool(_ value: DrawingTool) { cancelGesture(notify: true); tool = value; selectedID = nil }
     func pointer(_ action: String, at point: InkPoint, button: Int = 0, dx: Double = 0, dy: Double = 0, modifiers: [String] = []) {
-        guard canControl else { return }; lastCursor = point
-        send("pointer") { $0.action = action; $0.x = point.x; $0.y = point.y; $0.button = button; $0.deltaX = min(2000, max(-2000, dx)); $0.deltaY = min(2000, max(-2000, dy)); $0.modifiers = modifiers }
+        // Ending a held button needs no control: it can only release.
+        guard action == "up" ? heldButtons.remove(button) != nil : canControl else { return }; lastCursor = point
+        if send("pointer", edit: { $0.action = action; $0.x = point.x; $0.y = point.y; $0.button = button; $0.deltaX = min(2000, max(-2000, dx)); $0.deltaY = min(2000, max(-2000, dy)); $0.modifiers = modifiers }),
+           action == "down" { heldButtons.insert(button) }
     }
     func rightClick() { pointer("down", at: lastCursor, button: 2); pointer("up", at: lastCursor, button: 2) }
     func keyEvent(_ key: String, action: String, modifiers: [String] = []) {
-        guard canControl else { return }
-        send("key") { $0.key = key; $0.action = action; $0.modifiers = modifiers }
+        guard action == "up" ? heldKeys.remove(key) != nil : canControl else { return }
+        if send("key", edit: { $0.key = key; $0.action = action; $0.modifiers = modifiers }), action == "down" { heldKeys.insert(key) }
     }
     func key(_ key: String, modifiers: [String] = []) {
         guard canControl else { return }

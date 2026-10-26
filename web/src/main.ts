@@ -53,7 +53,7 @@ let live=false,zoom=1,lastCursor:Point={x:.5,y:.5},activePointer:number|undefine
 let currentStrokeID:string|undefined;
 let laserTrail:Array<Point & {time:number}>=[],laserFrame=0;
 const touchPointers=new Map<number,{x:number;y:number}>();
-let touchStart:{x:number;y:number;t:number}|undefined,dragging=false,longPress:number|undefined;
+let touchStart:{x:number;y:number;t:number}|undefined,dragging=false,dragButton=0,longPress:number|undefined;
 let pinchDistance=0,pinchZoom=1,touchMoved=false;
 let navigationGesture:'pending'|'pan'|'zoom'|undefined,navigationStart:Point|undefined;
 let invalidated=false;
@@ -181,7 +181,8 @@ async function createOffer(name:string,token:number,configuration:RTCConfigurati
   peer.onconnectionstatechange=()=>{
     if(token!==connectionToken)return;
     if(peer.connectionState==='failed')recover('Восстанавливаем соединение…');
-    if(peer.connectionState==='disconnected'){release();el('connectionLabel').textContent='Восстанавливаем соединение…';if(!interruptionTimer)interruptionTimer=window.setTimeout(()=>{if(token===connectionToken)recover('Восстанавливаем соединение…');},5000);}
+    // Pause output until the host's next state; the host keeps the epoch.
+    if(peer.connectionState==='disconnected'){lift();invalidated=true;el('connectionLabel').textContent='Восстанавливаем соединение…';if(!interruptionTimer)interruptionTimer=window.setTimeout(()=>{if(token===connectionToken)recover('Восстанавливаем соединение…');},5000);}
   };
   await peer.setLocalDescription(await peer.createOffer());
   await new Promise<void>((resolve,reject)=>{
@@ -342,11 +343,15 @@ function locationPoint(event:PointerEvent):Point{const r=canvas.getBoundingClien
 function cancelGesture(notify:boolean){
   clearTimeout(longPress);
   if(currentStrokeID&&notify)send('strokeCancel',{strokeID:currentStrokeID});
-  if(dragging&&notify)send('pointer',{action:'up',...lastCursor,button:0});
+  if(dragging&&notify)send('pointer',{action:'up',...lastCursor,button:dragButton});
   if(activePointer!==undefined&&canvas.hasPointerCapture(activePointer))canvas.releasePointerCapture(activePointer);
   activePointer=undefined;currentStrokeID=undefined;preview=undefined;dragging=false;touchPointers.clear();touchStart=undefined;navigationGesture=undefined;navigationStart=undefined;erasingIDs.clear();erasePoint=undefined;render();
 }
+// The explicit release starts a new host epoch; only disconnect uses it.
 function release(){if(host&&live){cancelGesture(true);send('release');invalidated=true;pressedPhysical.clear();}}
+// Focus loss ends only what this viewer holds and keeps the session valid,
+// so the first click after returning needs no round trip to the host.
+function lift(){if(host&&live){cancelGesture(true);for(const key of pressedPhysical)send('key',{action:'up',key,modifiers:[]});pressedPhysical.clear();}}
 canvas.addEventListener('contextmenu',event=>event.preventDefault());
 canvas.addEventListener('pointerdown',event=>{
   if(!host||mode==='paused'||invalidated)return;event.preventDefault();
@@ -368,10 +373,10 @@ canvas.addEventListener('pointerdown',event=>{
   }else if(event.pointerType==='touch'){
     touchStart={x:event.clientX,y:event.clientY,t:performance.now()};touchMoved=false;
     if(el<HTMLSelectElement>('touchMode').value==='direct')lastCursor=locationPoint(event);
-    longPress=window.setTimeout(()=>{if(touchPointers.size===1&&mode==='control'){dragging=true;send('pointer',{action:'down',...lastCursor,button:0});}},400);
+    longPress=window.setTimeout(()=>{if(touchPointers.size===1&&mode==='control'){dragging=true;dragButton=0;send('pointer',{action:'down',...lastCursor,button:0});}},400);
   }else{
     if(!matchMedia('(pointer:coarse)').matches){el('typingPanel').classList.add('hidden');typing.focus({preventScroll:true});}
-    lastCursor=locationPoint(event);send('pointer',{action:'down',...lastCursor,button:event.button,modifiers:modifiers(event)});dragging=true;
+    lastCursor=locationPoint(event);send('pointer',{action:'down',...lastCursor,button:event.button,modifiers:modifiers(event)});dragging=true;dragButton=event.button;
   }
 });
 canvas.addEventListener('pointermove',event=>{
@@ -421,7 +426,7 @@ canvas.addEventListener('pointerup',event=>{
   }
   if(canvas.hasPointerCapture(event.pointerId))canvas.releasePointerCapture(event.pointerId);render();
 });
-canvas.addEventListener('pointercancel',()=>release());
+canvas.addEventListener('pointercancel',()=>lift());
 canvas.addEventListener('wheel',event=>{if(mode==='control'&&host){event.preventDefault();send('pointer',{action:'scroll',...locationPoint(event as unknown as PointerEvent),deltaX:Math.max(-2000,Math.min(2000,event.deltaX)),deltaY:Math.max(-2000,Math.min(2000,event.deltaY)),modifiers:modifiers(event)});}},{passive:false});
 
 function sendText(text:string){
@@ -461,4 +466,4 @@ document.addEventListener('keydown',event=>{
   else if(event.key==='Delete'||event.key==='Backspace'){event.preventDefault();if(selectedID)eraseObjects([selectedID]);}
   else if(event.key==='Escape'){event.preventDefault();if(activePointer!==undefined){cancelGesture(true);}else if(selectedID){selectedID=undefined;updateTools();render();}else switchMode('control');}
 });
-window.addEventListener('blur',()=>release());document.addEventListener('visibilitychange',()=>{if(document.hidden)release();});window.addEventListener('pagehide',()=>{release();cleanup();});
+window.addEventListener('blur',()=>lift());document.addEventListener('visibilitychange',()=>{if(document.hidden)lift();});window.addEventListener('pagehide',()=>{release();cleanup();});
