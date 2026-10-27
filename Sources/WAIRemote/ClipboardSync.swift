@@ -67,9 +67,15 @@ final class ClipboardSync {
         open = value; reset()
         if enabled && open { start() }
     }
-    func close() { enabled = false; open = false; reset(); send = nil }
+    /// A deliberate disconnect is not a failed paste.
+    func close() { onPasteFailure = nil; enabled = false; open = false; reset(); send = nil }
     private func reset() {
         PerformanceLog.record("clipboard-state", ["enabled": enabled, "open": open])
+        // A pause, permission loss or closed channel ends the transfer; an
+        // explicit Paste must say so instead of never arriving.
+        if preparingPaste || outgoing?.completion != nil {
+            onPasteFailure?("Соединение прервалось во время вставки. Повторите её.")
+        }
         generation = UUID(); timer?.invalidate(); timer = nil
         incoming = nil; outgoing = nil; pendingAck = nil; pendingProgress = nil; peerWindow = 0
         preparingPaste = false

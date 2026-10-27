@@ -522,6 +522,51 @@ final class ClipboardTests: XCTestCase {
         XCTAssertFalse(beganTransfer)
     }
 
+    @MainActor
+    func testInterruptedPasteIsReportedInsteadOfSilentlyDropped() async throws {
+        let source = board(); defer { source.releaseGlobally() }
+        let reading = DispatchSemaphore(value: 1)
+        let sync = ClipboardSync(pasteboard: source, readSnapshot: { board, change in
+            _ = reading.wait(timeout: .now() + 2); reading.signal()
+            return try ClipboardContent.snapshot(from: board, expectedChange: change)
+        })
+        var notices: [String] = [], begins = 0
+        sync.onPasteFailure = { notices.append($0) }
+        sync.send = {
+            if let packet = try? JSONDecoder().decode(ClipboardSync.Packet.self, from: $0), packet.type == "begin" { begins += 1 }
+            return true
+        }
+        sync.setEnabled(true); sync.setOpen(true)
+        defer { reading.signal(); sync.close() }
+        let hello = try JSONEncoder().encode(ClipboardSync.Packet(type: "hello"))
+        sync.receive(hello)
+        source.clearContents(); source.setData(Data(repeating: 7, count: 50_000), forType: .png)
+        sync.pushCurrent { XCTFail("An interrupted transfer must not paste.") }
+        for _ in 0..<200 where begins == 0 { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(begins, 1)
+        // The host pauses its clipboard whenever its session stalls or pauses.
+        sync.receive(try JSONEncoder().encode(ClipboardSync.Packet(type: "pause")))
+        XCTAssertEqual(notices, ["Соединение прервалось во время вставки. Повторите её."],
+                       "A paste in flight must not vanish without telling the user.")
+
+        sync.receive(hello)
+        _ = reading.wait(timeout: .now() + 1) // The next read waits until released.
+        source.clearContents(); source.setData(Data(repeating: 8, count: 50_000), forType: .png)
+        sync.pushCurrent { XCTFail("A paste prepared before control was lost must not paste.") }
+        sync.setEnabled(false)
+        XCTAssertEqual(notices.count, 2, "A paste still being read is just as pending.")
+        reading.signal()
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(notices.count, 2)
+
+        sync.setEnabled(true); sync.receive(hello); begins = 0
+        source.clearContents(); source.setData(Data(repeating: 9, count: 50_000), forType: .png)
+        sync.pushCurrent { XCTFail("A closed connection must not paste.") }
+        for _ in 0..<200 where begins == 0 { try await Task.sleep(for: .milliseconds(10)) }
+        sync.close()
+        XCTAssertEqual(notices.count, 2, "A deliberate disconnect is not a failed paste.")
+    }
+
     func testReceivedFilesCacheIsBoundedAndKeepsCurrentPasteboardFiles() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
