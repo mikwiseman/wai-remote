@@ -19,6 +19,8 @@ final class RemoteScreenTests: XCTestCase {
         let host = SessionMachine(surface: Surface(id: "test", width: 1920, height: 1080))
         override var canControl: Bool { true }
         override func releaseInput() { releases += 1; super.releaseInput() }
+        var pastes = 0
+        override func paste() { pastes += 1 }
         var sent: [String] { operations.map { "\($0.type) \($0.key ?? String($0.button ?? -1)) \($0.action ?? "")" } }
         override func send(_ type: String, edit: (inout WireMessage) -> Void = { _ in }) -> Bool {
             var message = WireMessage(type: type, state: host.state)
@@ -121,6 +123,33 @@ final class RemoteScreenTests: XCTestCase {
         XCTAssertEqual(model.releases, 0)
         XCTAssertTrue(screen.performKeyEquivalent(with: try shortcut(53, "\u{1b}", [.command, .option])))
         XCTAssertEqual(model.releases, 1, "Command-Option-Escape is the explicit release.")
+    }
+
+    func testOnlyExactLocalShortcutsStayOnThisMac() throws {
+        let model = InputRecorder(identity: DeviceIdentity())
+        let (screen, window) = focusedScreen(model)
+        defer { window.close() }
+        func shortcut(_ code: UInt16, _ character: String, _ flags: NSEvent.ModifierFlags) throws -> NSEvent {
+            try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0,
+                windowNumber: window.windowNumber, context: nil, characters: character,
+                charactersIgnoringModifiers: character, isARepeat: false, keyCode: code))
+        }
+        for flags: NSEvent.ModifierFlags in [[.command, .shift], [.command, .option], [.command, .control]] {
+            XCTAssertTrue(screen.performKeyEquivalent(with: try shortcut(12, "q", flags)), "Only plain Command-Q quits the viewer.")
+        }
+        for flags: NSEvent.ModifierFlags in [[.command, .option], [.command, .control]] {
+            XCTAssertTrue(screen.performKeyEquivalent(with: try shortcut(9, "v", flags)))
+        }
+        XCTAssertTrue(screen.performKeyEquivalent(with: try shortcut(53, "\u{1b}", [.command, .option, .control])))
+        XCTAssertEqual(model.releases, 0, "Only exact Command-Option-Escape and Command-Q release input.")
+        XCTAssertEqual(model.pastes, 0, "Option-Command-V and Control-Command-V are the remote app's shortcuts, not a paste.")
+        XCTAssertEqual(model.input.filter { $0.action == "down" }.map(\.key), ["KeyQ", "KeyQ", "KeyQ", "KeyV", "KeyV", "Escape"])
+        XCTAssertEqual(model.input.filter { $0.action == "down" }.map(\.modifiers),
+                       [["Meta", "Shift"], ["Meta", "Alt"], ["Meta", "Control"], ["Meta", "Alt"], ["Meta", "Control"], ["Meta", "Control", "Alt"]])
+        XCTAssertTrue(screen.performKeyEquivalent(with: try shortcut(9, "v", .command)))
+        XCTAssertEqual(model.pastes, 1, "Plain Command-V keeps the explicit paste path.")
+        XCTAssertFalse(screen.performKeyEquivalent(with: try shortcut(12, "q", .command)))
+        XCTAssertEqual(model.releases, 1, "Plain Command-Q stays local and releases input first.")
     }
 
     func testPointerCarriesCurrentModifiersAfterAShortcut() throws {

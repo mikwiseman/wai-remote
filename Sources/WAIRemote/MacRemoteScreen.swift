@@ -180,18 +180,19 @@ final class RemoteScreenView: NSView, NSTextInputClient {
     }
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         guard window?.firstResponder === self, model.canControl, event.modifierFlags.contains(.command) else { return false }
+        // Exact modifier sets: every other combination belongs to the remote Mac.
+        let flags = event.modifierFlags.intersection([.command, .control, .option, .shift])
         // Always leave an escape hatch and the app's own Quit shortcut on this Mac.
-        if (event.keyCode == 53 && event.modifierFlags.contains(.option)) || event.keyCode == 12 {
+        if (flags == [.command, .option] && event.keyCode == 53) || (flags == .command && event.keyCode == 12) {
             model.releaseInput(); window?.makeFirstResponder(nil)
             return event.keyCode != 12
         }
-        let flags = event.modifierFlags.intersection([.command, .control, .option, .shift])
         if (flags == .command && [4, 46, 43, 29].contains(event.keyCode)) ||
             (flags == [.command, .option] && event.keyCode == 4) {
             model.liftHeldInput()
             return false
         }
-        if event.keyCode == 9 && !event.modifierFlags.contains(.shift) {
+        if flags == .command && event.keyCode == 9 {
             paste(nil); return true
         }
         guard let code = InputInjector.keyCodes.first(where: { $0.value == event.keyCode })?.key else { return false }
