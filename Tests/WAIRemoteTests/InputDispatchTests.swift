@@ -63,6 +63,28 @@ final class InputDispatchTests: XCTestCase {
         XCTAssertEqual(delivered, ["release", "new input"])
     }
 
+    func testLiftingHeldInputKeepsQueuedKeysAndTextInOrder() async {
+        let delivery = InputDeliveryQueue()
+        let entered = expectation(description: "Slow background click started")
+        let finished = expectation(description: "Later input delivered")
+        let resume = DispatchSemaphore(value: 0)
+        var delivered: [String] = []
+        delivery.submit { current in
+            entered.fulfill()
+            _ = resume.wait(timeout: .now() + 2) // The primer takes about 170 ms.
+            if current() { delivered.append("click") }
+        }
+        await fulfillment(of: [entered], timeout: 1)
+        delivery.submit { current in if current() { delivered.append("key") } }
+        delivery.submit { current in if current() { delivered.append("text") } }
+        delivery.lift { delivered.append("lift held") }
+        delivery.submit { current in if current() { delivered.append("late input") }; finished.fulfill() }
+        resume.signal()
+        await fulfillment(of: [finished], timeout: 2)
+        XCTAssertEqual(delivered, ["click", "key", "text", "lift held", "late input"],
+                       "A stall or pause lifts what is held; it must not discard typing that was already accepted.")
+    }
+
     func testMouseUpCanArriveWhileAppKitTracksTheMouseDown() throws {
         _ = NSApplication.shared
         let factory = RTCPeerConnectionFactory()

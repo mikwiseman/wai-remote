@@ -11,9 +11,10 @@ final class InputInjector {
     private let events = InjectedEvents()
     func setWindowTarget(_ target: WindowInputTarget?) { resetSession(); windowTarget = target; independentPointer = false }
     func setIndependentPointer(_ enabled: Bool) { resetSession(); windowTarget = nil; independentPointer = enabled }
-    /// Stalls, pauses and focus loss end held buttons and keys. Typing still
-    /// follows the last clicked window, so a paste after the pause arrives.
-    func liftHeld() { delivery.cancel { [events] in events.liftHeld() } }
+    /// Stalls, pauses and focus loss end held buttons and keys after the input
+    /// already queued. Typing still follows the last clicked window, so a paste
+    /// after the pause arrives.
+    func liftHeld() { delivery.lift { [events] in events.liftHeld() } }
     /// Only a disconnect or a new input mode or target forgets that window.
     func resetSession() { delivery.cancel { [events] in events.resetSession() } }
     func apply(_ message: WireMessage) {

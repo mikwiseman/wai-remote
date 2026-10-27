@@ -32,6 +32,11 @@ final class InputDeliveryQueue {
         }
     }
 
+    /// Lifting held input is ordinary ordered work. Input accepted before it,
+    /// such as keys and text behind a slow background click, still arrives first.
+    func lift(release: @escaping () -> Void) { submit { _ in release() } }
+
+    /// A disconnect or a new target discards everything not yet delivered.
     func cancel(release: @escaping () -> Void) {
         lock.lock(); defer { lock.unlock() }
         generation &+= 1; pendingMove = nil
