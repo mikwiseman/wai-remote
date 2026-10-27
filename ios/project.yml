@@ -42,6 +42,7 @@ targets:
     platform: iOS
     sources:
       - ../Tests/WAIRemoteTests/InvitationQRCodeTests.swift
+      - Tests
     dependencies:
       - target: WAIRemotePhone
       - package: WAIRemote
