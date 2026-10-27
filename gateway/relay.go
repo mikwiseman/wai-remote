@@ -57,7 +57,14 @@ func (r *relayIssuer) issue(peer string, now time.Time) *iceConfiguration {
 
 func (r *relayIssuer) forClient(hello Hello, now time.Time) *iceConfiguration {
 	ice := r.issue(hello.PeerID, now)
-	if hello.ICEVersion >= 3 {
+	if hello.ICEVersion >= 4 {
+		// Peer to peer first. STUN must answer from Russia: VPNs used there send
+		// Russian addresses directly, so the reflexive address is the device's own
+		// network, not a foreign VPN exit (stun.novofon.ru, stun.trueconf.ru).
+		// The UDP relay stays only for networks that cannot connect directly.
+		ice.Policy = "all"
+		ice.Servers[0].URLs = []string{"stun:37.139.38.244:3478", "stun:79.143.67.226:3478", r.urls[0]}
+	} else if hello.ICEVersion >= 3 {
 		// These apps skip VPN adapters, whose direct routes stalled SCTP input.
 		// Try the physical network first; the relays remain the fallback.
 		ice.Policy = "all"

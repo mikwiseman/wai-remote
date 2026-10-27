@@ -4,7 +4,6 @@ import WebRTC
 /// Opt-in, local measurements. Never record SDP, addresses, device names, or input contents.
 enum PerformanceLog {
     static let enabled = UserDefaults.standard.bool(forKey: "performanceDiagnostics")
-    static var tcpOnly: Bool { enabled && UserDefaults.standard.bool(forKey: "performanceTCPOnly") }
     static func startNetworkTrace(_ connection: RTCPeerConnection, role: String) {
         guard enabled, UserDefaults.standard.bool(forKey: "performanceNetworkTrace") else { return }
         // This extra opt-in contains network metadata. Keep it private and separate

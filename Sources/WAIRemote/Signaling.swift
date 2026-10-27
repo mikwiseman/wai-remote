@@ -75,7 +75,7 @@ final class Signaling {
         if object["type"] as? String == "challenge", let nonce = object["nonce"] as? String, nonce.utf8.count <= 100 {
             let payload = Data("host\n\(identity.id)\n\(identity.id)\n\(nonce)".utf8)
             guard let sig = try? identity.sign(payload, domain: "wai-remote/signal/v1") else { return }
-            send(["type":"hello","role":"host","hostID":identity.id,"peerID":identity.id,"publicKey":identity.publicKey,"signature":sig,"iceVersion":3])
+            send(["type":"hello","role":"host","hostID":identity.id,"peerID":identity.id,"publicKey":identity.publicKey,"signature":sig,"iceVersion":4])
         } else if ["ready", "relay"].contains(object["type"] as? String ?? "") {
             do {
                 let configuration = try ICEConfiguration.read(object)

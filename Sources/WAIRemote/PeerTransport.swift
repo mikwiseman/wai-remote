@@ -26,12 +26,7 @@ final class PeerTransport: NSObject, RTCPeerConnectionDelegate, RTCDataChannelDe
             return channel.sendData(RTCDataBuffer(data: data, isBinary: true))
         }
         let config = RTCConfiguration(); config.sdpSemantics = .unifiedPlan
-        config.iceServers = ice.iceServers.compactMap {
-            // Apply the opt-in TCP diagnostic to both ends, so a TCP viewer
-            // cannot silently be compared with a UDP host allocation.
-            let urls = PerformanceLog.tcpOnly ? $0.urls.filter { $0.contains("transport=tcp") } : $0.urls
-            return urls.isEmpty ? nil : RTCIceServer(urlStrings: urls, username: $0.username, credential: $0.credential)
-        }
+        config.iceServers = ice.iceServers.map { RTCIceServer(urlStrings: $0.urls, username: $0.username, credential: $0.credential) }
         config.iceTransportPolicy = ice.iceTransportPolicy == "relay" ? .relay : .all
         config.bundlePolicy = .maxBundle; config.rtcpMuxPolicy = .require
         pc = factory.peerConnection(with: config, constraints: RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil), delegate: self)

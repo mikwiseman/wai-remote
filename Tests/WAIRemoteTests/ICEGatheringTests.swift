@@ -36,7 +36,7 @@ final class ICEGatheringTests: XCTestCase {
         }
         wait(for: [rejected], timeout: 14)
     }
-    func testDirectRoutesSkipLoopbackAndTunnelsButKeepTheRelay() throws {
+    func testOffersSkipTunnelAndLoopbackAddressesButKeepPublicOnes() throws {
         let sdp = ["v=0", "m=application 9 UDP/DTLS/SCTP webrtc-datachannel",
             "a=candidate:1 1 udp 2122260223 192.168.1.66 50000 typ host generation 0",
             "a=candidate:2 1 udp 2122194687 127.0.0.1 50001 typ host generation 0",
@@ -46,8 +46,10 @@ final class ICEGatheringTests: XCTestCase {
             "a=candidate:6 1 tcp 1518280447 ::1 9 typ host tcptype active generation 0",
             "a=end-of-candidates", ""].joined(separator: "\r\n")
         let kept = try ICEGatheringDeadline.result(for: sdp, tunnels: ["172.19.0.1"]).get()
+        // Under a VPN the reflexive address on the tunnel is the device's own public
+        // address, the only one another network can reach directly.
         XCTAssertEqual(kept.components(separatedBy: "\r\n").filter { $0.hasPrefix("a=candidate:") }.map { $0.prefix(13) },
-                       ["a=candidate:1", "a=candidate:5"])
+                       ["a=candidate:1", "a=candidate:4", "a=candidate:5"])
         XCTAssertTrue(kept.hasPrefix("v=0\r\n") && kept.hasSuffix("a=end-of-candidates\r\n"))
         let unusable = ["v=0", "a=candidate:2 1 udp 2122194687 127.0.0.1 50001 typ host generation 0", ""].joined(separator: "\r\n")
         XCTAssertThrowsError(try ICEGatheringDeadline.result(for: unusable, tunnels: []).get())

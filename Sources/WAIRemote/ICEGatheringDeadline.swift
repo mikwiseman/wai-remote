@@ -28,15 +28,16 @@ final class ICEGatheringDeadline {
             completion(Self.result(for: sdp))
         }
     }
-    /// A direct route through a VPN tunnel stalled SCTP input for seconds, and loopback
-    /// reaches nobody. Offer the physical network directly; relays keep every path.
+    /// A tunnel's own address is private to this device (both Macs on one VPN share
+    /// it, and pairs through it stalled SCTP input), and loopback reaches nobody.
+    /// Reflexive and relay addresses stay: under a VPN that captures every route,
+    /// the reflexive address on the tunnel is this device's public one.
     static func result(for sdp: String, tunnels: Set<String> = tunnelAddresses()) -> Result<String, Error> {
         let lines = sdp.components(separatedBy: "\r\n").filter { line in
             guard line.hasPrefix("a=candidate:") else { return true }
             let fields = line.split(separator: " ").map(String.init)
-            guard fields.count > 7, fields[7] != "relay" else { return true }
-            let base = fields.firstIndex(of: "raddr").flatMap { fields.indices.contains($0 + 1) ? fields[$0 + 1] : nil } ?? fields[4]
-            return !(base.hasPrefix("127.") || base == "::1" || tunnels.contains(base))
+            guard fields.count > 7, fields[7] == "host" else { return true }
+            return !(fields[4].hasPrefix("127.") || fields[4] == "::1" || tunnels.contains(fields[4]))
         }
         guard lines.contains(where: { $0.hasPrefix("a=candidate:") }) else {
             return .failure(NSError(domain: "WebRTC", code: 1, userInfo: [NSLocalizedDescriptionKey: "Не найден сетевой маршрут"]))
