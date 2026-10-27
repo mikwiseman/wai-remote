@@ -23,7 +23,7 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.3.5</string>
+	<string>0.3.6</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -36,7 +36,7 @@
 		</dict>
 	</array>
 	<key>CFBundleVersion</key>
-	<string>66</string>
+	<string>67</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>15.0</string>
 	<key>NSAppTransportSecurity</key>
@@ -44,6 +44,8 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>NSCameraUsageDescription</key>
+	<string>Камера считывает QR-код приглашения, чтобы подключиться к другому Mac.</string>
 	<key>NSDesktopFolderUsageDescription</key>
 	<string>Передача скопированных файлов с рабочего стола на подключённый Mac через буфер обмена.</string>
 	<key>NSDocumentsFolderUsageDescription</key>
@@ -68,7 +70,5 @@
 	<false/>
 	<key>SUVerifyUpdateBeforeExtraction</key>
 	<true/>
-	<key>NSCameraUsageDescription</key>
-	<string>Камера считывает QR-код приглашения, чтобы подключиться к другому Mac.</string>
 </dict>
 </plist>
