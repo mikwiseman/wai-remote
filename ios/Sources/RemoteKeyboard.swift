@@ -2,16 +2,13 @@ import SwiftUI
 import UIKit
 
 /// The system keyboard types straight into the Mac: no field, no send button.
-/// A bar above it adds the keys a phone keyboard lacks; modifiers apply to the next key.
+/// The session shows `KeyboardBar` above it for the keys a phone keyboard lacks; modifiers apply to the next key.
 struct RemoteKeyboard: UIViewRepresentable {
     @ObservedObject var model: PhoneModel
+    let modifiers: KeyboardModifiers
     @Binding var active: Bool
 
-    func makeUIView(context: Context) -> KeyCatcher {
-        let view = KeyCatcher(model: model)
-        view.onResign = { DispatchQueue.main.async { active = false } }
-        return view
-    }
+    func makeUIView(context: Context) -> KeyCatcher { KeyCatcher(model: model, modifiers: modifiers) }
     func updateUIView(_ view: KeyCatcher, context: Context) {
         view.onResign = { DispatchQueue.main.async { active = false } }
         if active, !view.isFirstResponder { DispatchQueue.main.async { _ = view.becomeFirstResponder() } }
@@ -22,29 +19,22 @@ struct RemoteKeyboard: UIViewRepresentable {
 final class KeyboardModifiers: ObservableObject {
     @Published var held: Set<String> = []
     func toggle(_ modifier: String) { if held.remove(modifier) == nil { held.insert(modifier) } }
+    /// The held modifiers in the Mac's order, released by the key they apply to.
+    func take(adding extra: Set<String> = []) -> [String] {
+        defer { if !held.isEmpty { held = [] } }
+        return ["Meta", "Alt", "Control", "Shift"].filter(held.union(extra).contains)
+    }
 }
 
 final class KeyCatcher: UIView, UIKeyInput {
     private let model: PhoneModel
-    private let modifiers = KeyboardModifiers()
-    private lazy var bar: UIView = {
-        let host = UIHostingController(rootView: KeyboardBar(modifiers: modifiers, send: { [weak self] key in self?.press(key) },
-                                                             hide: { [weak self] in _ = self?.resignFirstResponder() }))
-        host.view.backgroundColor = .clear
-        host.sizingOptions = .intrinsicContentSize
-        host.view.frame = CGRect(x: 0, y: 0, width: 0, height: 60)
-        host.view.autoresizingMask = .flexibleWidth
-        barHost = host
-        return host.view
-    }()
-    private var barHost: UIViewController?
+    private let modifiers: KeyboardModifiers
     var onResign: () -> Void = {}
 
-    init(model: PhoneModel) { self.model = model; super.init(frame: .zero) }
+    init(model: PhoneModel, modifiers: KeyboardModifiers) { self.model = model; self.modifiers = modifiers; super.init(frame: .zero) }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     override var canBecomeFirstResponder: Bool { true }
-    override var inputAccessoryView: UIView? { bar }
     override func resignFirstResponder() -> Bool {
         let resigned = super.resignFirstResponder()
         if resigned { modifiers.held = []; onResign() }
@@ -63,22 +53,16 @@ final class KeyCatcher: UIView, UIKeyInput {
     var hasText: Bool { true }
 
     func insertText(_ text: String) {
-        let held = modifiers.held
         if text == "\n" { press("Enter"); return }
         if text == "\t" { press("Tab"); return }
-        if !held.subtracting(["Shift"]).isEmpty, text.count == 1, let (code, shifted) = Self.code(for: text.first!) {
-            model.key(code, modifiers: Self.order(held.union(shifted ? ["Shift"] : [])))
+        if !modifiers.held.subtracting(["Shift"]).isEmpty, text.count == 1, let (code, shifted) = Self.code(for: text.first!) {
+            model.key(code, modifiers: modifiers.take(adding: shifted ? ["Shift"] : []))
         } else {
-            model.text(text)
+            model.text(text); _ = modifiers.take()
         }
-        modifiers.held = []
     }
     func deleteBackward() { press("Backspace") }
-    private func press(_ key: String) {
-        model.key(key, modifiers: Self.order(modifiers.held))
-        modifiers.held = []
-    }
-    private static func order(_ held: Set<String>) -> [String] { ["Meta", "Alt", "Control", "Shift"].filter(held.contains) }
+    private func press(_ key: String) { model.key(key, modifiers: modifiers.take()) }
 
     /// A shortcut needs the physical key. Russian letters map through the standard ЙЦУКЕН layout.
     static func code(for character: Character) -> (String, Bool)? {
@@ -98,54 +82,55 @@ final class KeyCatcher: UIView, UIKeyInput {
     }
 }
 
-private struct KeyboardBar: View {
+/// One glass strip of keys the phone keyboard lacks, sized like its keys so all of them fit, and a button to put it away.
+struct KeyboardBar: View {
+    @ObservedObject var model: PhoneModel
     @ObservedObject var modifiers: KeyboardModifiers
-    let send: (String) -> Void
     let hide: () -> Void
 
     var body: some View {
-        HStack(spacing: 8) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                GlassGroup(spacing: 6) {
-                    HStack(spacing: 6) {
-                        key("esc", "Escape")
-                        key("tab", "Tab")
-                        modifier("⌘", "Meta", "Command")
-                        modifier("⌥", "Alt", "Option")
-                        modifier("⌃", "Control", "Control")
-                        modifier("⇧", "Shift", "Shift")
-                        key("←", "ArrowLeft"); key("↑", "ArrowUp"); key("↓", "ArrowDown"); key("→", "ArrowRight")
-                    }
-                    .padding(.horizontal, 10)
+        GlassGroup(spacing: 8) {
+            HStack(spacing: 8) {
+                HStack(spacing: 0) {
+                    key("esc", "Escape", "Escape")
+                    key("tab", "Tab", "Tab")
+                    modifier("⌘", "Meta", "Command")
+                    modifier("⌥", "Alt", "Option")
+                    modifier("⌃", "Control", "Control")
+                    modifier("⇧", "Shift", "Shift")
+                    key("←", "ArrowLeft", "Влево"); key("↑", "ArrowUp", "Вверх"); key("↓", "ArrowDown", "Вниз"); key("→", "ArrowRight", "Вправо")
                 }
+                .padding(.horizontal, 6)
+                .glass(in: Capsule(), interactive: true)
+                Button(action: hide) {
+                    Image(systemName: "keyboard.chevron.compact.down").font(.system(size: 17, weight: .semibold))
+                        .frame(width: 44, height: 44).contentShape(Circle())
+                        .glass(in: Circle(), interactive: true)
+                }
+                .buttonStyle(.plain).accessibilityLabel("Скрыть клавиатуру")
             }
-            .scrollClipDisabled()
-            Button(action: hide) {
-                Image(systemName: "keyboard.chevron.compact.down").font(.system(size: 17, weight: .semibold))
-                    .frame(width: 44, height: 40).glass(in: Capsule(), interactive: true)
-            }
-            .buttonStyle(.plain).padding(.trailing, 10).accessibilityLabel("Скрыть клавиатуру")
         }
-        .frame(height: 60)
-        .tint(Brand.mint)
+        .padding(.horizontal, 8).frame(maxWidth: .infinity).frame(height: 56)
         .sensoryFeedback(.selection, trigger: modifiers.held)
     }
 
-    private func key(_ title: String, _ code: String) -> some View {
-        Button { send(code) } label: { label(title, selected: false) }
-            .buttonStyle(.plain).accessibilityLabel(code == "Escape" ? "Escape" : title)
+    private func key(_ title: String, _ code: String, _ name: String) -> some View {
+        Button { model.key(code, modifiers: modifiers.take()) } label: { label(title, selected: false) }
+            .buttonStyle(.plain).accessibilityLabel(name)
+            .accessibilityShowsLargeContentViewer { Text(title) }
     }
     private func modifier(_ title: String, _ code: String, _ name: String) -> some View {
         let selected = modifiers.held.contains(code)
         return Button { modifiers.toggle(code) } label: { label(title, selected: selected) }
             .buttonStyle(.plain).accessibilityLabel(name).accessibilityAddTraits(selected ? .isSelected : [])
+            .accessibilityShowsLargeContentViewer { Text(title) }
     }
     private func label(_ title: String, selected: Bool) -> some View {
-        Text(title).font(.system(size: 16, weight: .semibold, design: .rounded))
+        Text(title).font(.system(size: 16, weight: .semibold, design: .rounded)).lineLimit(1).minimumScaleFactor(0.8)
             .foregroundStyle(selected ? Brand.forest : .primary)
-            .frame(minWidth: 44).frame(height: 40).padding(.horizontal, 2)
+            .frame(minWidth: 28, maxWidth: 40, minHeight: 36)
             .background { if selected { Capsule().fill(Brand.mint) } }
-            .glass(in: Capsule(), interactive: true)
-            .contentShape(Capsule())
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
     }
 }

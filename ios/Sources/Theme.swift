@@ -36,9 +36,12 @@ struct GlassGroup<Content: View>: View {
 }
 
 extension View {
+    /// Glass over the Mac's screen, which can be any brightness: a dark tint keeps white symbols legible on it.
     @ViewBuilder func glass<S: Shape>(in shape: S, interactive: Bool = false) -> some View {
-        if #available(iOS 26, *) { glassEffect(interactive ? .regular.interactive() : .regular, in: shape) }
-        else { background(.regularMaterial, in: shape) }
+        if #available(iOS 26, *) {
+            let style = Glass.regular.tint(.black.opacity(0.35))
+            glassEffect(interactive ? style.interactive() : style, in: shape)
+        } else { background(.regularMaterial, in: shape) }
     }
     @ViewBuilder func glassID(_ id: String, in namespace: Namespace.ID) -> some View {
         if #available(iOS 26, *) { glassEffectID(id, in: namespace) } else { self }

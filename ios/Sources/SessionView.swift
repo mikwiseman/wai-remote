@@ -1,55 +1,46 @@
 import SwiftUI
 import RemoteCore
 
-/// The Mac's screen is the content. Controls float in one glass dock and get out of the way.
+/// The Mac's screen is the content. Controls float in glass at its edges and get out of the way.
 struct SessionView: View {
     @ObservedObject var model: PhoneModel
     @State private var typing = false
     @State private var zoomed = false
     @State private var greeting = false
+    @StateObject private var modifiers = KeyboardModifiers()
     @Namespace private var glass
+    @Namespace private var selection
     @Environment(\.verticalSizeClass) private var verticalSize
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private var landscape: Bool { verticalSize == .compact }
+    /// Controls line up along the bottom in portrait and down the trailing edge in landscape.
+    private func line(_ spacing: CGFloat, @ViewBuilder _ content: () -> some View) -> some View {
+        let layout = landscape ? AnyLayout(VStackLayout(spacing: spacing)) : AnyLayout(HStackLayout(spacing: spacing))
+        return layout { content() }
+    }
 
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            RemoteScreen(model: model) { value in withAnimation(.smooth) { zoomed = value } }
-                .ignoresSafeArea(.container)
-            RemoteKeyboard(model: model, active: $typing).frame(width: 1, height: 1).opacity(0)
-            VStack {
-                HStack(alignment: .top) {
-                    circleButton("Отключиться", symbol: "xmark") { model.disconnect() }
-                    Spacer(minLength: 12)
-                    if let status { pill(status).transition(.move(edge: .top).combined(with: .opacity)) }
-                    Spacer(minLength: 12)
-                    circleButton("Вписать экран", symbol: "arrow.down.right.and.arrow.up.left") { model.resetZoomRevision += 1 }
-                        .opacity(zoomed ? 1 : 0).allowsHitTesting(zoomed)
-                }
-                Spacer()
-            }
-            .padding(.horizontal, 16).padding(.top, 4)
-            if !typing {
-                let layout = landscape ? AnyLayout(VStackLayout(spacing: 10)) : AnyLayout(HStackLayout(spacing: 10))
-                GlassGroup(spacing: 10) {
-                    layout {
-                        modeSwitch
-                        if model.mode == .draw { drawingTools } else { controlTools }
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity,
-                       alignment: landscape ? .trailing : .bottom)
-                .padding(landscape ? .trailing : .bottom, landscape ? 12 : 8)
-                .transition(.move(edge: landscape ? .trailing : .bottom).combined(with: .opacity))
-            }
+            // Edge to edge; while typing it sits between the top controls and the keyboard.
+            RemoteScreen(model: model) { zoomed = $0 }
+                .ignoresSafeArea(.container, edges: typing ? .horizontal : .all)
+            RemoteKeyboard(model: model, modifiers: modifiers, active: $typing).frame(width: 1, height: 1).opacity(0)
+            edges
+            if !typing { dock.transition(slide(landscape ? .trailing : .bottom)) }
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if typing { KeyboardBar(model: model, modifiers: modifiers) { typing = false }.transition(.opacity) }
         }
         .preferredColorScheme(.dark)
         .tint(Brand.mint)
         .statusBarHidden(landscape)
         .persistentSystemOverlays(.hidden)
-        .animation(.spring(duration: 0.45, bounce: 0.2), value: model.mode)
-        .animation(.spring(duration: 0.4, bounce: 0.15), value: typing)
-        .animation(.smooth, value: status?.text)
+        .animation(motion(.spring(duration: 0.45, bounce: 0.2)), value: model.mode)
+        .animation(motion(.spring(duration: 0.35, bounce: 0.2)), value: model.tool)
+        .animation(motion(.spring(duration: 0.4, bounce: 0.15)), value: typing)
+        .animation(motion(.smooth), value: zoomed)
+        .animation(motion(.smooth), value: status)
         .onChange(of: model.receivedFrame) { _, shown in
             guard shown else { return }
             greeting = true
@@ -57,126 +48,187 @@ struct SessionView: View {
         }
         .onChange(of: model.canControl) { _, allowed in if !allowed { typing = false } }
         .sensoryFeedback(.selection, trigger: model.mode)
+        .sensoryFeedback(.selection, trigger: model.tool)
+        #if DEBUG
+        .onAppear { if PhoneModel.demoMoment == "typing" { typing = true } }
+        #endif
     }
 
-    // MARK: Status
+    private func motion(_ animation: Animation) -> Animation { reduceMotion ? .easeInOut(duration: 0.2) : animation }
+    private func slide(_ edge: Edge) -> AnyTransition { reduceMotion ? .opacity : .move(edge: edge).combined(with: .opacity) }
 
-    private struct Status { let text: String; let symbol: String?; let busy: Bool }
+    // MARK: Edges
+
+    /// Leaving sits in the corner; fitting the screen appears only once it is zoomed.
+    private var edges: some View {
+        GlassGroup(spacing: 12) {
+            ZStack(alignment: .top) {
+                line(12) {
+                    circleButton("Отключиться", symbol: "xmark", id: "leave") { model.disconnect() }
+                    Spacer(minLength: 0)
+                    if zoomed {
+                        circleButton("Вписать экран", symbol: "arrow.down.right.and.arrow.up.left", id: "fit") { model.resetZoomRevision += 1 }
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                if let status { pill(status).padding(.top, 4).padding(.horizontal, landscape ? 0 : 76).transition(slide(.top)) }
+            }
+        }
+        .padding(.horizontal, 16).padding(.vertical, landscape ? 12 : 4)
+    }
+
+    private struct Status: Equatable { let text: String; let symbol: String? }
     private var status: Status? {
-        if model.connectionInterrupted { return Status(text: "Восстанавливаем связь…", symbol: nil, busy: true) }
-        if !model.receivedFrame { return Status(text: "Ждём изображение Mac…", symbol: nil, busy: true) }
-        if model.mode == .paused { return Status(text: "Управление приостановлено на Mac", symbol: "pause.fill", busy: false) }
-        if greeting { return Status(text: model.computerName, symbol: "lock.fill", busy: false) }
+        if model.connectionInterrupted { return Status(text: "Восстанавливаем связь…", symbol: nil) }
+        if !model.receivedFrame { return Status(text: "Ждём изображение Mac…", symbol: nil) }
+        if model.mode == .paused { return Status(text: "Пауза на Mac", symbol: "pause.fill") }
+        if greeting { return Status(text: model.computerName, symbol: "lock.fill") }
         return nil
     }
     private func pill(_ status: Status) -> some View {
         HStack(spacing: 8) {
-            if status.busy { ProgressView().controlSize(.small) }
-            else if let symbol = status.symbol { Image(systemName: symbol).font(.caption.weight(.semibold)).foregroundStyle(Brand.mint) }
-            Text(status.text).font(.subheadline.weight(.semibold)).lineLimit(1)
+            if let symbol = status.symbol { Image(systemName: symbol).font(.caption.weight(.bold)).foregroundStyle(Brand.mint) }
+            else { ProgressView().controlSize(.small) }
+            Text(status.text).font(.subheadline.weight(.semibold)).lineLimit(2).minimumScaleFactor(0.8)
         }
-        .padding(.horizontal, 16).frame(height: 44)
-        .glass(in: Capsule())
+        .multilineTextAlignment(.center)
+        .dynamicTypeSize(...DynamicTypeSize.accessibility1)
+        .padding(.horizontal, 16).padding(.vertical, 8).frame(minHeight: 44)
+        // A capsule at one line, a rounded card when large text wraps.
+        .glass(in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .glassID("status", in: glass)
         .accessibilityElement(children: .combine)
     }
 
     // MARK: Dock
 
-    private var modeSwitch: some View {
-        let layout = landscape ? AnyLayout(VStackLayout(spacing: 4)) : AnyLayout(HStackLayout(spacing: 4))
-        return layout {
-            modeButton(.control, symbol: "cursorarrow", title: "Управлять", allowed: model.session.state?.permissions.control == true)
-            modeButton(.draw, symbol: "pencil.tip", title: "Рисовать", allowed: model.session.state?.permissions.annotate == true)
+    private var live: Bool { model.canControl || model.canDraw }
+    private var allowed: Permissions? { model.session.state?.permissions }
+
+    private var dock: some View {
+        GlassGroup(spacing: 10) {
+            line(10) {
+                modes
+                if model.mode == .draw {
+                    undo
+                } else {
+                    circleButton("Клавиатура", symbol: "keyboard", id: "keyboard", enabled: model.canControl) { typing = true }
+                    more
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: landscape ? .trailing : .bottom)
+        .padding(landscape ? .trailing : .bottom, landscape ? 16 : 8)
+    }
+
+    /// One capsule: the cursor controls the Mac, the pen opens into the drawing tools.
+    private var modes: some View {
+        let drawing = model.mode == .draw
+        return line(0) {
+            segment("Управлять", symbol: "cursorarrow", selected: model.mode == .control,
+                    enabled: live && allowed?.control == true) { model.changeMode(.control) }
+            ForEach(drawing ? [DrawingTool.pen, .marker, .arrow, .eraser] : [.pen]) { tool in
+                segment(drawing ? tool.title : "Рисовать", symbol: tool.symbol, selected: drawing && model.tool == tool,
+                        enabled: live && allowed?.annotate == true) { drawing ? model.changeTool(tool) : model.changeMode(.draw) }
+            }
+            if drawing { ink }
         }
         .padding(4)
         .glass(in: Capsule(), interactive: true)
-        .glassID("mode", in: glass)
+        .glassID("modes", in: glass)
     }
-    private func modeButton(_ mode: RemoteMode, symbol: String, title: String, allowed: Bool) -> some View {
-        let selected = model.mode == mode
-        return Button { model.changeMode(mode) } label: {
+
+    private func segment(_ title: String, symbol: String, selected: Bool, enabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
             Image(systemName: symbol).font(.system(size: 17, weight: .semibold))
                 .foregroundStyle(selected ? Brand.forest : .primary)
+                .opacity(enabled || selected ? 1 : 0.35)
                 .frame(width: 44, height: 44)
-                .background { if selected { Circle().fill(Brand.mint).matchedGeometryEffect(id: "mode", in: glass) } }
+                .background { if selected { Circle().fill(Brand.mint).matchedGeometryEffect(id: "selected", in: selection) } }
                 .contentShape(Circle())
         }
-        .buttonStyle(.plain)
-        .disabled(model.mode == .paused || !allowed || !model.receivedFrame)
+        .buttonStyle(.plain).disabled(!enabled)
         .accessibilityLabel(title).accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityShowsLargeContentViewer { Label(title, systemImage: symbol) }
     }
 
-    @ViewBuilder private var controlTools: some View {
-        circleButton("Клавиатура", symbol: "keyboard", disabled: !model.canControl) { typing = true }
-            .glassID("keyboard", in: glass)
-        Menu {
-            Button("Правый клик", systemImage: "contextualmenu.and.cursorarrow") { model.rightClick() }
-            Button("Escape", systemImage: "escape") { model.key("Escape") }
-        } label: { menuLabel }
-            .disabled(!model.canControl)
-            .accessibilityLabel("Ещё")
-            .glassID("more", in: glass)
-    }
+    private static let inks = Array(zip(InkStore.colors, ["Коралловый", "Синий", "Жёлтый", "Зелёный"]))
+    private static let widths: [(Double, String)] = [(2, "Тонкая"), (4, "Средняя"), (8, "Толстая")]
 
-    @ViewBuilder private var drawingTools: some View {
-        let layout = landscape ? AnyLayout(VStackLayout(spacing: 0)) : AnyLayout(HStackLayout(spacing: 0))
-        layout {
-            ForEach([DrawingTool.pen, .marker, .arrow, .eraser]) { tool in
-                Button { model.changeTool(tool) } label: {
-                    Image(systemName: tool.symbol).font(.system(size: 17, weight: .medium))
-                        .foregroundStyle(model.tool == tool ? Brand.mint : .primary.opacity(0.75))
-                        .frame(width: 42, height: 44).contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(tool.title).accessibilityAddTraits(model.tool == tool ? .isSelected : [])
-            }
-            Menu {
-                ForEach(Array(InkStore.colors.enumerated()), id: \.offset) { index, color in
-                    Button(["Коралловый", "Синий", "Жёлтый", "Зелёный"][index]) { model.color = color }
-                }
-                Divider()
-                ForEach([2.0, 4.0, 8.0], id: \.self) { width in Button("Толщина \(Int(width))") { model.width = width } }
-            } label: {
-                Circle().fill(Color(uiColor: UIColor(hex: model.color)))
-                    .overlay(Circle().stroke(.white.opacity(0.85), lineWidth: 2))
-                    .frame(width: 22, height: 22).frame(width: 44, height: 44)
-            }
-            .accessibilityLabel("Цвет и толщина")
+    /// A menu icon: a dot in its colour, or in the text's colour when it shows a width.
+    private static func dot(_ diameter: CGFloat, _ color: UIColor?) -> Image {
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 22, height: 22)).image { _ in
+            (color ?? .black).setFill(); UIBezierPath(ovalIn: CGRect(x: 11 - diameter / 2, y: 11 - diameter / 2, width: diameter, height: diameter)).fill()
         }
-        .padding(.horizontal, landscape ? 2 : 6).padding(.vertical, landscape ? 6 : 2)
-        .glass(in: Capsule(), interactive: true)
-        .glassID("tools", in: glass)
-        .disabled(!model.canDraw)
+        return Image(uiImage: image.withRenderingMode(color == nil ? .alwaysTemplate : .alwaysOriginal))
+    }
+
+    /// The dot shows the colour and, by its size, the line width.
+    private var ink: some View {
         Menu {
-            Button("Отменить", systemImage: "arrow.uturn.backward") { model.editInk("undo") }
+            Picker("Цвет", selection: $model.color) {
+                ForEach(Self.inks, id: \.0) { ink in
+                    Label { Text(ink.1) } icon: { Self.dot(16, UIColor(hex: ink.0)) }.tag(ink.0)
+                }
+            }
+            .pickerStyle(.inline)
+            Picker("Толщина", selection: $model.width) {
+                ForEach(Self.widths, id: \.0) { width in Label { Text(width.1) } icon: { Self.dot(4 + width.0 * 2, nil) }.tag(width.0) }
+            }
+            .pickerStyle(.inline)
+        } label: {
+            Circle().fill(Color(uiColor: UIColor(hex: model.color)))
+                .overlay(Circle().stroke(.white.opacity(0.9), lineWidth: 2))
+                .frame(width: 12 + model.width * 1.5, height: 12 + model.width * 1.5)
+                .animation(motion(.spring(duration: 0.3, bounce: 0.3)), value: model.width)
+                .frame(width: 44, height: 44).contentShape(Circle())
+        }
+        .disabled(!model.canDraw)
+        .accessibilityLabel("Цвет и толщина")
+        .accessibilityValue([Self.inks.first { $0.0 == model.color }?.1, Self.widths.first { $0.0 == model.width }?.1]
+            .compactMap { $0 }.joined(separator: ", "))
+    }
+
+    private var undo: some View {
+        Menu {
             Button("Повторить", systemImage: "arrow.uturn.forward") { model.editInk("redo") }
             Button("Выделить", systemImage: "cursorarrow") { model.changeTool(.select) }
             if model.selectedID != nil {
                 Button("Удалить объект", systemImage: "trash", role: .destructive, action: model.deleteSelected)
             }
             Button("Очистить мои рисунки", systemImage: "trash", role: .destructive) { model.editInk("clear") }
-        } label: { menuLabel } primaryAction: { model.editInk("undo") }
-            .disabled(!model.canDraw)
-            .accessibilityLabel("Отменить рисунок")
-            .glassID("more", in: glass)
+        } label: {
+            circle("arrow.uturn.backward", id: "more", enabled: model.canDraw)
+        } primaryAction: { model.editInk("undo") }
+        .disabled(!model.canDraw).tint(.primary)
+        .accessibilityLabel("Отменить")
+        .accessibilityHint("Удерживайте, чтобы повторить или очистить")
     }
 
-    private var menuLabel: some View {
-        Image(systemName: model.mode == .draw ? "arrow.uturn.backward" : "ellipsis")
-            .font(.system(size: 17, weight: .semibold))
-            .frame(width: 52, height: 52)
-            .glass(in: Circle(), interactive: true)
-            .contentShape(Circle())
-    }
-
-    private func circleButton(_ title: String, symbol: String, disabled: Bool = false, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: symbol).font(.system(size: 17, weight: .semibold))
-                .frame(width: 52, height: 52)
-                .glass(in: Circle(), interactive: true)
-                .contentShape(Circle())
+    private var more: some View {
+        Menu {
+            Button("Правый клик", systemImage: "contextualmenu.and.cursorarrow") { model.rightClick() }
+            Button("Escape", systemImage: "escape") { model.key("Escape") }
+        } label: {
+            circle("ellipsis", id: "more", enabled: model.canControl)
         }
-        .buttonStyle(.plain).disabled(disabled).opacity(disabled ? 0.45 : 1)
-        .accessibilityLabel(title)
+        .disabled(!model.canControl).tint(.primary)
+        .accessibilityLabel("Ещё")
+    }
+
+    private func circleButton(_ title: String, symbol: String, id: String, enabled: Bool = true, action: @escaping () -> Void) -> some View {
+        Button(action: action) { circle(symbol, id: id, enabled: enabled) }
+            .buttonStyle(.plain).disabled(!enabled)
+            .accessibilityLabel(title)
+            .accessibilityShowsLargeContentViewer { Label(title, systemImage: symbol) }
+    }
+
+    private func circle(_ symbol: String, id: String, enabled: Bool) -> some View {
+        Image(systemName: symbol).font(.system(size: 17, weight: .semibold))
+            .foregroundStyle(.primary).opacity(enabled ? 1 : 0.35)
+            .frame(width: 52, height: 52)
+            .contentShape(Circle())
+            .glass(in: Circle(), interactive: true)
+            .glassID(id, in: glass)
     }
 }
