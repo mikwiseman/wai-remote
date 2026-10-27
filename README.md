@@ -56,7 +56,7 @@ Then select that address under **Настройки → Диагностика**
 - New device approvals default to until revoked, with one hour and 24 hours available explicitly. Existing approvals without an expiry stay indefinite. Expiration closes the active session and requires a fresh invitation and owner approval; it never revokes another device. Network and gateway failures preserve the owner's open-access grant.
 - Approved connections recover after transient transport loss with bounded retry delays. Explicit disconnect cancels recovery. The host detects silent signaling connections and reconnects independently of an active screen session.
 - The host keeps final authority over viewing, control, drawing, pause and revocation. Input is released when focus or transport is lost; sequence numbers and session epochs reject stale commands.
-- Updated apps try a direct route on the physical network first, for example two Macs on one LAN, and fall back to the relay. VPN tunnel and loopback addresses are left out: direct routes through a tunnel stalled input for seconds.
+- Apps connect peer to peer: on one LAN, or across the internet through NAT using STUN servers in Moscow, which a VPN used in Russia reaches directly. The UDP relay is used only when the networks cannot connect directly.
 - The public relay uses short-lived credentials, bounded allocations and bandwidth, and relay-to-relay peers only. It is a small initial service, without an availability SLA.
 
 [Deployment and release procedure](docs/RELEASING.md) · [Security](SECURITY.md) · [Seven icon concepts](design/icons/README.md)

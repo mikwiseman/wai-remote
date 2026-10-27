@@ -6,7 +6,7 @@ To end access, use **Close access** on the host, or **Закрыть досту�
 
 A window grant stores the window ID, process ID, process launch time and boot/login session. It cannot turn into full-screen sharing or follow a reused process ID. Independent window input has no global-input fallback. New sessions require a fresh authenticated handshake; held input is released on interruption and stale input is never replayed after recovery.
 
-The gateway sees device public IDs, network addresses and signaling metadata. TURN sees encrypted traffic and connection metadata. Updated apps also try a direct route first, so the two connected devices learn each other's physical network addresses; addresses of VPN tunnels and loopback are never offered. Neither receives the screen's decrypted content. A compromised host or viewer is outside this protection.
+The gateway sees device public IDs, network addresses and signaling metadata. TURN sees encrypted traffic and connection metadata. Apps connect peer to peer first, so the two connected devices learn each other's public and local network addresses; addresses private to a VPN tunnel and loopback are never offered. The STUN servers that tell a device its public address are public servers in Moscow and see only that request. Neither receives the screen's decrypted content. A compromised host or viewer is outside this protection.
 
 Report vulnerabilities privately using GitHub's **Report a vulnerability** feature. Please omit private keys, invitation secrets, screenshots of private desktops and raw credentials from public issues. Include the version, operating systems, expected result and minimal reproduction.
 

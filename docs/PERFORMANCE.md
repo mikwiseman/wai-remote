@@ -2,6 +2,12 @@
 
 Work in progress, 15 October 2026. Video comparisons use the user's MacBook and **waiMini**. The update requested for Mark's Mac is a separate installation task.
 
+## Peer to peer through Moscow STUN, 27 October
+
+The relay's location was measured next. A test relay in Kamatera Tel Aviv, next to the VPN exit, lowered session RTT p50 from 406 to 236 ms in five interleaved pairs, but from a network where the VPN sends traffic directly both were equally slow (STUN 271 vs 283 ms): from these Russian networks any foreign UDP took about 270 ms, while Moscow STUN servers answered in 12–16 ms. The home NAT mapped one local socket to the same public port for four different destinations, so hole punching can work. The test server was deleted.
+
+Under the VPN, WebRTC's only internet-reachable candidate is the reflexive address on the tunnel interface: it is the home ISP address when the STUN server is in Russia. The 0.3.6 filter dropped reflexive candidates whose base was a tunnel, so it allowed peer to peer only inside one LAN. Apps with `iceVersion: 4` keep them and drop only tunnel and loopback host addresses. Of three public Moscow STUN servers, stun.sipnet.ru did not answer WebRTC; stun.novofon.ru and stun.trueconf.ru did, returning the home address. The relay stays as the UDP route for networks that cannot connect directly; the TCP relay and the `performanceTCPOnly` diagnostic are removed for these apps. A live session between two Macs on different networks is still to be measured.
+
 ## Direct routes before the relay, 26 October
 
 Every session went through the Helsinki relay, even with both Macs on one home LAN (5 ms apart). From that LAN a UDP STUN round trip to the relay took a median **230 ms** from the MacBook and **124 ms** from the Mini. Both Macs run the Wai B2B VPN as their default route. It sends Russian addresses directly and everything else through an exit that geolocates to Tel Aviv, so relay traffic travelled Moscow → Tel Aviv → Helsinki and back. Public STUN servers in Moscow answered in 16–23 ms over the same tunnel, and Helsinki reaches the home ISP edge in 20.5 ms. A relay path is two such legs. The production-relay session benchmark on the MacBook measured RTT p50/p90 **458/551 ms** and input round trip p50/p95 **441/624 ms**, with both ends on `relay/udp/vpn`.
