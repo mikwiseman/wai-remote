@@ -25,7 +25,8 @@ final class InputInjector {
             events.independentPointer = independent; events.excludedWindows = excluded
             let started = ProcessInfo.processInfo.systemUptime
             events.apply(message)
-            if message.type == "text" || message.type == "pointer" && message.action != "move" {
+            if message.type == "text" || message.type == "pointer" && message.action != "move" ||
+                message.type == "key" && message.action == "down" && (message.modifiers ?? []).contains("Meta") {
                 var row: [String: Any] = ["kind": message.type, "action": message.action ?? "",
                     "textUnits": message.text?.utf16.count ?? 0, "queueMs": (started - received) * 1000,
                     "handlingMs": (ProcessInfo.processInfo.systemUptime - started) * 1000]
@@ -39,7 +40,7 @@ final class InputInjector {
 
 /// Where a click or text went, as a fixed diagnostic label. The host
 /// acknowledges input before delivery, so the acknowledgement cannot say.
-enum InputOutcome: String { case system, window, axPress = "ax-press", primer, noTarget = "no-target", frameGone = "frame-gone", cancelled }
+enum InputOutcome: String { case system, window, axPress = "ax-press", primer, menu, noTarget = "no-target", frameGone = "frame-gone", cancelled }
 
 private enum InputDestination: Equatable {
     case system, window(WindowInputTarget), unavailable
@@ -174,6 +175,8 @@ private final class InjectedEvents {
             event?.flags = Self.flags(m.modifiers ?? [])
             if down { keys[code] = destination } else { keys[code] = nil }
             post(event)
+            // A pressed menu item consumed the shortcut; its key-up has no key-down.
+            if outcome == .menu { keys[code] = nil }
         } else if m.type == "text", let text = m.text {
             if independentPointer { destination = desktop.keyboardTarget.map(InputDestination.window) ?? .unavailable }
             // Chunk on Character boundaries; never split a surrogate pair or composed character.

@@ -84,6 +84,123 @@ final class WindowInputTests: XCTestCase {
         XCTAssertEqual(target.post(event, permitted: { true }, delivery: closing), .frameGone)
     }
 
+    private func key(_ code: CGKeyCode, _ flags: CGEventFlags, down: Bool = true) throws -> CGEvent {
+        let event = try XCTUnwrap(CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: down))
+        event.flags = flags
+        return event
+    }
+    private func keyDelivery(frontmost: pid_t, posted: @escaping (CGEvent) -> Void,
+                             menu: @escaping (CGEvent) -> WindowInputTarget.Button?) -> WindowInputTarget.Delivery {
+        WindowInputTarget.Delivery(frame: { _ in CGRect(x: 100, y: 200, width: 800, height: 600) }, frontmostPID: { frontmost },
+            transient: { _, _ in false }, prepare: { _ in }, pointer: { _, _ in XCTFail("Keys never use the pointer path") },
+            pause: { _ in }, menuItem: { _, event in menu(event) }, key: { _, event in posted(event) })
+    }
+
+    func testCommandShortcutInABackgroundAppPressesItsMenuItemInsteadOfPostingTheKey() throws {
+        let target = WindowInputTarget(pid: 123, windowID: 456)
+        var presses = 0, asked: [CGKeyCode] = []
+        let item = WindowInputTarget.Button(frame: .zero, requiresMainThread: false, action: { presses += 1; return true })
+        let delivery = keyDelivery(frontmost: 999, posted: { _ in XCTFail("A background app ignores a posted key equivalent") },
+            menu: { asked.append(CGKeyCode($0.getIntegerValueField(.keyboardEventKeycode))); return item })
+        XCTAssertEqual(target.post(try key(9, .maskCommand), permitted: { true }, delivery: delivery), .menu)
+        XCTAssertEqual(presses, 1)
+        XCTAssertEqual(asked, [9])
+    }
+
+    func testShortcutWithoutAMenuItemOrForTheActiveAppIsPostedAsBefore() throws {
+        let target = WindowInputTarget(pid: 123, windowID: 456)
+        var posted: [CGKeyCode] = []
+        let record: (CGEvent) -> Void = { posted.append(CGKeyCode($0.getIntegerValueField(.keyboardEventKeycode))) }
+        XCTAssertEqual(target.post(try key(123, .maskCommand), permitted: { true },
+            delivery: keyDelivery(frontmost: 999, posted: record, menu: { _ in nil })), .window)
+        let active = keyDelivery(frontmost: 123, posted: record, menu: { _ in XCTFail("The active app performs its own shortcuts"); return nil })
+        XCTAssertEqual(target.post(try key(9, .maskCommand), permitted: { true }, delivery: active), .window)
+        let background = keyDelivery(frontmost: 999, posted: record, menu: { _ in XCTFail("Only a Command key-down is a menu shortcut"); return nil })
+        target.post(try key(0, []), permitted: { true }, delivery: background)
+        target.post(try key(9, .maskCommand, down: false), permitted: { true }, delivery: background)
+        let failing = WindowInputTarget.Button(frame: .zero, requiresMainThread: false, action: { false })
+        XCTAssertEqual(target.post(try key(8, .maskCommand), permitted: { true },
+            delivery: keyDelivery(frontmost: 999, posted: record, menu: { _ in failing })), .window, "A failed press falls back to the key.")
+        XCTAssertEqual(posted, [123, 9, 0, 9, 8])
+    }
+
+    func testRevocationDuringTheMenuLookupPressesNothing() throws {
+        let target = WindowInputTarget(pid: 123, windowID: 456)
+        var allowed = true
+        let item = WindowInputTarget.Button(frame: .zero, requiresMainThread: false, action: { XCTFail("Cancelled input must not press"); return true })
+        let delivery = keyDelivery(frontmost: 999, posted: { _ in XCTFail("Cancelled input must not post") },
+            menu: { _ in allowed = false; return item })
+        XCTAssertEqual(target.post(try key(9, .maskCommand), permitted: { allowed }, delivery: delivery), .cancelled)
+    }
+
+    func testNonLatinLayoutFindsShortcutsByTheUSLatinKey() throws {
+        for (name, code) in InputInjector.keyCodes where name.hasPrefix("Key") || name.hasPrefix("Digit") {
+            let event = try key(code, .maskCommand)
+            event.keyboardSetUnicodeString(stringLength: 1, unicodeString: [0x0436]) // Cyrillic "ж"
+            XCTAssertEqual(WindowInputTarget.shortcutCharacter(event), String(name.last!), name)
+        }
+        let latin = try key(8, .maskCommand)
+        latin.keyboardSetUnicodeString(stringLength: 1, unicodeString: [0x0079]) // "y" on a QWERTZ layout
+        XCTAssertEqual(WindowInputTarget.shortcutCharacter(latin), "Y", "A Latin layout keeps its own characters.")
+        XCTAssertNil(WindowInputTarget.shortcutCharacter(try key(123, .maskCommand)), "Arrows are not menu characters.")
+    }
+
+    private final class MenuRecorder: NSObject {
+        var fired: [String] = []
+        @objc func fire(_ sender: NSMenuItem) { fired.append(sender.title) }
+    }
+    /// The app's own AppKit menus, read through accessibility like a foreign
+    /// app's. Lookups only; every item's target is the recorder.
+    @MainActor
+    func testMenuShortcutLookupMatchesTheCharacterAndExactModifiers() throws {
+        if !Self.launched { NSApplication.shared.finishLaunching(); Self.launched = true }
+        let recorder = MenuRecorder()
+        let previous = NSApp.mainMenu
+        defer { NSApp.mainMenu = previous }
+        func item(_ title: String, _ key: String, _ modifiers: NSEvent.ModifierFlags = .command, enabled: Bool = true) -> NSMenuItem {
+            let item = NSMenuItem(title: title, action: #selector(MenuRecorder.fire(_:)), keyEquivalent: key)
+            item.keyEquivalentModifierMask = modifiers; item.target = recorder; item.isEnabled = enabled
+            return item
+        }
+        func menu(_ title: String, _ items: [NSMenuItem]) -> NSMenuItem {
+            let menu = NSMenu(title: title); menu.autoenablesItems = false
+            items.forEach(menu.addItem)
+            let holder = NSMenuItem(title: title, action: nil, keyEquivalent: ""); holder.submenu = menu
+            return holder
+        }
+        let main = NSMenu(title: "Main")
+        main.addItem(menu("Fixture", [item("Fixture Settings", ",")]))
+        main.addItem(menu("Edit", [item("Undo", "z"), item("Redo", "z", [.command, .shift]), item("Copy", "c"),
+            item("Select All", "a"), item("Duplicate", "d", enabled: false),
+            menu("Find", [item("Find…", "f")])]))
+        NSApp.mainMenu = main
+        let target = WindowInputTarget(pid: getpid(), windowID: 1)
+        var bar: CFTypeRef?
+        try XCTSkipIf(AXUIElementCopyAttributeValue(AXUIElementCreateApplication(getpid()), kAXMenuBarAttribute as CFString, &bar) != .success,
+                      "This process exposes no accessibility menu bar.")
+        func press(_ code: CGKeyCode, _ flags: CGEventFlags) throws -> String? {
+            guard let found = target.menuItem(for: try key(code, flags)) else { return nil }
+            XCTAssertTrue(found.press(if: { true }))
+            // AppKit performs a pressed menu item on the app's next run loop turn.
+            let deadline = Date().addingTimeInterval(1)
+            while recorder.fired.isEmpty && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
+            return recorder.fired.popLast()
+        }
+        XCTAssertEqual(try press(6, .maskCommand), "Undo")
+        XCTAssertEqual(try press(6, [.maskCommand, .maskShift]), "Redo", "Shift selects a different item, not the same one.")
+        XCTAssertEqual(try press(0, .maskCommand), "Select All")
+        XCTAssertEqual(try press(3, .maskCommand), "Find…", "Submenu shortcuts count too.")
+        XCTAssertEqual(try press(43, .maskCommand), "Fixture Settings")
+        XCTAssertNil(target.menuItem(for: try key(0, [.maskCommand, .maskAlternate])), "Modifier sets must match exactly.")
+        XCTAssertNil(target.menuItem(for: try key(2, .maskCommand)), "A disabled item falls back to the key.")
+        XCTAssertNil(target.menuItem(for: try key(12, [.maskCommand, .maskControl])),
+                     "Never the system's Apple menu: Lock Screen and Log Out are not the app's shortcuts.")
+        let cyrillic = try key(8, .maskCommand)
+        cyrillic.keyboardSetUnicodeString(stringLength: 1, unicodeString: [0x0441]) // "с" on a Russian layout
+        XCTAssertNotNil(target.menuItem(for: cyrillic), "Like AppKit, a non-Latin layout uses the Latin command layout.")
+        XCTAssertTrue(recorder.fired.isEmpty)
+    }
+
     func testBackgroundEventAddressesOnlyTheSelectedWindow() throws {
         let target = WindowInputTarget(pid: 123, windowID: 456)
         let frame = CGRect(x: 100, y: 200, width: 800, height: 600)

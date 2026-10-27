@@ -96,11 +96,13 @@ struct WindowInputTarget: Equatable {
         var prepare: (WindowInputTarget) -> Void
         var pointer: (pid_t, CGEvent) -> Void
         var pause: (TimeInterval) -> Void
+        var menuItem: (WindowInputTarget, CGEvent) -> Button? = { _, _ in nil }
+        var key: (pid_t, CGEvent) -> Void = { $1.postToPid($0) }
         static let system = Delivery(frame: { $0.frame },
             frontmostPID: { NSWorkspace.shared.frontmostApplication?.processIdentifier },
             transient: { $0.isTransient(at: $1) },
             prepare: { $0.prepareWindow() }, pointer: { WindowInputTarget.postPointer?($0, $1) },
-            pause: { Thread.sleep(forTimeInterval: $0) })
+            pause: { Thread.sleep(forTimeInterval: $0) }, menuItem: { $0.menuItem(for: $1) })
     }
     /// `hover` places the pointer over the target first, for a press that no
     /// move preceded (touch taps). Hover-armed controls ignore a bare press.
@@ -147,7 +149,15 @@ struct WindowInputTarget: Equatable {
         guard permitted() else { return .cancelled }
         guard delivery.frame(self) != nil else { return .frameGone }
         switch event.type {
-        case .keyDown, .keyUp, .flagsChanged: event.postToPid(pid)
+        case .keyDown, .keyUp, .flagsChanged:
+            // AppKit and Chromium perform menu key equivalents only for the
+            // active app, so a background app ignores a posted Command-V.
+            if event.type == .keyDown, event.flags.contains(.maskCommand), delivery.frontmostPID() != pid,
+               let item = delivery.menuItem(self, event) {
+                if withoutActuallyEscaping(permitted, do: { item.press(if: $0) }) { return .menu }
+                guard permitted() else { return .cancelled }
+            }
+            delivery.key(pid, event)
         default:
             // The public PID path misses Chromium's background mouse handler.
             // Deliver once through SkyLight, never through global HID.
@@ -211,6 +221,64 @@ struct WindowInputTarget: Equatable {
             element = values[5] as! AXUIElement
         }
         return nil
+    }
+    /// The app's own menu item for a Command shortcut. Menus change with the
+    /// app's state, so every lookup reads them afresh, within a fixed budget.
+    func menuItem(for event: CGEvent, budget: TimeInterval = 0.25) -> Button? {
+        if pid == ProcessInfo.processInfo.processIdentifier && !Thread.isMainThread {
+            return DispatchQueue.main.sync { menuItem(for: event, budget: budget) }
+        }
+        guard let character = Self.shortcutCharacter(event) else { return nil }
+        let flags = event.flags, deadline = ProcessInfo.processInfo.systemUptime + budget
+        // AXMenuItemCmdModifiers: Shift 1, Option 2, Control 4; Command is implied.
+        let modifiers = (flags.contains(.maskShift) ? 1 : 0) | (flags.contains(.maskAlternate) ? 2 : 0) | (flags.contains(.maskControl) ? 4 : 0)
+        func values(_ element: AXUIElement, _ names: [String]) -> [AnyObject]? {
+            AXUIElementSetMessagingTimeout(element, 0.05)
+            var raw: CFArray?
+            guard AXUIElementCopyMultipleAttributeValues(element, names as CFArray, [], &raw) == .success,
+                  let values = raw as? [AnyObject], values.count == names.count else { return nil }
+            return values
+        }
+        func elements(_ value: AnyObject?) -> [AXUIElement] {
+            ((value as? [AnyObject]) ?? []).filter { CFGetTypeID($0) == AXUIElementGetTypeID() }.map { $0 as! AXUIElement }
+        }
+        guard let bar = values(AXUIElementCreateApplication(pid), [kAXMenuBarAttribute])?.first,
+              CFGetTypeID(bar) == AXUIElementGetTypeID() else { return nil }
+        var menus: [AXUIElement] = []
+        for top in elements(values(bar as! AXUIElement, [kAXChildrenAttribute])?.first) {
+            // The system's Apple menu (Lock Screen, Log Out) is not the app's.
+            guard let item = values(top, [kAXTitleAttribute, kAXChildrenAttribute]), item[0] as? String != "Apple" else { continue }
+            menus += elements(item[1])
+        }
+        // Breadth first: the standard editing shortcuts sit at the top level.
+        let names = ["AXMenuItemCmdChar", "AXMenuItemCmdModifiers", kAXEnabledAttribute, kAXChildrenAttribute]
+        while !menus.isEmpty {
+            for item in elements(values(menus.removeFirst(), [kAXChildrenAttribute])?.first) {
+                guard ProcessInfo.processInfo.systemUptime < deadline else { return nil }
+                guard let value = values(item, names) else { continue }
+                if (value[0] as? String)?.uppercased() == character, ((value[1] as? NSNumber)?.intValue ?? 0) == modifiers,
+                   value[2] as? Bool == true {
+                    return Button(frame: .zero, requiresMainThread: pid == ProcessInfo.processInfo.processIdentifier, action: {
+                        AXUIElementSetMessagingTimeout(item, 0.25)
+                        let result = AXUIElementPerformAction(item, kAXPressAction as CFString)
+                        // A slow menu action still runs after its reply times out.
+                        return result == .success || result == .cannotComplete
+                    })
+                }
+                menus += elements(value[3])
+            }
+        }
+        return nil
+    }
+    /// The character the key types on this Mac's layout. A non-Latin layout
+    /// performs Command shortcuts with the US Latin keys, as AppKit does.
+    static func shortcutCharacter(_ event: CGEvent) -> String? {
+        var length = 0, units = [UniChar](repeating: 0, count: 4)
+        event.keyboardGetUnicodeString(maxStringLength: 4, actualStringLength: &length, unicodeString: &units)
+        if length == 1, (0x21...0x7e).contains(units[0]) { return String(UnicodeScalar(UInt8(units[0]))).uppercased() }
+        let latin = Array("ASDFHGZXCV\0BQWERYT123465=97-80]OU[IP\0LJ'K;\\,/NM.")
+        let code = Int(event.getIntegerValueField(.keyboardEventKeycode))
+        return code < latin.count && latin[code] != "\0" ? String(latin[code]) : nil
     }
     private static func rect(_ position: AnyObject, _ size: AnyObject) -> CGRect? {
         var origin = CGPoint.zero, extent = CGSize.zero
