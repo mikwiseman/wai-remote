@@ -63,3 +63,13 @@ A diagnosis of the 25 October session found clicks dying in four places. This ch
 **Diagnostics.** With diagnostics on, `input-delivery` names the outcome (`system`, `window`, `ax-press`, `primer`, `no-target`, `frame-gone`, `cancelled`), `input-rejected` counts rejections per check, `input-unacknowledged` marks input without an acknowledgement after 5 s, and `viewer-recover` names the reconnect cause. All rows are content-free.
 
 `swift test` ran 166 tests (131 + 35) with no failures and the two existing opt-in skips. The iOS app builds for the simulator and the web viewer builds. Still unverified on a device: menus, pop-ups and popovers of background apps, the hover move in Chrome and native apps, and touch double-taps.
+
+## Shortcuts and paste, 27 October
+
+**Background shortcuts.** AppKit and Chromium perform menu key equivalents only for the active app, so a Command shortcut posted to a background window did nothing. For a Command key-down aimed at a window whose app is not frontmost, the host now reads that app's menu bar through accessibility and presses the enabled item whose `AXMenuItemCmdChar` and `AXMenuItemCmdModifiers` match the key and its exact modifiers. Without a match, or if the press fails, the key is posted as before. The lookup runs on the input queue, reads the menus afresh every time, stops after 250 ms and skips the system's Apple menu, which holds Lock Screen and Log Out. A non-Latin layout matches the US Latin key, as AppKit does. Diagnostics label the outcome `menu`. An in-process AppKit menu test covers matching, exact modifiers, submenus, disabled items and the Apple menu. Read-only lookups in the running Finder and Telegram found their enabled Undo, Copy and Paste items in 7–280 ms on a heavily loaded machine; nothing was pressed. Whether a pressed item reaches the right field of a background app after a remote click has not been tested on a device.
+
+**Viewer shortcuts.** The Mac viewer keeps only exact Command-Q, Command-Option-Escape, Command-H/M/,/0, Option-Command-H and Command-V. Command-Q with another modifier no longer quits the viewer, and Option-Command-V or Control-Command-V reach the remote Mac instead of pasting.
+
+**Paste.** A paste of files or images that a pause, a stall, lost control or a closed channel interrupts now shows the viewer's paste failure instead of never arriving. A deliberate disconnect stays quiet.
+
+`swift test` ran 176 tests (140 + 36) with no failures and the two existing opt-in skips.
