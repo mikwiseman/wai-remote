@@ -230,6 +230,9 @@ final class PhoneModel: ObservableObject {
     }
     @discardableResult private func transmit(_ operation: WireMessage?) -> Bool {
         guard let operation, let data = try? JSONEncoder().encode(operation) else { return false }
+        #if DEBUG
+        if Self.demoScreen != nil { return true }
+        #endif
         guard transport?.send(data) == true else { recover(message: "Восстанавливаем соединение…"); return false }
         return true
     }
@@ -339,3 +342,10 @@ final class PhoneModel: ObservableObject {
         hiddenIDs.subtract(erasedIDs); erasedIDs = []; gestureRevision += 1
     }
 }
+
+#if DEBUG
+extension PhoneModel {
+    /// The demo session's stand-in for a Mac's first state message; see `startDemo`.
+    func acceptDemo(_ state: HostState) { _ = try? session.accept(state) }
+}
+#endif

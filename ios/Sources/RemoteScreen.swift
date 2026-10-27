@@ -48,6 +48,10 @@ final class ScreenView: UIView, RTCVideoViewDelegate {
             self.model.receivedFrame = true
         }
         addSubview(content); content.addSubview(video); content.addSubview(ink)
+        #if DEBUG
+        if let image = PhoneModel.demoScreen { let sample = UIImageView(image: image); sample.frame = .zero; sample.autoresizingMask = [.flexibleWidth, .flexibleHeight]; content.insertSubview(sample, aboveSubview: video) }
+        if PhoneModel.demoMoment == "zoomed" { zoom = 2.2; zoomRevision = model.resetZoomRevision }
+        #endif
         isAccessibilityElement = true; accessibilityLabel = "Экран Mac"
         accessibilityHint = "Касание — клик, удержание — перетаскивание. Два пальца — прокрутка или масштаб."
         accessibilityTraits = [.allowsDirectInteraction]
