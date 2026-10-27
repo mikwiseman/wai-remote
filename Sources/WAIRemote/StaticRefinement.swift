@@ -11,14 +11,16 @@ final class StaticRefinement {
     private let queue: DispatchQueue
     private let interval: Double, window: Double
     private let send: (CVPixelBuffer, Double) -> Void
+    private let clock: () -> Double
     private let timer: DispatchSourceTimer
     private var last: CVPixelBuffer?
     private var changed = 0.0
 
     /// `send` runs on `queue` with uptime seconds, for new and repeated frames alike.
     init(queue: DispatchQueue, interval: Double = StaticRefinement.interval, window: Double = StaticRefinement.window,
+         clock: @escaping () -> Double = { ProcessInfo.processInfo.systemUptime },
          send: @escaping (CVPixelBuffer, Double) -> Void) {
-        self.queue = queue; self.interval = interval; self.window = window; self.send = send
+        self.queue = queue; self.interval = interval; self.window = window; self.clock = clock; self.send = send
         timer = DispatchSource.makeTimerSource(queue: queue)
         timer.setEventHandler { [weak self] in self?.repeatLast() }
         timer.schedule(deadline: .distantFuture)
@@ -31,7 +33,7 @@ final class StaticRefinement {
         dispatchPrecondition(condition: .onQueue(queue))
         send(buffer, time)
         // One retained surface out of ScreenCaptureKit's pool of eight.
-        last = buffer; changed = ProcessInfo.processInfo.systemUptime
+        last = buffer; changed = clock()
         timer.schedule(deadline: .now() + interval, repeating: interval, leeway: .milliseconds(5))
     }
     /// On `queue`.
@@ -39,8 +41,9 @@ final class StaticRefinement {
         dispatchPrecondition(condition: .onQueue(queue))
         last = nil; timer.schedule(deadline: .distantFuture)
     }
-    private func repeatLast() {
-        let now = ProcessInfo.processInfo.systemUptime
+    /// On `queue`: one timer tick.
+    func repeatLast() {
+        let now = clock()
         guard let last, now - changed < window else { stop(); return }
         send(last, now)
     }
