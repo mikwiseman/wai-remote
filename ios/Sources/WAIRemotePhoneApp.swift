@@ -11,7 +11,7 @@ import RemoteCore
                 .onOpenURL { model.open($0) }
                 .onChange(of: phase) { _, value in
                     if value == .active { model.resume() }
-                    if value == .inactive, model.connected { model.releaseInput() }
+                    if value == .inactive, model.connected { model.liftHeldInput() }
                     if value == .background, model.connected || model.connecting { model.suspend() }
                 }
         }

@@ -35,6 +35,8 @@ final class ScreenView: UIView, RTCVideoViewDelegate {
     private var erasePrevious: CGPoint?
     private var reportedZoom = false
     var onZoom: ((Bool) -> Void)?
+    // UIKit-like double-tap limits, in phone points: a finger lands less precisely than a pointer.
+    private var taps = ClickSequence()
 
     init(model: PhoneModel) {
         self.model = model; super.init(frame: .zero)
@@ -167,7 +169,10 @@ final class ScreenView: UIView, RTCVideoViewDelegate {
             if model.canDraw {
                 if model.tool == .eraser { model.finishErase() } else { model.endStroke() }
             } else if dragging { model.pointer("up", at: normalized(p)) }
-            else if !moved { model.pointer("down", at: normalized(p)); model.pointer("up", at: normalized(p)) }
+            else if !moved {
+                let count = taps.down(x: p.x, y: p.y, button: 0, now: ProcessInfo.processInfo.systemUptime, interval: 0.5, radius: 22)
+                model.pointer("down", at: normalized(p), clickCount: count); model.pointer("up", at: normalized(p))
+            }
         }
         dragging = false
         if touches.isEmpty { navigation = nil; erasePrevious = nil }

@@ -54,10 +54,13 @@ class MacViewerModel: ObservableObject {
     private var activeStroke: String?
     private var erasedIDs = Set<String>()
     private var pendingMeasurements: [String: (time: Double, kind: String)] = [:]
+    private var hostMeasures = false
     private var nonce = ""
     private var answerAccepted = false
     private var offerStarted = false
     private(set) var lastCursor = InkPoint(0.5, 0.5)
+    private(set) var heldKeys = Set<String>()
+    private var heldButtons = Set<Int>()
     var mode: RemoteMode { session.mode }
     var canControl: Bool { connected && receivedFrame && !connectionInterrupted && !session.invalidated && mode == .control && session.state?.permissions.control == true }
     var canDraw: Bool { connected && receivedFrame && !connectionInterrupted && !session.invalidated && mode == .draw && session.state?.permissions.annotate == true }
@@ -136,10 +139,10 @@ class MacViewerModel: ObservableObject {
             signal.onMessage = { [weak self] message in guard let self, self.attempt == token else { return }; self.signal(message, invite: invite, token: token) }
             signal.onFailure = { [weak self] in
                 guard let self, self.attempt == token else { return }
-                if !self.connected { self.recover(message: "Ожидаем Mac…") }
+                if !self.connected { self.recover(message: "Ожидаем Mac…", cause: "signaling-failed") }
             }
             timeout = Timer.connectionTimer(withTimeInterval: 110, repeats: false) { [weak self] _ in
-                guard let self, self.attempt == token else { return }; self.recover(message: "Mac пока не отвечает…")
+                guard let self, self.attempt == token else { return }; self.recover(message: "Mac пока не отвечает…", cause: "connect-timeout")
             }
             signal.connect()
         } catch { status = "Нужно приглашение с Mac"; detail = "Скопируйте ссылку целиком из WAI Remote. Для первого подключения нужна новая ссылка." }
@@ -151,15 +154,15 @@ class MacViewerModel: ObservableObject {
         peer.onMessage = { [weak self] data in guard let self, self.attempt == token else { return }; self.receive(data) }
         peer.onState = { [weak self] state in
             guard let self, self.attempt == token else { return }
-            if state == .failed || state == .closed { self.recover(message: "Восстанавливаем соединение…") }
+            if state == .failed || state == .closed { self.recover(message: "Восстанавливаем соединение…", cause: state == .failed ? "peer-failed" : "channel-closed") }
             if state == .disconnected {
-                self.cancelGesture(notify: false); self.session.interrupt()
+                self.liftHeldInput(); self.session.interrupt()
                 self.connectionInterrupted = true; self.receivedFrame = false
                 self.status = "Восстанавливаем соединение…"
                 if self.interruptionTimer == nil {
                     self.interruptionTimer = Timer.connectionTimer(withTimeInterval: 5, repeats: false) { [weak self] _ in
                         guard let self, self.attempt == token, self.connectionInterrupted else { return }
-                        self.recover(message: "Восстанавливаем соединение…")
+                        self.recover(message: "Восстанавливаем соединение…", cause: "interruption-timeout")
                     }
                 }
             }
@@ -179,7 +182,7 @@ class MacViewerModel: ObservableObject {
                 if let secret = invite.secret { body["proof"] = DeviceIdentity.pairingProof(secret: secret, payload: payload) }
                 self.signaling?.send(["type": "offer", "body": body])
                 self.status = invite.secret == nil ? "Подключаемся к Mac…" : "Подтвердите на другом Mac"; self.detail = "При первом подключении владелец Mac разрешает просмотр или управление."
-            } catch { self.recover(message: "Ищем сетевой маршрут…") }
+            } catch { self.recover(message: "Ищем сетевой маршрут…", cause: "negotiation") }
         }
     }
     private func signal(_ message: [String: Any], invite: RemoteInvite, token: UUID) {
@@ -197,18 +200,19 @@ class MacViewerModel: ObservableObject {
             status = "Подключаем экран…"
             transport?.answer(sdp) { [weak self] error in
                 guard let self, self.attempt == token else { return }
-                if error != nil { self.recover(message: "Восстанавливаем изображение…") }
+                if error != nil { self.recover(message: "Восстанавливаем изображение…", cause: "negotiation") }
             }
             if let name = payload["name"] as? String, !name.isEmpty, name.utf8.count <= 200,
                !computers.contains(where: { $0.id == invite.hostID }) { computerName = String(name.prefix(60)) }
-        } else if message["type"] as? String == "unavailable" { recover(message: "Ожидаем Mac…") }
+        } else if message["type"] as? String == "unavailable" { recover(message: "Ожидаем Mac…", cause: "host-unavailable") }
         else if message["type"] as? String == "reject" {
             let reason = (message["body"] as? [String: Any])?["reason"] as? String
-            if reason == "network" || reason == "busy" { recover(message: reason == "busy" ? "Mac занят. Ожидаем освобождения…" : "Восстанавливаем соединение…"); return }
+            if reason == "network" || reason == "busy" { recover(message: reason == "busy" ? "Mac занят. Ожидаем освобождения…" : "Восстанавливаем соединение…", cause: reason == "busy" ? "host-busy" : "host-network"); return }
             disconnect(message: reason == "busy" ? "К Mac уже подключено другое устройство." : reason == "network" ? "Не удалось установить соединение через интернет. Попробуйте подключиться снова." : reason == "new-invite-required" ? "Откройте доступ к экрану Mac и создайте новое приглашение." : "Подключение отклонено на Mac.")
         }
     }
-    func recover(message: String) {
+    func recover(message: String, cause: String) {
+        PerformanceLog.record("viewer-recover", ["cause": cause, "connected": connected])
         let target = currentInvite.flatMap { invite in
             invite.secret == nil || connected || answerAccepted ? invite.savedURL.absoluteString : nil
         } ?? recoveryInvitation
@@ -236,19 +240,32 @@ class MacViewerModel: ObservableObject {
         if let activity { ProcessInfo.processInfo.endActivity(activity); self.activity = nil }
         connecting = false; connected = false; connectionInterrupted = false; receivedFrame = false; track = nil; session = ViewerSession()
         strokes = []; previews = [:]; snapshot = nil; hiddenIDs = []; erasedIDs = []; activeStroke = nil; selectedID = nil
-        answerAccepted = false; offerStarted = false; gestureRevision += 1
-        currentInvite = nil; pendingMeasurements.removeAll(); pasteFailure = nil
+        answerAccepted = false; offerStarted = false; gestureRevision += 1; heldKeys = []; heldButtons = []
+        currentInvite = nil; pendingMeasurements.removeAll(); hostMeasures = false; pasteFailure = nil
         if !message.isEmpty { status = message; detail = "" }
     }
-    func releaseInput() { cancelGesture(notify: true); _ = transmit(session.release()) }
+    /// The explicit release: the host lifts everything and starts a new epoch.
+    func releaseInput() { cancelGesture(notify: true); heldKeys = []; heldButtons = []; _ = transmit(session.release()) }
+    /// Focus left the remote screen. End only what this viewer holds and keep
+    /// the session valid, so the next click needs no round trip to the host.
+    func liftHeldInput() {
+        cancelGesture(notify: true)
+        for button in heldButtons.sorted() { pointer("up", at: lastCursor, button: button) }
+        for key in heldKeys.sorted() { keyEvent(key, action: "up") }
+    }
+    var outgoingBytes: UInt64 { transport?.bufferedAmount ?? 0 }
     @discardableResult private func transmit(_ operation: WireMessage?) -> Bool {
         guard let operation, let data = try? JSONEncoder().encode(operation) else { return false }
         if PerformanceLog.enabled && (operation.type == "heartbeat" || operation.type == "pointer" && operation.action != "move") {
             let now = ProcessInfo.processInfo.systemUptime
-            pendingMeasurements = pendingMeasurements.filter { now - $0.value.time < 30 }
+            // Only a host that acknowledges input at all can leave it unacknowledged.
+            for (id, sent) in pendingMeasurements where now - sent.time >= 5 {
+                if hostMeasures { PerformanceLog.record("input-unacknowledged", ["kind": sent.kind]) }
+                pendingMeasurements[id] = nil
+            }
             pendingMeasurements[operation.operationID] = (now, operation.action ?? operation.type)
         }
-        guard transport?.send(data) == true else { recover(message: "Восстанавливаем соединение…"); return false }
+        guard transport?.send(data) == true else { recover(message: "Восстанавливаем соединение…", cause: "transmit-failed"); return false }
         return true
     }
     @discardableResult func send(_ type: String, edit: (inout WireMessage) -> Void = { _ in }) -> Bool {
@@ -262,6 +279,7 @@ class MacViewerModel: ObservableObject {
             switch m["type"] as? String {
             case "heartbeatAck": heartbeatAcknowledged = true
             case "performanceAck":
+                hostMeasures = true
                 if let id = m["id"] as? String, let sent = pendingMeasurements.removeValue(forKey: id) {
                     PerformanceLog.record("input-roundtrip", ["kind": sent.kind, "ms": (ProcessInfo.processInfo.systemUptime - sent.time) * 1000])
                 }
@@ -278,7 +296,7 @@ class MacViewerModel: ObservableObject {
                     heartbeat = Timer.connectionTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
                         guard let self else { return }
                         if self.heartbeatAcknowledged && ProcessInfo.processInfo.systemUptime - self.lastReply > 8 {
-                            self.recover(message: "Восстанавливаем соединение…")
+                            self.recover(message: "Восстанавливаем соединение…", cause: "heartbeat-timeout")
                         } else { _ = self.send("heartbeat") }
                     }
                 }
@@ -313,16 +331,21 @@ class MacViewerModel: ObservableObject {
             }
         } catch { disconnect(message: "Не удалось продолжить соединение. Подключитесь снова.") }
     }
-    func changeMode(_ mode: RemoteMode) { cancelGesture(notify: true); _ = transmit(session.changeMode(mode)); selectedID = nil }
+    func changeMode(_ mode: RemoteMode) { liftHeldInput(); _ = transmit(session.changeMode(mode)); selectedID = nil }
     func changeTool(_ value: DrawingTool) { cancelGesture(notify: true); tool = value; selectedID = nil }
-    func pointer(_ action: String, at point: InkPoint, button: Int = 0, dx: Double = 0, dy: Double = 0, modifiers: [String] = []) {
-        guard canControl else { return }; lastCursor = point
-        send("pointer") { $0.action = action; $0.x = point.x; $0.y = point.y; $0.button = button; $0.deltaX = min(2000, max(-2000, dx)); $0.deltaY = min(2000, max(-2000, dy)); $0.modifiers = modifiers }
+    func pointer(_ action: String, at point: InkPoint, button: Int = 0, dx: Double = 0, dy: Double = 0, modifiers: [String] = [], clickCount: Int? = nil) {
+        // Ending a held button needs no control: it can only release.
+        guard action == "up" ? heldButtons.remove(button) != nil : canControl else { return }; lastCursor = point
+        // A congested channel would queue stale positions ahead of the next click
+        // and then fail a send, forcing a reconnect. Hover can skip a beat.
+        if action == "move" && outgoingBytes > 16_384 { return }
+        if send("pointer", edit: { $0.action = action; $0.x = point.x; $0.y = point.y; $0.button = button; $0.deltaX = min(2000, max(-2000, dx)); $0.deltaY = min(2000, max(-2000, dy)); $0.modifiers = modifiers; $0.clickCount = clickCount }),
+           action == "down" { heldButtons.insert(button) }
     }
     func rightClick() { pointer("down", at: lastCursor, button: 2); pointer("up", at: lastCursor, button: 2) }
     func keyEvent(_ key: String, action: String, modifiers: [String] = []) {
-        guard canControl else { return }
-        send("key") { $0.key = key; $0.action = action; $0.modifiers = modifiers }
+        guard action == "up" ? heldKeys.remove(key) != nil : canControl else { return }
+        if send("key", edit: { $0.key = key; $0.action = action; $0.modifiers = modifiers }), action == "down" { heldKeys.insert(key) }
     }
     func key(_ key: String, modifiers: [String] = []) {
         guard canControl else { return }

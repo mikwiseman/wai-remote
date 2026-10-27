@@ -53,10 +53,18 @@ let live=false,zoom=1,lastCursor:Point={x:.5,y:.5},activePointer:number|undefine
 let currentStrokeID:string|undefined;
 let laserTrail:Array<Point & {time:number}>=[],laserFrame=0;
 const touchPointers=new Map<number,{x:number;y:number}>();
-let touchStart:{x:number;y:number;t:number}|undefined,dragging=false,longPress:number|undefined;
+let touchStart:{x:number;y:number;t:number}|undefined,dragging=false,dragButton=0,longPress:number|undefined;
 let pinchDistance=0,pinchZoom=1,touchMoved=false;
 let navigationGesture:'pending'|'pan'|'zoom'|undefined,navigationStart:Point|undefined;
 let invalidated=false;
+// Chromium reports PointerEvent.detail as 0 on pointerdown, so count clicks
+// here, where they happen. Network delay must not merge or split them.
+let lastPress:{x:number;y:number;t:number;button:number;count:number}|undefined;
+function clickCount(event:PointerEvent,button:number){
+  const now=performance.now(),slop=event.pointerType==='touch'?22:4;
+  const count=lastPress&&lastPress.button===button&&now-lastPress.t<=500&&Math.hypot(event.clientX-lastPress.x,event.clientY-lastPress.y)<=slop?Math.min(lastPress.count+1,3):1;
+  lastPress={x:event.clientX,y:event.clientY,t:now,button,count};return count;
+}
 const pressedPhysical=new Set<string>();
 
 function updateConnectButton(){
@@ -181,7 +189,8 @@ async function createOffer(name:string,token:number,configuration:RTCConfigurati
   peer.onconnectionstatechange=()=>{
     if(token!==connectionToken)return;
     if(peer.connectionState==='failed')recover('Восстанавливаем соединение…');
-    if(peer.connectionState==='disconnected'){release();el('connectionLabel').textContent='Восстанавливаем соединение…';if(!interruptionTimer)interruptionTimer=window.setTimeout(()=>{if(token===connectionToken)recover('Восстанавливаем соединение…');},5000);}
+    // Pause output until the host's next state; the host keeps the epoch.
+    if(peer.connectionState==='disconnected'){lift();invalidated=true;el('connectionLabel').textContent='Восстанавливаем соединение…';if(!interruptionTimer)interruptionTimer=window.setTimeout(()=>{if(token===connectionToken)recover('Восстанавливаем соединение…');},5000);}
   };
   await peer.setLocalDescription(await peer.createOffer());
   await new Promise<void>((resolve,reject)=>{
@@ -208,6 +217,9 @@ async function createOffer(name:string,token:number,configuration:RTCConfigurati
 
 function send(type:string,fields:Record<string,unknown>={}):boolean{
   if(!host||!channel||channel.readyState!=='open'||invalidated)return false;
+  // Hover can skip a beat; a backlog of stale positions would delay the next
+  // click and then overflow, closing the channel.
+  if(type==='pointer'&&fields.action==='move'&&channel.bufferedAmount>16384)return false;
   if(channel.bufferedAmount>128000){invalidated=true;channel.close();return false;}
   const op:Operation={v:1,type,sessionID:host.sessionID,controllerEpoch:host.controllerEpoch,inputEpoch:host.inputEpoch,modeGeneration:generation,
     surfaceID:host.surface.id,geometryRevision:host.surface.revision,layerEpoch:host.layerEpoch,operationID:crypto.randomUUID(),sequence:sequence++,...fields};
@@ -342,11 +354,15 @@ function locationPoint(event:PointerEvent):Point{const r=canvas.getBoundingClien
 function cancelGesture(notify:boolean){
   clearTimeout(longPress);
   if(currentStrokeID&&notify)send('strokeCancel',{strokeID:currentStrokeID});
-  if(dragging&&notify)send('pointer',{action:'up',...lastCursor,button:0});
+  if(dragging&&notify)send('pointer',{action:'up',...lastCursor,button:dragButton});
   if(activePointer!==undefined&&canvas.hasPointerCapture(activePointer))canvas.releasePointerCapture(activePointer);
   activePointer=undefined;currentStrokeID=undefined;preview=undefined;dragging=false;touchPointers.clear();touchStart=undefined;navigationGesture=undefined;navigationStart=undefined;erasingIDs.clear();erasePoint=undefined;render();
 }
+// The explicit release starts a new host epoch; only disconnect uses it.
 function release(){if(host&&live){cancelGesture(true);send('release');invalidated=true;pressedPhysical.clear();}}
+// Focus loss ends only what this viewer holds and keeps the session valid,
+// so the first click after returning needs no round trip to the host.
+function lift(){if(host&&live){cancelGesture(true);for(const key of pressedPhysical)send('key',{action:'up',key,modifiers:[]});pressedPhysical.clear();}}
 canvas.addEventListener('contextmenu',event=>event.preventDefault());
 canvas.addEventListener('pointerdown',event=>{
   if(!host||mode==='paused'||invalidated)return;event.preventDefault();
@@ -368,10 +384,10 @@ canvas.addEventListener('pointerdown',event=>{
   }else if(event.pointerType==='touch'){
     touchStart={x:event.clientX,y:event.clientY,t:performance.now()};touchMoved=false;
     if(el<HTMLSelectElement>('touchMode').value==='direct')lastCursor=locationPoint(event);
-    longPress=window.setTimeout(()=>{if(touchPointers.size===1&&mode==='control'){dragging=true;send('pointer',{action:'down',...lastCursor,button:0});}},400);
+    longPress=window.setTimeout(()=>{if(touchPointers.size===1&&mode==='control'){dragging=true;dragButton=0;send('pointer',{action:'down',...lastCursor,button:0});}},400);
   }else{
     if(!matchMedia('(pointer:coarse)').matches){el('typingPanel').classList.add('hidden');typing.focus({preventScroll:true});}
-    lastCursor=locationPoint(event);send('pointer',{action:'down',...lastCursor,button:event.button,modifiers:modifiers(event)});dragging=true;
+    lastCursor=locationPoint(event);send('pointer',{action:'down',...lastCursor,button:event.button,modifiers:modifiers(event),clickCount:clickCount(event,event.button)});dragging=true;dragButton=event.button;
   }
 });
 canvas.addEventListener('pointermove',event=>{
@@ -414,14 +430,14 @@ canvas.addEventListener('pointerup',event=>{
     if(mode==='draw'&&el<HTMLSelectElement>('tool').value==='eraser'){const ids=[...erasingIDs];erasingIDs.clear();erasePoint=undefined;eraseObjects(ids);}
     else if(preview){const stroke=preview;pendingStrokes.set(stroke.id,stroke);send('strokeEnd',{strokeID:stroke.id});preview=undefined;currentStrokeID=undefined;}
     else if(mode==='control'&&count<2){
-      if(event.pointerType==='touch'&&!dragging&&!touchMoved&&touchStart&&performance.now()-touchStart.t<500){send('pointer',{action:'down',...lastCursor,button:0});send('pointer',{action:'up',...lastCursor,button:0});}
+      if(event.pointerType==='touch'&&!dragging&&!touchMoved&&touchStart&&performance.now()-touchStart.t<500){send('pointer',{action:'down',...lastCursor,button:0,clickCount:clickCount(event,0)});send('pointer',{action:'up',...lastCursor,button:0});}
       else if(dragging)send('pointer',{action:'up',...lastCursor,button:event.pointerType==='touch'?0:event.button,modifiers:modifiers(event)});
     }
     activePointer=undefined;dragging=false;touchStart=undefined;
   }
   if(canvas.hasPointerCapture(event.pointerId))canvas.releasePointerCapture(event.pointerId);render();
 });
-canvas.addEventListener('pointercancel',()=>release());
+canvas.addEventListener('pointercancel',()=>lift());
 canvas.addEventListener('wheel',event=>{if(mode==='control'&&host){event.preventDefault();send('pointer',{action:'scroll',...locationPoint(event as unknown as PointerEvent),deltaX:Math.max(-2000,Math.min(2000,event.deltaX)),deltaY:Math.max(-2000,Math.min(2000,event.deltaY)),modifiers:modifiers(event)});}},{passive:false});
 
 function sendText(text:string){
@@ -461,4 +477,4 @@ document.addEventListener('keydown',event=>{
   else if(event.key==='Delete'||event.key==='Backspace'){event.preventDefault();if(selectedID)eraseObjects([selectedID]);}
   else if(event.key==='Escape'){event.preventDefault();if(activePointer!==undefined){cancelGesture(true);}else if(selectedID){selectedID=undefined;updateTools();render();}else switchMode('control');}
 });
-window.addEventListener('blur',()=>release());document.addEventListener('visibilitychange',()=>{if(document.hidden)release();});window.addEventListener('pagehide',()=>{release();cleanup();});
+window.addEventListener('blur',()=>lift());document.addEventListener('visibilitychange',()=>{if(document.hidden)lift();});window.addEventListener('pagehide',()=>{release();cleanup();});

@@ -67,6 +67,33 @@ final class ViewerTests: XCTestCase {
         XCTAssertNotNil(viewer.make("heartbeat"))
     }
 
+    func testInterruptionPausesOutputUntilTheHostSpeaksWithoutANewEpoch() throws {
+        let host = SessionMachine(surface: .init(id: "s", width: 1280, height: 800))
+        var viewer = ViewerSession()
+        _ = try viewer.accept(host.state)
+        let sent = try XCTUnwrap(viewer.make("heartbeat"))
+        viewer.interrupt()
+        XCTAssertNil(viewer.make("heartbeat"))
+        XCTAssertTrue(host.handle(sent, now: 1).accepted)
+        XCTAssertTrue(host.tick(now: 3.1).stateChanged)
+        XCTAssertFalse(try viewer.accept(host.state))
+        let resumed = try XCTUnwrap(viewer.make("heartbeat"), "The host's stall state is enough; it keeps the epoch.")
+        XCTAssertTrue(host.handle(resumed, now: 3.2).accepted)
+        XCTAssertFalse(host.stalled)
+    }
+
+    func testReleaseDuringAnInterruptionDoesNotWaitForAnEpochTheHostNeverStarts() throws {
+        let host = SessionMachine(surface: .init(id: "s", width: 1280, height: 800))
+        var viewer = ViewerSession()
+        _ = try viewer.accept(host.state)
+        XCTAssertTrue(host.handle(try XCTUnwrap(viewer.make("heartbeat")), now: 1).accepted)
+        viewer.interrupt()
+        XCTAssertNil(viewer.release(), "Nothing reaches the host while the transport is down.")
+        XCTAssertTrue(host.tick(now: 3.1).stateChanged)
+        _ = try viewer.accept(host.state)
+        XCTAssertNotNil(viewer.make("heartbeat"), "An unsent release must not block input until a heartbeat timeout.")
+    }
+
     func testViewOnlyGuestCanFinishDrawingWithoutGainingControl() throws {
         let host = SessionMachine(surface: .init(id: "s", width: 1280, height: 800),
                                   permissions: .init(control: false, annotate: true))

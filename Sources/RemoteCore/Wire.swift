@@ -51,6 +51,7 @@ public struct WireMessage: Codable, Sendable {
     public var x: Double?
     public var y: Double?
     public var button: Int?
+    public var clickCount: Int?
     public var deltaX: Double?
     public var deltaY: Double?
     public var key: String?
@@ -93,5 +94,9 @@ public struct SessionEffects: Sendable {
     public var input: WireMessage?
     public var laser: InkPoint?
     public var error: String?
+    /// A fixed label naming the check a rejected message failed, for diagnostics.
+    public var rejected: String?
+    /// Send the viewer state and ink once for a burst of stale messages.
+    public var resync = false
     public init() {}
 }

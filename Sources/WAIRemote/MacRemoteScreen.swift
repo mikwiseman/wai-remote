@@ -78,7 +78,6 @@ final class RemoteScreenView: NSView, NSTextInputClient {
     private let ink = InkView()
     private(set) var renderer: FrameRenderer?
     private var track: RTCVideoTrack?
-    private var pressedKeys = Set<UInt16>()
     private var pointerDown = false
     private var marked = NSAttributedString(string: "")
     override var isFlipped: Bool { true }
@@ -143,7 +142,7 @@ final class RemoteScreenView: NSView, NSTextInputClient {
         renderer?.stop()
         renderer = nil; track = nil
         video?.removeFromSuperview(); video = nil
-        pressedKeys.removeAll(); pointerDown = false
+        pointerDown = false
     }
     override func updateTrackingAreas() {
         for area in trackingAreas { removeTrackingArea(area) }
@@ -161,7 +160,7 @@ final class RemoteScreenView: NSView, NSTextInputClient {
         if action == "down" { window?.makeFirstResponder(self); pointerDown = true }
         if model.canDraw, button == 0 {
             switch action { case "down": model.beginStroke(at: point); case "move" where pointerDown: model.appendStroke(at: point); case "up": model.endStroke(); default: break }
-        } else { model.pointer(action, at: point, button: button, modifiers: modifiers(event)) }
+        } else { model.pointer(action, at: point, button: button, modifiers: modifiers(event), clickCount: action == "down" ? event.clickCount : nil) }
         if action == "up" { pointerDown = false }
     }
     override func mouseDown(with event: NSEvent) { pointer("down", event) }
@@ -181,18 +180,19 @@ final class RemoteScreenView: NSView, NSTextInputClient {
     }
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         guard window?.firstResponder === self, model.canControl, event.modifierFlags.contains(.command) else { return false }
+        // Exact modifier sets: every other combination belongs to the remote Mac.
+        let flags = event.modifierFlags.intersection([.command, .control, .option, .shift])
         // Always leave an escape hatch and the app's own Quit shortcut on this Mac.
-        if (event.keyCode == 53 && event.modifierFlags.contains(.option)) || event.keyCode == 12 {
+        if (flags == [.command, .option] && event.keyCode == 53) || (flags == .command && event.keyCode == 12) {
             model.releaseInput(); window?.makeFirstResponder(nil)
             return event.keyCode != 12
         }
-        let flags = event.modifierFlags.intersection([.command, .control, .option, .shift])
         if (flags == .command && [4, 46, 43, 29].contains(event.keyCode)) ||
             (flags == [.command, .option] && event.keyCode == 4) {
-            model.releaseInput(); pressedKeys.removeAll()
+            model.liftHeldInput()
             return false
         }
-        if event.keyCode == 9 && !event.modifierFlags.contains(.shift) {
+        if flags == .command && event.keyCode == 9 {
             paste(nil); return true
         }
         guard let code = InputInjector.keyCodes.first(where: { $0.value == event.keyCode })?.key else { return false }
@@ -212,17 +212,14 @@ final class RemoteScreenView: NSView, NSTextInputClient {
            ![36,48,51,53,76,96,97,98,99,100,101,103,109,111,115,116,117,118,119,120,121,122,123,124,125,126].contains(event.keyCode) {
             interpretKeyEvents([event])
         } else if let code = InputInjector.keyCodes.first(where: { $0.value == event.keyCode })?.key {
-            pressedKeys.insert(event.keyCode)
             model.keyEvent(code, action: "down", modifiers: modifiers(event))
         }
     }
     override func keyUp(with event: NSEvent) {
-        guard pressedKeys.remove(event.keyCode) != nil,
-              let code = InputInjector.keyCodes.first(where: { $0.value == event.keyCode })?.key else { return }
+        guard let code = InputInjector.keyCodes.first(where: { $0.value == event.keyCode })?.key else { return }
         model.keyEvent(code, action: "up", modifiers: modifiers(event))
     }
     override func flagsChanged(with event: NSEvent) {
-        guard model.canControl else { return }
         let flag: NSEvent.ModifierFlags
         switch event.keyCode {
         case 54, 55: flag = .command
@@ -233,12 +230,11 @@ final class RemoteScreenView: NSView, NSTextInputClient {
         }
         guard let code = InputInjector.keyCodes.first(where: { $0.value == event.keyCode })?.key else { return }
         // Aggregate flags can remain set while the other side is still held.
-        let down = event.modifierFlags.contains(flag) && !pressedKeys.contains(event.keyCode)
-        if down { pressedKeys.insert(event.keyCode) } else { pressedKeys.remove(event.keyCode) }
+        let down = event.modifierFlags.contains(flag) && !model.heldKeys.contains(code)
         model.keyEvent(code, action: down ? "down" : "up", modifiers: modifiers(event))
     }
     override func resignFirstResponder() -> Bool {
-        model.releaseInput(); pressedKeys.removeAll(); pointerDown = false; unmarkText()
+        model.liftHeldInput(); pointerDown = false; unmarkText()
         return super.resignFirstResponder()
     }
     // interpretKeyEvents uses the NSResponder entry point for simple text;

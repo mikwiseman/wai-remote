@@ -9,9 +9,14 @@ final class InputInjector {
     var allowed: Bool { CGPreflightPostEventAccess() }
     private let delivery = InputDeliveryQueue()
     private let events = InjectedEvents()
-    func setWindowTarget(_ target: WindowInputTarget?) { releaseAll(); windowTarget = target; independentPointer = false }
-    func setIndependentPointer(_ enabled: Bool) { releaseAll(); windowTarget = nil; independentPointer = enabled }
-    func releaseAll() { delivery.cancel { [events] in events.releaseAll() } }
+    func setWindowTarget(_ target: WindowInputTarget?) { resetSession(); windowTarget = target; independentPointer = false }
+    func setIndependentPointer(_ enabled: Bool) { resetSession(); windowTarget = nil; independentPointer = enabled }
+    /// Stalls, pauses and focus loss end held buttons and keys after the input
+    /// already queued. Typing still follows the last clicked window, so a paste
+    /// after the pause arrives.
+    func liftHeld() { delivery.lift { [events] in events.liftHeld() } }
+    /// Only a disconnect or a new input mode or target forgets that window.
+    func resetSession() { delivery.cancel { [events] in events.resetSession() } }
     func apply(_ message: WireMessage) {
         let target = windowTarget, bounds = bounds, independent = independentPointer, excluded = excludedWindows
         let received = ProcessInfo.processInfo.systemUptime
@@ -20,15 +25,22 @@ final class InputInjector {
             events.independentPointer = independent; events.excludedWindows = excluded
             let started = ProcessInfo.processInfo.systemUptime
             events.apply(message)
-            if message.type == "text" || message.type == "pointer" && message.action != "move" {
-                PerformanceLog.record("input-delivery", ["kind": message.type, "action": message.action ?? "",
+            if message.type == "text" || message.type == "pointer" && message.action != "move" ||
+                message.type == "key" && message.action == "down" && (message.modifiers ?? []).contains("Meta") {
+                var row: [String: Any] = ["kind": message.type, "action": message.action ?? "",
                     "textUnits": message.text?.utf16.count ?? 0, "queueMs": (started - received) * 1000,
-                    "handlingMs": (ProcessInfo.processInfo.systemUptime - started) * 1000])
+                    "handlingMs": (ProcessInfo.processInfo.systemUptime - started) * 1000]
+                row["outcome"] = events.outcome?.rawValue
+                PerformanceLog.record("input-delivery", row)
             }
         }
     }
     static let keyCodes = InjectedEvents.keyCodes
 }
+
+/// Where a click or text went, as a fixed diagnostic label. The host
+/// acknowledges input before delivery, so the acknowledgement cannot say.
+enum InputOutcome: String { case system, window, axPress = "ax-press", primer, menu, noTarget = "no-target", frameGone = "frame-gone", cancelled }
 
 private enum InputDestination: Equatable {
     case system, window(WindowInputTarget), unavailable
@@ -43,6 +55,8 @@ private final class InjectedEvents {
     private var lastClickDestination = InputDestination.unavailable
     private var desktop = DesktopInputTarget()
     private var lastPoint = CGPoint.zero
+    private var hovered: CGPoint?
+    private(set) var outcome: InputOutcome?
     private var clickSequence = ClickSequence()
     private var clickCounts: [Int: Int] = [:]
     private var windowButton: WindowInputTarget.Button?
@@ -54,20 +68,21 @@ private final class InjectedEvents {
     var excludedWindows = Set<CGWindowID>()
     var isCurrent: () -> Bool = { true }
     var allowed: Bool { CGPreflightPostEventAccess() }
-    private func post(_ event: CGEvent?, to target: InputDestination? = nil, releasing: Bool = false) {
-        guard releasing || isCurrent() else { return }
+    private func post(_ event: CGEvent?, to target: InputDestination? = nil, releasing: Bool = false, hover: Bool = false) {
+        guard releasing || isCurrent() else { outcome = .cancelled; return }
         event?.setIntegerValueField(.eventSourceUserData, value: 0x574149)
         guard let event else { return }
         switch target ?? destination {
-        case .window(let window): window.post(event, permitted: { releasing || isCurrent() })
-        case .system: event.post(tap: .cghidEventTap)
-        case .unavailable: break
+        case .window(let window): outcome = window.post(event, permitted: { releasing || isCurrent() }, hover: hover)
+        case .system: event.post(tap: .cghidEventTap); outcome = .system
+        case .unavailable: outcome = .noTarget
         }
     }
     func apply(_ m: WireMessage) {
-        guard allowed else { releaseAll(); return }
+        outcome = nil
+        guard allowed else { liftHeld(); outcome = .cancelled; return }
         if let windowTarget {
-            guard let frame = windowTarget.frame else { releaseAll(); return }
+            guard let frame = windowTarget.frame else { liftHeld(); outcome = .frameGone; return }
             bounds = frame
         }
         destination = windowTarget.map(InputDestination.window) ?? (independentPointer ? .unavailable : .system)
@@ -84,7 +99,8 @@ private final class InjectedEvents {
                 guard let target, target.frame != nil else {
                     // A press in empty space stays empty until release. Never
                     // substitute a global event or another app for a lost target.
-                    if !buttons.isEmpty || windowButton != nil { releaseAll() }
+                    if !buttons.isEmpty || windowButton != nil { liftHeld() }
+                    outcome = target == nil ? .noTarget : .frameGone
                     return
                 }
             }
@@ -95,7 +111,7 @@ private final class InjectedEvents {
             }
             if action == "up", b == 0, let pressed = windowButton {
                 windowButton = nil
-                if pressed.frame.contains(p) { _ = pressed.press(if: isCurrent) }
+                outcome = pressed.frame.contains(p) && pressed.press(if: isCurrent) ? .axPress : isCurrent() ? .noTarget : .cancelled
                 return
             }
             if action == "down", b == 0 {
@@ -108,7 +124,7 @@ private final class InjectedEvents {
                         "accessibilityTrusted": AXIsProcessTrusted(),
                         "lookupMs": (ProcessInfo.processInfo.systemUptime - lookupStarted) * 1000])
                 }
-                if let pressed { windowButton = pressed; return }
+                if let pressed { windowButton = pressed; outcome = .axPress; return }
             }
             if windowButton != nil {
                 if action == "move" { return }
@@ -128,7 +144,7 @@ private final class InjectedEvents {
                     buttons.insert(b)
                     windowGesture = Int64(DispatchTime.now().uptimeNanoseconds)
                     clickCounts[b] = clickSequence.down(x: p.x, y: p.y, button: b,
-                        now: ProcessInfo.processInfo.systemUptime, interval: NSEvent.doubleClickInterval)
+                        now: ProcessInfo.processInfo.systemUptime, interval: NSEvent.doubleClickInterval, reported: m.clickCount)
                 }
                 if action == "up" && !buttons.contains(b) { return }
                 let type: CGEventType = action == "down" ? down : action == "up" ? up : buttons.isEmpty ? .mouseMoved : drag
@@ -143,7 +159,9 @@ private final class InjectedEvents {
                     event?.setIntegerValueField(.mouseEventDeltaX, value: Int64((p.x - previousPoint.x).rounded()))
                     event?.setIntegerValueField(.mouseEventDeltaY, value: Int64((p.y - previousPoint.y).rounded()))
                 }
-                post(event)
+                // Taps from touch viewers arrive without a preceding move.
+                post(event, hover: action == "down" && hovered != p)
+                hovered = p
                 if action == "up" { buttons.remove(b); clickCounts[b] = nil }
                 if action == "move" && !buttons.isEmpty { clickSequence.reset() }
             }
@@ -157,6 +175,8 @@ private final class InjectedEvents {
             event?.flags = Self.flags(m.modifiers ?? [])
             if down { keys[code] = destination } else { keys[code] = nil }
             post(event)
+            // A pressed menu item consumed the shortcut; its key-up has no key-down.
+            if outcome == .menu { keys[code] = nil }
         } else if m.type == "text", let text = m.text {
             if independentPointer { destination = desktop.keyboardTarget.map(InputDestination.window) ?? .unavailable }
             // Chunk on Character boundaries; never split a surrogate pair or composed character.
@@ -173,7 +193,7 @@ private final class InjectedEvents {
             flush()
         }
     }
-    func releaseAll() {
+    func liftHeld() {
         windowButton = nil
         for b in buttons {
             let type: CGEventType = b == 2 ? .rightMouseUp : b == 1 ? .otherMouseUp : .leftMouseUp
@@ -183,8 +203,9 @@ private final class InjectedEvents {
         }
         for (code, target) in keys { let event = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: false); event?.flags = []; post(event, to: target, releasing: true) }
         buttons.removeAll(); keys.removeAll(); clickCounts.removeAll(); clickSequence.reset()
-        desktop.reset(); destination = .unavailable; buttonDestination = .unavailable; lastClickDestination = .unavailable
+        desktop.liftHeld(); destination = .unavailable; buttonDestination = .unavailable; lastClickDestination = .unavailable
     }
+    func resetSession() { liftHeld(); desktop.reset() }
     private static func flags(_ modifiers: [String]) -> CGEventFlags {
         var f: CGEventFlags = []
         for m in modifiers { switch m { case "Meta": f.insert(.maskCommand); case "Control": f.insert(.maskControl); case "Alt": f.insert(.maskAlternate); case "Shift": f.insert(.maskShift); default: break } }

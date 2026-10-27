@@ -9,13 +9,19 @@ import AVFoundation
 @MainActor
 final class RemoteScreenTests: XCTestCase {
     private final class InputRecorder: MacViewerModel {
-        var input: [(key: String, action: String, modifiers: [String])] = []
         var operations: [WireMessage] = []
+        var input: [(key: String, action: String, modifiers: [String])] {
+            operations.filter { $0.type == "key" }.map { ($0.key ?? "", $0.action ?? "", $0.modifiers ?? []) }
+        }
+        var releases = 0
+        var outgoing: UInt64 = 0
+        override var outgoingBytes: UInt64 { outgoing }
         let host = SessionMachine(surface: Surface(id: "test", width: 1920, height: 1080))
         override var canControl: Bool { true }
-        override func keyEvent(_ key: String, action: String, modifiers: [String] = []) {
-            input.append((key, action, modifiers))
-        }
+        override func releaseInput() { releases += 1; super.releaseInput() }
+        var pastes = 0
+        override func paste() { pastes += 1 }
+        var sent: [String] { operations.map { "\($0.type) \($0.key ?? String($0.button ?? -1)) \($0.action ?? "")" } }
         override func send(_ type: String, edit: (inout WireMessage) -> Void = { _ in }) -> Bool {
             var message = WireMessage(type: type, state: host.state)
             message.sequence = operations.count
@@ -56,6 +62,96 @@ final class RemoteScreenTests: XCTestCase {
         XCTAssertTrue(model.input.isEmpty, "Hide, minimize, settings and home belong to the local app.")
     }
 
+    private func focusedScreen(_ model: InputRecorder) -> (RemoteScreenView, NSWindow) {
+        _ = NSApplication.shared
+        let screen = RemoteScreenView(model: model)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 480),
+            styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = screen
+        window.makeFirstResponder(screen)
+        return (screen, window)
+    }
+    private func holdShiftAndButton(on screen: RemoteScreenView, in window: NSWindow) throws {
+        screen.flagsChanged(with: try XCTUnwrap(NSEvent.keyEvent(with: .flagsChanged, location: .zero, modifierFlags: .shift,
+            timestamp: 0, windowNumber: window.windowNumber, context: nil, characters: "", charactersIgnoringModifiers: "",
+            isARepeat: false, keyCode: 56)))
+        screen.mouseDown(with: try click(in: window))
+    }
+    private func click(in window: NSWindow) throws -> NSEvent {
+        try XCTUnwrap(NSEvent.mouseEvent(with: .leftMouseDown, location: NSPoint(x: 320, y: 240), modifierFlags: [],
+            timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+    }
+
+    func testLosingFocusLiftsHeldInputAndTheNextClickNeedsNoHostRoundTrip() throws {
+        let model = InputRecorder(identity: DeviceIdentity())
+        let (screen, window) = focusedScreen(model)
+        defer { window.close() }
+        try holdShiftAndButton(on: screen, in: window)
+        XCTAssertEqual(model.sent, ["key ShiftLeft down", "pointer 0 down"])
+        window.makeFirstResponder(nil)
+        XCTAssertEqual(model.sent.dropFirst(2), ["pointer 0 up", "key ShiftLeft up"])
+        XCTAssertEqual(model.releases, 0, "A release blocks all input until the host answers with a new epoch.")
+        window.makeFirstResponder(screen)
+        screen.mouseDown(with: try click(in: window))
+        XCTAssertEqual(model.sent.last, "pointer 0 down")
+    }
+
+    func testViewerWindowLosingKeyLiftsHeldInputWithoutReleasingTheSession() throws {
+        let model = InputRecorder(identity: DeviceIdentity())
+        let (screen, window) = focusedScreen(model)
+        defer { window.close() }
+        let delegate = AppDelegate()
+        delegate.viewer = model; delegate.viewerWindow = window
+        try holdShiftAndButton(on: screen, in: window)
+        delegate.windowDidResignKey(Notification(name: NSWindow.didResignKeyNotification, object: window))
+        XCTAssertEqual(model.sent.dropFirst(2), ["pointer 0 up", "key ShiftLeft up"])
+        XCTAssertEqual(model.releases, 0)
+    }
+
+    func testLocalWindowShortcutsLiftHeldInputButOnlyTheEscapeShortcutReleases() throws {
+        let model = InputRecorder(identity: DeviceIdentity())
+        let (screen, window) = focusedScreen(model)
+        defer { window.close() }
+        func shortcut(_ code: UInt16, _ character: String, _ flags: NSEvent.ModifierFlags = .command) throws -> NSEvent {
+            try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0,
+                windowNumber: window.windowNumber, context: nil, characters: character,
+                charactersIgnoringModifiers: character, isARepeat: false, keyCode: code))
+        }
+        try holdShiftAndButton(on: screen, in: window)
+        XCTAssertFalse(screen.performKeyEquivalent(with: try shortcut(4, "h")))
+        XCTAssertEqual(model.sent.dropFirst(2), ["pointer 0 up", "key ShiftLeft up"])
+        XCTAssertEqual(model.releases, 0)
+        XCTAssertTrue(screen.performKeyEquivalent(with: try shortcut(53, "\u{1b}", [.command, .option])))
+        XCTAssertEqual(model.releases, 1, "Command-Option-Escape is the explicit release.")
+    }
+
+    func testOnlyExactLocalShortcutsStayOnThisMac() throws {
+        let model = InputRecorder(identity: DeviceIdentity())
+        let (screen, window) = focusedScreen(model)
+        defer { window.close() }
+        func shortcut(_ code: UInt16, _ character: String, _ flags: NSEvent.ModifierFlags) throws -> NSEvent {
+            try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0,
+                windowNumber: window.windowNumber, context: nil, characters: character,
+                charactersIgnoringModifiers: character, isARepeat: false, keyCode: code))
+        }
+        for flags: NSEvent.ModifierFlags in [[.command, .shift], [.command, .option], [.command, .control]] {
+            XCTAssertTrue(screen.performKeyEquivalent(with: try shortcut(12, "q", flags)), "Only plain Command-Q quits the viewer.")
+        }
+        for flags: NSEvent.ModifierFlags in [[.command, .option], [.command, .control]] {
+            XCTAssertTrue(screen.performKeyEquivalent(with: try shortcut(9, "v", flags)))
+        }
+        XCTAssertTrue(screen.performKeyEquivalent(with: try shortcut(53, "\u{1b}", [.command, .option, .control])))
+        XCTAssertEqual(model.releases, 0, "Only exact Command-Option-Escape and Command-Q release input.")
+        XCTAssertEqual(model.pastes, 0, "Option-Command-V and Control-Command-V are the remote app's shortcuts, not a paste.")
+        XCTAssertEqual(model.input.filter { $0.action == "down" }.map(\.key), ["KeyQ", "KeyQ", "KeyQ", "KeyV", "KeyV", "Escape"])
+        XCTAssertEqual(model.input.filter { $0.action == "down" }.map(\.modifiers),
+                       [["Meta", "Shift"], ["Meta", "Alt"], ["Meta", "Control"], ["Meta", "Alt"], ["Meta", "Control"], ["Meta", "Control", "Alt"]])
+        XCTAssertTrue(screen.performKeyEquivalent(with: try shortcut(9, "v", .command)))
+        XCTAssertEqual(model.pastes, 1, "Plain Command-V keeps the explicit paste path.")
+        XCTAssertFalse(screen.performKeyEquivalent(with: try shortcut(12, "q", .command)))
+        XCTAssertEqual(model.releases, 1, "Plain Command-Q stays local and releases input first.")
+    }
+
     func testPointerCarriesCurrentModifiersAfterAShortcut() throws {
         let model = InputRecorder(identity: DeviceIdentity())
         let screen = RemoteScreenView(model: model)
@@ -66,6 +162,37 @@ final class RemoteScreenTests: XCTestCase {
             screen.mouseDown(with: event)
         }
         XCTAssertEqual(model.operations.map(\.modifiers), [["Shift"], []])
+    }
+
+    func testDoubleClickCarriesTheViewersClickCount() throws {
+        let model = InputRecorder(identity: DeviceIdentity())
+        let screen = RemoteScreenView(model: model)
+        screen.frame = NSRect(x: 0, y: 0, width: 1920, height: 1080)
+        for count in [1, 2] {
+            for type: NSEvent.EventType in [.leftMouseDown, .leftMouseUp] {
+                let event = try XCTUnwrap(NSEvent.mouseEvent(with: type, location: NSPoint(x: 100, y: 100), modifierFlags: [],
+                    timestamp: 0, windowNumber: 0, context: nil, eventNumber: 0, clickCount: count, pressure: 1))
+                if type == .leftMouseDown { screen.mouseDown(with: event) } else { screen.mouseUp(with: event) }
+            }
+        }
+        XCTAssertEqual(model.operations.map(\.clickCount), [1, nil, 2, nil])
+        XCTAssertEqual(model.operations.map(\.action), ["down", "up", "down", "up"])
+    }
+
+    func testCongestedChannelDropsHoverMovesButNeverClicksOrKeys() {
+        let model = InputRecorder(identity: DeviceIdentity())
+        model.outgoing = 20_000
+        model.pointer("move", at: InkPoint(0.2, 0.2))
+        model.pointer("down", at: InkPoint(0.3, 0.3))
+        model.pointer("move", at: InkPoint(0.4, 0.4))
+        model.pointer("up", at: InkPoint(0.5, 0.5))
+        model.key("KeyA")
+        XCTAssertEqual(model.sent, ["pointer 0 down", "pointer 0 up", "key KeyA down", "key KeyA up"],
+                       "A queued backlog of positions must not delay the click or force a reconnect.")
+        XCTAssertEqual(model.lastCursor, InkPoint(0.5, 0.5))
+        model.outgoing = 8_000
+        model.pointer("move", at: InkPoint(0.6, 0.6))
+        XCTAssertEqual(model.sent.last, "pointer 0 move")
     }
 
     func testCommandEquivalentReleasesItsKeyWithoutWaitingForKeyUp() throws {

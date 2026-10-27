@@ -118,7 +118,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         viewerWindow?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
     }
     func windowWillClose(_ notification: Notification) { if notification.object as? NSWindow === viewerWindow { viewer.disconnect() } }
-    func windowDidResignKey(_ notification: Notification) { if notification.object as? NSWindow === viewerWindow { viewer.releaseInput() } }
+    func windowDidResignKey(_ notification: Notification) { if notification.object as? NSWindow === viewerWindow { viewer.liftHeldInput() } }
     @objc func releaseKeyboard() { viewer?.releaseInput(); viewerWindow?.makeFirstResponder(nil) }
     @objc func showWindow() {
         if let viewer, viewer.connected || viewer.connecting, let viewerWindow {

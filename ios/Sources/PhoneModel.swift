@@ -51,6 +51,7 @@ final class PhoneModel: ObservableObject {
     private var answerAccepted = false
     private var offerStarted = false
     private(set) var lastCursor = InkPoint(0.5, 0.5)
+    private var heldButtons = Set<Int>()
     var mode: RemoteMode { session.mode }
     var canControl: Bool { connected && receivedFrame && !connectionInterrupted && !session.invalidated && mode == .control && session.state?.permissions.control == true }
     var canDraw: Bool { connected && receivedFrame && !connectionInterrupted && !session.invalidated && mode == .draw && session.state?.permissions.annotate == true }
@@ -134,7 +135,7 @@ final class PhoneModel: ObservableObject {
             guard let self, self.attempt == token else { return }
             if state == .failed || state == .closed { self.recover(message: "Восстанавливаем соединение…") }
             if state == .disconnected {
-                self.cancelGesture(notify: false); self.session.interrupt()
+                self.liftHeldInput(); self.session.interrupt()
                 self.connectionInterrupted = true; self.receivedFrame = false
                 self.status = "Восстанавливаем соединение…"
                 if self.interruptionTimer == nil {
@@ -217,11 +218,16 @@ final class PhoneModel: ObservableObject {
         currentInvite = nil
         connecting = false; connected = false; connectionInterrupted = false; receivedFrame = false; track = nil; session = ViewerSession()
         strokes = []; previews = [:]; snapshot = nil; hiddenIDs = []; erasedIDs = []; activeStroke = nil; selectedID = nil
-        answerAccepted = false; offerStarted = false; gestureRevision += 1
+        answerAccepted = false; offerStarted = false; gestureRevision += 1; heldButtons = []
         UIApplication.shared.isIdleTimerDisabled = false
         if !message.isEmpty { status = message; detail = "Подключитесь снова, когда доступ на Mac открыт." }
     }
-    func releaseInput() { cancelGesture(notify: true); _ = transmit(session.release()) }
+    /// Leaving the app ends only what this viewer holds and keeps the session
+    /// valid, so the first tap after returning needs no round trip to the host.
+    func liftHeldInput() {
+        cancelGesture(notify: true)
+        for button in heldButtons.sorted() { pointer("up", at: lastCursor, button: button) }
+    }
     @discardableResult private func transmit(_ operation: WireMessage?) -> Bool {
         guard let operation, let data = try? JSONEncoder().encode(operation) else { return false }
         guard transport?.send(data) == true else { recover(message: "Восстанавливаем соединение…"); return false }
@@ -283,11 +289,16 @@ final class PhoneModel: ObservableObject {
             }
         } catch { disconnect(message: "Mac прислал некорректное состояние. Подключение остановлено.") }
     }
-    func changeMode(_ mode: RemoteMode) { cancelGesture(notify: true); _ = transmit(session.changeMode(mode)); selectedID = nil }
+    func changeMode(_ mode: RemoteMode) { liftHeldInput(); _ = transmit(session.changeMode(mode)); selectedID = nil }
     func changeTool(_ value: DrawingTool) { cancelGesture(notify: true); tool = value; selectedID = nil }
-    func pointer(_ action: String, at point: InkPoint, button: Int = 0, dx: Double = 0, dy: Double = 0) {
-        guard canControl else { return }; lastCursor = point
-        send("pointer") { $0.action = action; $0.x = point.x; $0.y = point.y; $0.button = button; $0.deltaX = min(2000, max(-2000, dx)); $0.deltaY = min(2000, max(-2000, dy)) }
+    func pointer(_ action: String, at point: InkPoint, button: Int = 0, dx: Double = 0, dy: Double = 0, clickCount: Int? = nil) {
+        // Ending a held button needs no control: it can only release.
+        guard action == "up" ? heldButtons.remove(button) != nil : canControl else { return }; lastCursor = point
+        // A congested channel would queue stale drag positions ahead of the
+        // release and then fail a send, forcing a reconnect.
+        if action == "move" && (transport?.bufferedAmount ?? 0) > 16_384 { return }
+        if send("pointer", edit: { $0.action = action; $0.x = point.x; $0.y = point.y; $0.button = button; $0.deltaX = min(2000, max(-2000, dx)); $0.deltaY = min(2000, max(-2000, dy)); $0.clickCount = clickCount }),
+           action == "down" { heldButtons.insert(button) }
     }
     func rightClick() { pointer("down", at: lastCursor, button: 2); pointer("up", at: lastCursor, button: 2) }
     func key(_ key: String, modifiers: [String] = []) {
