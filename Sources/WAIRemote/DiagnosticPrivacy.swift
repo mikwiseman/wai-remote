@@ -42,7 +42,6 @@ enum DiagnosticPrivacy {
         "test-click": numbers("count"),
         "capture-config": combine(numbers("width height fps queueDepth"), ["format": .label(["NV12"])]),
         "capture": numbers("fps gapMaxMs sampleOffsetMs"),
-        "screen-quality": numbers("fps"),
         "renderer": numbers("fps gapP95Ms gapMaxMs gapsOver100Ms"),
         "display-metrics": numbers("frames dropped corrupted delaySeconds"),
         "display-skipped": [:],

@@ -168,9 +168,6 @@ final class ScreenVideoPolicyTests: XCTestCase {
         XCTAssertEqual(parameters.degradationPreference?.intValue, RTCDegradationPreference.maintainFramerateAndResolution.rawValue)
         XCTAssertEqual(parameters.encodings.first?.maxFramerate?.intValue, 60)
         XCTAssertEqual(parameters.encodings.first?.maxBitrateBps?.intValue, 32_000_000)
-        ScreenVideoPolicy.configure(sender, frameRate: 15)
-        XCTAssertEqual(sender.parameters.encodings.first?.maxFramerate?.intValue, 15)
-        XCTAssertEqual(sender.parameters.encodings.first?.scaleResolutionDownBy?.intValue, 1)
-        XCTAssertEqual(sender.parameters.encodings.first?.maxBitrateBps?.intValue, 32_000_000)
+        XCTAssertEqual(parameters.encodings.first?.scaleResolutionDownBy?.intValue, 1)
     }
 }
