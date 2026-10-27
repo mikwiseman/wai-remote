@@ -82,8 +82,8 @@ func TestUDPRelayRequiresClientCapabilityAndPreservesReliableRouting(t *testing.
 		if version == 3 && (ready.ICE.Policy != "all" || strings.Join(ready.ICE.Servers[0].URLs, " ") != "stun:203.0.113.1:3478 turn:203.0.113.1:3478?transport=udp turn:203.0.113.1:3478?transport=tcp") {
 			t.Errorf("Apps that skip VPN adapters should try a direct route first and keep both relays, got %+v", ready.ICE)
 		}
-		if version == 4 && (ready.ICE.Policy != "all" || strings.Join(ready.ICE.Servers[0].URLs, " ") != "stun:37.139.38.244:3478 stun:79.143.67.226:3478 turn:203.0.113.1:3478?transport=udp") {
-			t.Errorf("Peer-to-peer apps need Moscow STUN, which a VPN routes directly, and only the UDP relay, got %+v", ready.ICE)
+		if version == 4 && (ready.ICE.Policy != "all" || strings.Join(ready.ICE.Servers[0].URLs, " ") != "stun:37.139.38.244:3478 stun:79.143.67.226:3478 turn:203.0.113.1:3478?transport=tcp") {
+			t.Errorf("Peer-to-peer apps need Moscow STUN, which a VPN routes directly, and a relay on its own TCP socket, got %+v", ready.ICE)
 		}
 		c.CloseNow()
 		cancel()
