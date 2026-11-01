@@ -244,9 +244,13 @@ private final class InjectedEvents {
             }
         } else if m.type == "key", let code = Self.keyCodes[m.key ?? ""] {
             let down = m.action == "down"
-            if independentPointer { destination = desktop.keyboardTarget.map(InputDestination.window) ?? .unavailable }
-            if let held = keys[code] { destination = held }
             if !down && keys[code] == nil { return }
+            if let held = keys[code] {
+                destination = held
+            } else {
+                if independentPointer { destination = desktop.keyboardTarget.map(InputDestination.window) ?? .unavailable }
+                if let window = destination.window { destination = window.keyboardDestination().map(InputDestination.window) ?? .unavailable }
+            }
             guard destination != .unavailable else { return }
             let event = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: down)
             event?.flags = Self.flags(m.modifiers ?? [])
@@ -256,6 +260,7 @@ private final class InjectedEvents {
             if outcome == .menu { keys[code] = nil }
         } else if m.type == "text", let text = m.text {
             if independentPointer { destination = desktop.keyboardTarget.map(InputDestination.window) ?? .unavailable }
+            if let window = destination.window { destination = window.keyboardDestination().map(InputDestination.window) ?? .unavailable }
             // Chunk on Character boundaries; never split a surrogate pair or composed character.
             var chunk = [UniChar]()
             func flush() {
