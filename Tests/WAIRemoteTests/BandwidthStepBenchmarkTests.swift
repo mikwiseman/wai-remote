@@ -21,6 +21,8 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
         let profile = try scenes.profile()
         try JSONSerialization.data(withJSONObject: profile, options: [.prettyPrinted, .sortedKeys])
             .write(to: directory.appendingPathComponent("source-profile.json"))
+        let pacing = try await pacingProfiles(scenes: scenes, directory: directory)
+        guard pacing else { return }
         let policies: [(String, RTCDegradationPreference)] = baseline
             ? [("baseline", .maintainFramerateAndResolution)]
             : [("preserve-both", .maintainFramerateAndResolution), ("maintain-framerate", .maintainFramerate)]
@@ -35,6 +37,8 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
                 XCTAssertGreaterThanOrEqual(Double(phase["source"] as! Int) / (phase["durationSeconds"] as! Double), 55,
                                             "CI source below 55 fps; this phase is not a valid sustained-source comparison")
             }
+            let sourceGaps = result["sourceGapsMs"] as! [String: Double]
+            XCTAssertGreaterThanOrEqual(sourceGaps["min"] ?? 0, 1000.0 / 120, "Source submissions must not bunch")
             // run() closes both transports before returning; allow destruction before the next factory.
             try await Task.sleep(for: .seconds(1))
         }
@@ -54,7 +58,7 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
         let sink = BudgetRenderer(trace, samples: samples, maximumIndex: frameCount)
         var track: RTCVideoTrack?
         viewer.onVideo = { track = $0; $0.add(sink) }
-        defer { trace.stopFeeding(); track?.remove(sink); host.close(); viewer.close() }
+        defer { track?.remove(sink); host.close(); viewer.close() }
         let pc: RTCPeerConnection = try XCTUnwrap(child(host, "pc"))
         let remote: RTCPeerConnection = try XCTUnwrap(child(viewer, "peer"))
         let sender = try XCTUnwrap(pc.senders.first)
@@ -92,43 +96,16 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
         try cap(4_000_000)
         let start = ProcessInfo.processInfo.systemUptime + 0.2
         let finished = expectation(description: "\(duration)-second synthetic desktop")
-        let feeder = Thread {
-            for index in 0..<frameCount {
-                if trace.feedingStopped { break }
-                let deadline = start + Double(index) / 60
-                let beforeSleep = ProcessInfo.processInfo.systemUptime
-                let wait = max(0, deadline - beforeSleep)
-                if wait > 0 { Thread.sleep(forTimeInterval: wait) }
-                let woke = ProcessInfo.processInfo.systemUptime
-                // Never manufacture catch-up bursts or reuse a buffer still owned by the encoder.
-                guard woke - deadline < 1.0 / 60 else {
-                    trace.add("source-missed", ["index": index, "requestedSleepMs": wait * 1000,
-                                               "actualSleepMs": (woke - beforeSleep) * 1000, "wakeLateMs": (woke - deadline) * 1000])
-                    continue
-                }
-                autoreleasepool {
-                    do {
-                        let generated = try scenes.frame(index)
-                        let pushedAt = ProcessInfo.processInfo.systemUptime
-                        let frame = RTCVideoFrame(buffer: RTCCVPixelBuffer(pixelBuffer: generated.pixels), rotation: ._0,
-                                                 timeStampNs: Int64(pushedAt * 1_000_000_000))
-                        source.capturer(capturer, didCapture: frame)
-                        let returnedAt = ProcessInfo.processInfo.systemUptime
-                        trace.add("source", ["index": index, "ns": frame.timeStampNs,
-                                             "requestedSleepMs": wait * 1000, "actualSleepMs": (woke - beforeSleep) * 1000,
-                                             "wakeLateMs": (woke - deadline) * 1000, "allocationMs": generated.allocationMs,
-                                             "copyMs": generated.copyMs, "overlayMs": generated.overlayMs,
-                                             "generationMs": (pushedAt - woke) * 1000, "pushMs": (returnedAt - pushedAt) * 1000,
-                                             "scheduleLateMs": (pushedAt - deadline) * 1000], at: pushedAt)
-                    } catch BudgetSceneSource.Failure.allocation(let code) {
-                        trace.add("source-allocation-failed", ["index": index, "status": code])
-                    } catch { trace.add("source-geometry-failed", ["index": index]) }
-                }
-            }
-            finished.fulfill()
-        }
-        feeder.qualityOfService = .userInteractive
-        feeder.start()
+        let feeder = BudgetFeeder(source: scenes, clock: .strictTimer, start: start, duration: duration,
+                                  emit: { generated, _, pushedAt in
+            let frame = RTCVideoFrame(buffer: RTCCVPixelBuffer(pixelBuffer: generated.pixels), rotation: ._0,
+                                      timeStampNs: Int64(pushedAt * 1_000_000_000))
+            let submittedAt = ProcessInfo.processInfo.systemUptime
+            source.capturer(capturer, didCapture: frame)
+            return submittedAt
+        }, record: { trace.add($0, $1, at: $2) }, completed: { finished.fulfill() })
+        feeder.startFeeding()
+        defer { feeder.stop() }
         func statistics() {
             pc.statistics { trace.statistics($0, stage: "host-rtc", type: "outbound-rtp", counter: "framesEncoded") }
             remote.statistics { trace.statistics($0, stage: "viewer-rtc", type: "inbound-rtp", counter: "framesDecoded") }
@@ -183,11 +160,50 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
         return ["policy": name, "sourceRevision": ProcessInfo.processInfo.environment["GITHUB_SHA"] ?? "unknown",
                 "baseRevision": "b799faefe011d254eac491769231bb38e1087bc0", "durationSeconds": duration, "baselineOnly": baseline,
                 "sourceSize": [3840, 2160], "requestedSourceFPS": 60,
-                "method": "Local ICE and production transports/factories. Baseline: 30s at 4Mbps. Comparison mode: 4Mbps for 10s, 250kbps for 15s, 4Mbps for at least 60s. Sender cap is not network shaping or optical latency. Two pre-rendered text scenes alternate every 5s with a moving bar and unique frame stamp; this is not scrolling and must not be compared directly with the prior workload. Hard pool limit 8. PNG/detail work happens after measurement and peer closure.",
+                "method": "Local ICE and production transports/factories. Baseline: 30s at 4Mbps. Comparison mode: 4Mbps for 10s, 250kbps for 15s, 4Mbps for at least 60s. Sender cap is not network shaping or optical latency. Two pre-rendered text scenes alternate every 300 emitted frames with a moving bar and unique sequential frame stamp; this is not scrolling and must not be compared directly with the prior workload. Stamps count emitted frames, not planned 60Hz slots. Strict one-shot timer prepares before waiting and rebases on actual previous emission; missed slots are never replayed. Hard pool limit 8. PNG/detail work happens after measurement and peer closure.",
+                "sourceGapsMs": gapSummary(rows.filter { $0["stage"] as? String == "source" }.map { $0["t"] as! Double }),
                 "sourceFrames": rows.filter { $0["stage"] as? String == "source" }.count,
                 "decodedFrames": rows.filter { $0["stage"] as? String == "decoded" }.count,
                 "readableStamps": rows.filter { $0["stage"] as? String == "decoded" && ($0["index"] as? Int ?? -1) >= 0 }.count,
                 "detail": detail, "summary": summaries, "rows": rows]
+    }
+    private func pacingProfiles(scenes: BudgetSceneSource, directory: URL) async throws -> Bool {
+        var profiles: [[String: Any]] = []
+        var strictValid = false
+        for clock in [BudgetFeeder.Clock.threadSleep, .strictTimer] {
+            let trace = BudgetTrace(), done = expectation(description: "10s source-only \(clock.rawValue)")
+            let start = ProcessInfo.processInfo.systemUptime + 0.2
+            let feeder = BudgetFeeder(source: scenes, clock: clock, start: start, duration: 10,
+                                      emit: { _, _, time in time }, record: { trace.add($0, $1, at: $2) }, completed: { done.fulfill() })
+            feeder.startFeeding()
+            await fulfillment(of: [done], timeout: 12)
+            feeder.stop()
+            let rows = trace.snapshot().map { row -> [String: Any] in
+                var row = row; row["t"] = (row.removeValue(forKey: "time") as! Double) - start; return row
+            }
+            let source = rows.filter { $0["stage"] as? String == "source" }
+            let gaps = gapSummary(source.map { $0["t"] as! Double })
+            let valid = Double(source.count) / 10 >= 55 && (gaps["min"] ?? 0) >= 1000.0 / 120
+            profiles.append(["clock": clock.rawValue, "durationSeconds": 10, "sourceFrames": source.count,
+                             "sourceFPS": Double(source.count) / 10, "sourceGapsMs": gaps, "valid": valid,
+                             "method": "No WebRTC source submission; actual generated frame emissions counted over 10s. Frames prepared before the wait; deadlines rebase on actual prior emission. Stamps are contiguous emission indices; plannedMissedSlots counts skipped 60Hz schedule slots separately.",
+                             "rows": rows])
+            if clock == .strictTimer { strictValid = valid }
+        }
+        try JSONSerialization.data(withJSONObject: profiles, options: [.prettyPrinted, .sortedKeys])
+            .write(to: directory.appendingPathComponent("pacing-profiles.json"))
+        XCTAssertTrue(strictValid, "Strict source-only pacing did not meet >=55fps and >=8.33ms minimum gap; media baseline withheld")
+        return strictValid
+    }
+    private func gapSummary(_ times: [Double]) -> [String: Double] {
+        let gaps = zip(times, times.dropFirst()).map { ($1 - $0) * 1000 }.sorted()
+        guard !gaps.isEmpty else { return ["count": 0] }
+        func percentile(_ fraction: Double) -> Double {
+            let position = Double(gaps.count - 1) * fraction
+            let lower = Int(position), upper = Int(ceil(position))
+            return gaps[lower] + (gaps[upper] - gaps[lower]) * (position - Double(lower))
+        }
+        return ["count": Double(gaps.count), "min": gaps.first!, "p50": percentile(0.5), "p95": percentile(0.95), "max": gaps.last!]
     }
     private func child<T>(_ object: Any, _ label: String) -> T? {
         Mirror(reflecting: object).children.first { $0.label == label }?.value as? T
@@ -199,9 +215,6 @@ private enum BudgetFailure: Error { case noLocalConnection }
 private final class BudgetTrace {
     private let lock = NSLock()
     private var rows: [[String: Any]] = []
-    private var stopped = false
-    var feedingStopped: Bool { lock.lock(); defer { lock.unlock() }; return stopped }
-    func stopFeeding() { lock.lock(); stopped = true; lock.unlock() }
     func add(_ stage: String, _ values: [String: Any] = [:], at time: Double? = nil) {
         var row = values; row["stage"] = stage; row["time"] = time ?? ProcessInfo.processInfo.systemUptime
         lock.lock(); rows.append(row); lock.unlock()

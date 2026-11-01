@@ -12,7 +12,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - name: Profile source and run one 30s baseline
+      - name: Profile both pacers, then conditionally run one 30s baseline
         env:
           WAI_BANDWIDTH_STEP: '1'
           WAI_BANDWIDTH_MODE: baseline

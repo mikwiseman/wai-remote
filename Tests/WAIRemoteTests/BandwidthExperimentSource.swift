@@ -85,6 +85,108 @@ final class BudgetSceneSource {
     }
 }
 
+/// Experiment pacer: prepare before waiting, then rebase the next deadline on actual submission.
+/// Pixel indices count emissions; missed 60Hz slots are reported separately.
+final class BudgetFeeder {
+    enum Clock: String { case threadSleep, strictTimer }
+    private let source: BudgetSceneSource
+    private let clock: Clock
+    private let start: Double, end: Double
+    private let emit: (BudgetSceneSource.Frame, Int, Double) -> Double
+    private let record: (String, [String: Any], Double) -> Void
+    private let completed: () -> Void
+    private let queue = DispatchQueue(label: "wai.budget-source", qos: .userInteractive)
+    private let lock = NSLock()
+    private var stopped = false
+    private var timer: DispatchSourceTimer?
+    private var index = 0, totalMissed = 0
+    private var lastPush: Double?
+    init(source: BudgetSceneSource, clock: Clock, start: Double, duration: Double,
+         emit: @escaping (BudgetSceneSource.Frame, Int, Double) -> Double,
+         record: @escaping (String, [String: Any], Double) -> Void, completed: @escaping () -> Void) {
+        self.source = source; self.clock = clock; self.start = start; end = start + duration
+        self.emit = emit; self.record = record; self.completed = completed
+    }
+    func startFeeding() {
+        if clock == .threadSleep {
+            let thread = Thread { [self] in
+                while !isStopped {
+                    guard let pending = prepare() else { break }
+                    let wait = max(0, pending.deadline - ProcessInfo.processInfo.systemUptime)
+                    let before = ProcessInfo.processInfo.systemUptime
+                    if wait > 0 { Thread.sleep(forTimeInterval: wait) }
+                    if !submit(pending, before: before, requestedWait: wait) { break }
+                }
+                finish()
+            }
+            thread.qualityOfService = .userInteractive; thread.start()
+        } else {
+            queue.async { [self] in
+                let timer = DispatchSource.makeTimerSource(flags: .strict, queue: queue)
+                self.timer = timer; timer.activate(); scheduleNext()
+            }
+        }
+    }
+    func stop() { lock.lock(); stopped = true; lock.unlock() }
+    private var isStopped: Bool { lock.lock(); defer { lock.unlock() }; return stopped }
+    private struct Pending { let frame: BudgetSceneSource.Frame; let generationMs: Double; let deadline: Double }
+    private func prepare() -> Pending? {
+        guard !isStopped, ProcessInfo.processInfo.systemUptime < end else { return nil }
+        let deadline = lastPush.map { $0 + 1.0 / 60 } ?? start
+        guard deadline < end else { return nil }
+        let begin = ProcessInfo.processInfo.systemUptime
+        do {
+            let frame = try source.frame(index)
+            return Pending(frame: frame, generationMs: (ProcessInfo.processInfo.systemUptime - begin) * 1000, deadline: deadline)
+        } catch BudgetSceneSource.Failure.allocation(let code) {
+            record("source-allocation-failed", ["index": index, "status": code], begin)
+        } catch { record("source-geometry-failed", ["index": index], begin) }
+        // A failed generation invalidates the run rather than spinning on allocation.
+        return nil
+    }
+    private func scheduleNext() {
+        guard let pending = prepare() else { finish(); return }
+        arm(pending)
+    }
+    private func arm(_ pending: Pending) {
+        let before = ProcessInfo.processInfo.systemUptime
+        let wait = max(0, pending.deadline - before)
+        timer?.setEventHandler { [self] in
+            let now = ProcessInfo.processInfo.systemUptime
+            // Even an early/spurious callback cannot bunch submissions.
+            if now < pending.deadline { arm(pending); return }
+            if submit(pending, before: before, requestedWait: wait) { scheduleNext() }
+            else { finish() }
+        }
+        timer?.schedule(deadline: .now() + wait, leeway: .nanoseconds(0))
+    }
+    private func submit(_ pending: Pending, before: Double, requestedWait: Double) -> Bool {
+        let woke = ProcessInfo.processInfo.systemUptime
+        guard !isStopped, woke < end else { return false }
+        let gap = lastPush.map { woke - $0 }
+        // A platform wake before the deadline is discarded; never replay another planned slot.
+        guard gap == nil || gap! >= 1.0 / 120 else { return false }
+        let pushedAt = autoreleasepool { emit(pending.frame, index, woke) }
+        let returned = ProcessInfo.processInfo.systemUptime
+        let missed = max(0, Int(floor((pushedAt - start) * 60)) - index)
+        let newlyMissed = max(0, missed - totalMissed); totalMissed = missed
+        record("source", ["index": index, "plannedMissedSlots": newlyMissed,
+                          "requestedSleepMs": requestedWait * 1000, "actualSleepMs": (woke - before) * 1000,
+                          "wakeLateMs": max(0, woke - pending.deadline) * 1000,
+                          "allocationMs": pending.frame.allocationMs, "copyMs": pending.frame.copyMs,
+                          "overlayMs": pending.frame.overlayMs, "generationMs": pending.generationMs,
+                          "pushMs": (returned - pushedAt) * 1000,
+                          "scheduleLateMs": max(0, pushedAt - pending.deadline) * 1000], pushedAt)
+        lastPush = pushedAt; index += 1
+        return true
+    }
+    private func finish() {
+        timer?.setEventHandler {}; timer?.cancel(); timer = nil
+        record("source-finished", ["emitted": index, "plannedMissedSlots": max(0, Int((end - start) * 60) - index)], ProcessInfo.processInfo.systemUptime)
+        completed()
+    }
+}
+
 /// Retains only the last decoded frame of each phase. PNG and detail work runs after media stops.
 final class BudgetSamples {
     private struct Sample { let frame: RTCVideoFrame; let index: Int; let time: Double }
