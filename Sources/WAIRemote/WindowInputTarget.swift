@@ -63,6 +63,46 @@ struct WindowInputTarget: Equatable {
         return unsafeBitCast(symbol, to: FocusRecord.self)
     }()
     static var isSupported: Bool { setWindowLocation != nil && postPointer != nil && processNumber != nil && focusRecord != nil }
+    /// Follow only a sheet attached to this window. App-wide focus can point at
+    /// an unrelated document, so it is never a keyboard-routing fallback.
+    func keyboardDestination(budget: TimeInterval = 0.01) -> WindowInputTarget? {
+        if pid == ProcessInfo.processInfo.processIdentifier && !Thread.isMainThread {
+            return Self.onMainRunLoop { self.keyboardDestination(budget: budget) }
+        }
+        guard let windowNumber = Self.windowNumber else { return self }
+        let deadline = ProcessInfo.processInfo.systemUptime + budget
+        func value(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
+            let remaining = deadline - ProcessInfo.processInfo.systemUptime
+            guard remaining > 0 else { return nil }
+            AXUIElementSetMessagingTimeout(element, Float(min(0.05, remaining)))
+            var result: CFTypeRef?
+            return AXUIElementCopyAttributeValue(element, name as CFString, &result) == .success ? result : nil
+        }
+        func number(_ element: AXUIElement) -> CGWindowID? {
+            let remaining = deadline - ProcessInfo.processInfo.systemUptime
+            guard remaining > 0 else { return nil }
+            AXUIElementSetMessagingTimeout(element, Float(min(0.01, remaining)))
+            var id: CGWindowID = 0
+            return windowNumber(element, &id) == .success && id > 0 ? id : nil
+        }
+        let app = AXUIElementCreateApplication(pid)
+        guard let windows = value(app, kAXWindowsAttribute) as? [AXUIElement],
+              var current = windows.first(where: { number($0) == windowID }) else { return self }
+        var destination = self
+        for _ in 0..<4 {
+            guard let children = value(current, kAXChildrenAttribute) as? [AXUIElement] else { return destination }
+            let sheets = children.filter { value($0, kAXRoleAttribute) as? String == kAXSheetRole }
+            guard !sheets.isEmpty else { return destination }
+            guard sheets.count == 1, let sheet = sheets.first else { return nil }
+            // A remote view may be hosted by another process. The AX parent-child
+            // relationship proves scope; WindowServer supplies its actual owner.
+            guard let id = number(sheet),
+                  let windows = CGWindowListCopyWindowInfo(.optionIncludingWindow, id) as? [[String: Any]],
+                  let target = DesktopInputTarget.target(windowID: id, windows: windows) else { return nil }
+            destination = target; current = sheet
+        }
+        return nil
+    }
     var frame: CGRect? {
         guard let list = CGWindowListCopyWindowInfo(.optionIncludingWindow, windowID) as? [[String: Any]] else { return nil }
         return frame(in: list)
@@ -218,13 +258,15 @@ struct WindowInputTarget: Equatable {
     /// to an enabled button of this window; anything else gets ordinary events.
     func button(climbingFrom hit: AXUIElement, at point: CGPoint) -> Button? {
         guard let windowNumber = Self.windowNumber else { return nil }
-        let names = [kAXRoleAttribute, kAXPositionAttribute, kAXSizeAttribute, kAXEnabledAttribute, kAXWindowAttribute, kAXParentAttribute] as CFArray
+        let names = [kAXRoleAttribute, kAXPositionAttribute, kAXSizeAttribute, kAXEnabledAttribute, kAXTopLevelUIElementAttribute, kAXParentAttribute] as CFArray
         var element = hit
         for _ in 0...3 {
             AXUIElementSetMessagingTimeout(element, 0.05)
             var raw: CFArray?
             guard AXUIElementCopyMultipleAttributeValues(element, names, [], &raw) == .success,
                   let values = raw as? [AnyObject], values.count == 6 else { return nil }
+            // AXWindow deliberately returns a sheet's parent document. The top
+            // level element preserves the sheet's own WindowServer address.
             if values[0] as? String == kAXButtonRole, values[3] as? Bool == true, let bounds = Self.rect(values[1], values[2]),
                bounds.contains(point), CFGetTypeID(values[4]) == AXUIElementGetTypeID() {
                 var id: CGWindowID = 0, actions: CFArray?

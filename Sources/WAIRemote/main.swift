@@ -16,6 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var subscriptions = Set<AnyCancellable>()
     private var pendingURL: URL?
     private var viewerToolbar: ViewerToolbar?
+    private var agentBridge: AgentBridge?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 600), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
@@ -35,6 +36,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 case .success(let identity):
                     self.model = HostModel(identity: identity)
                     self.viewer = MacViewerModel(identity: identity)
+                    // Local agents use the same saved connections and host permissions as this viewer.
+                    self.agentBridge = try? AgentBridge(viewer: self.viewer, connect: { [weak self] in self?.connect() })
                     if UserDefaults.standard.bool(forKey: "continueSharingAfterPermissionRestart") {
                         _ = SharingRelaunch.take()
                         UserDefaults.standard.removeObject(forKey: "continueSharingAfterPermissionRestart")

@@ -366,13 +366,27 @@ class MacViewerModel: ObservableObject {
         guard canControl, !text.isEmpty, !text.contains("\0") else { return }
         PerformanceLog.record("text-submit", ["units": text.utf16.count])
         var chunk = "", units = 0
-        for scalar in text.unicodeScalars {
+        let scalars = text.unicodeScalars
+        var index = scalars.startIndex
+        while index < scalars.endIndex {
+            let scalar = scalars[index]; scalars.formIndex(after: &index)
             let count = scalar.utf16.count
-            if units + count > 4096 {
+            // AppKit treats a leading control as a command and discards any
+            // following text in the same host-generated Unicode key event.
+            let control = scalar == "\r" || scalar == "\n" || scalar == "\t"
+            if !chunk.isEmpty && (control || units + count > 4096) {
                 guard send("text", edit: { $0.text = chunk }) else { return }
                 chunk = ""; units = 0
             }
-            chunk.unicodeScalars.append(scalar); units += count
+            if control {
+                var command = String(scalar)
+                if scalar == "\r", index < scalars.endIndex, scalars[index] == "\n" {
+                    command.append("\n"); scalars.formIndex(after: &index)
+                }
+                guard send("text", edit: { $0.text = command }) else { return }
+            } else {
+                chunk.unicodeScalars.append(scalar); units += count
+            }
         }
         if !chunk.isEmpty { send("text") { $0.text = chunk } }
     }
