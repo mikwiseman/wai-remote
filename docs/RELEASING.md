@@ -76,6 +76,8 @@ Use the existing App Store Connect app `is.wai.remote.ios`. On waiMini, prepare 
 - Close access and confirm neither automatic retry nor application relaunch reopens it.
 - Lock and unlock a test Mac: capture/input must stop while locked and resume only after unlock. A display turning off alone must not revoke access.
 - Close a shared application window; access must close rather than switch to another window or display.
+- Connect an approved iPhone while another viewer is active. Check the occupied state, explicitly switch, and confirm the previous viewer stays disconnected. Read-only devices and an owner's pause must not offer switching.
+- Finish QA by disconnecting its viewer. Leaving the test connection open occupies the Mac for the next device.
 
 ## Native input regression
 
