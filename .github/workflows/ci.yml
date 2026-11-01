@@ -1,93 +1,35 @@
-name: Check
-
+name: Bounded encoder budget experiment
 on:
   push:
-  pull_request:
-
+    branches: [codex/encoder-budget-experiment]
 permissions:
   contents: read
-
 jobs:
-  swift:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - run: |
-          defaults write NSGlobalDomain performanceDiagnostics -bool true
-          trap 'defaults delete NSGlobalDomain performanceDiagnostics' EXIT
-          swift test
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: agent-transport-proof
-          path: .runtime/agent-integration-*/*.png
-          include-hidden-files: true
-          retention-days: 7
-  ios:
+  bandwidth-step:
     runs-on: macos-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - run: brew install xcodegen
-      - name: Test the native iPhone viewer
+      - name: Record environment and run one comparison
         env:
-          TEST_RUNNER_WAI_IOS_TRANSPORT_BENCH: '1'
+          WAI_BANDWIDTH_STEP: '1'
+          WAI_BANDWIDTH_OUTPUT: .runtime/bandwidth-experiment
         run: |
-          xcodegen generate --spec ios/project.yml
-          simulator=$(xcrun simctl list devices available --json | python3 -c '
-          import json, sys
-          devices = json.load(sys.stdin)["devices"]
-          print(next(device["udid"] for group in devices.values() for device in group
-                     if device["name"].startswith("iPhone")))')
-          xcodebuild -project ios/WAIRemotePhone.xcodeproj -scheme WAIRemotePhone \
-            -destination "platform=iOS Simulator,id=$simulator" \
-            -derivedDataPath "$RUNNER_TEMP/wai-ios" \
-            -resultBundlePath "$RUNNER_TEMP/wai-ios-results.xcresult" \
-            -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO test
-          xcrun simctl bootstatus "$simulator" -b
-          xcrun simctl install "$simulator" "$RUNNER_TEMP/wai-ios/Build/Products/Debug-iphonesimulator/WAI Remote.app"
-          for state in zoomed typing busy busy-legacy; do
-            xcrun simctl launch --terminate-running-process "$simulator" is.wai.remote.ios \
-              -WAIDemoSession "$GITHUB_WORKSPACE/ios/Tests/Fixtures/desktop.png" -WAIDemoState "$state"
-            sleep 5
-            xcrun simctl io "$simulator" screenshot "$RUNNER_TEMP/iphone-$state.png"
-          done
+          mkdir -p .runtime/bandwidth-experiment
+          {
+            git rev-parse HEAD
+            sw_vers
+            uname -m
+            swift --version
+          } > .runtime/bandwidth-experiment/environment.txt
+          set -o pipefail
+          swift test --jobs 2 --filter BandwidthStepBenchmarkTests 2>&1 | tee .runtime/bandwidth-experiment/test.log
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: iphone-test-results
-          path: |
-            ${{ runner.temp }}/wai-ios-results.xcresult
-            ${{ runner.temp }}/iphone-*.png
+          name: bandwidth-step-results
+          path: .runtime/bandwidth-experiment/
+          include-hidden-files: true
           retention-days: 7
-  gateway:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: gateway/go.mod
-          cache-dependency-path: gateway/go.sum
-      - run: go test -race ./...
-        working-directory: gateway
-  viewer:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-      - run: npm ci
-        working-directory: web
-      - run: npm run build -- --base=/remote/connect/
-        working-directory: web
