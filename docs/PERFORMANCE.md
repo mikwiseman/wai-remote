@@ -2,7 +2,7 @@
 
 ## iPhone touch and input corrections, 1 November 2026
 
-Local candidate; not distributed through TestFlight or the Mac updater.
+Build 69 is available in the existing internal TestFlight group and installed on the local Mac through a separate Sparkle preview feed. The public main feed remains on 68. See [release verification](releases/0.3.7-69.md). Physical iPhone input-to-visible-text latency is still unverified.
 
 - A tap keeps the point where the finger landed. Previously a six-point lift-off shift moved the click 24 Mac points on a desktop reduced fourfold.
 - Two-finger scrolling follows the fingers at the displayed desktop scale and retains its initial target. Finger-spacing drift no longer takes priority over a clear scrolling movement.
