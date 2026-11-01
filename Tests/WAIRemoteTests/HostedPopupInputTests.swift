@@ -99,10 +99,45 @@ final class HostedPopupInputTests: XCTestCase {
             var hit: AXUIElement?
             let result = AXUIElementCopyElementAtPosition(app, Float(point.x), Float(point.y), &hit)
             print("HOSTED_POPUP_APP_HIT result=\(result.rawValue) \(hit.map(describe) ?? "nil")")
+            if let hit, actual?.pid == target.pid,
+               WindowInputTarget.axWindowID(hit, deadline: deadline) == actual?.windowID {
+                var pending = [(hit, 0)], visited = 0
+                while let (element, depth) = pending.popLast(), visited < 32,
+                      ProcessInfo.processInfo.systemUptime < deadline {
+                    visited += 1
+                    guard let values = WindowInputTarget.axValues(element,
+                        [kAXRoleAttribute, kAXTitleAttribute, kAXDescriptionAttribute, kAXValueAttribute, kAXChildrenAttribute], deadline: deadline) else { break }
+                    let text = values[1...3].compactMap { $0 as? String }.filter { !$0.isEmpty }
+                    print("HOSTED_POPUP_COVERING_CONTENT depth=\(depth) role=\(values[0] as? String ?? "nil") text=\(text)")
+                    if depth < 6 { pending += ((values[4] as? [AXUIElement]) ?? []).map { ($0, depth + 1) } }
+                }
+            }
         }
         let windows = (CGWindowListCopyWindowInfo(.optionOnScreenOnly, 0) as? [[String: Any]]) ?? []
         for window in windows where (window[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == target.pid {
             print("HOSTED_POPUP_OWNED_WINDOW id=\(window[kCGWindowNumber as String] ?? 0) layer=\(window[kCGWindowLayer as String] ?? 0) name=\(window[kCGWindowName as String] ?? "nil") bounds=\(window[kCGWindowBounds as String] ?? [:])")
+        }
+    }
+    private func diagnoseMenu(_ item: AXUIElement, host: pid_t, service: pid_t) {
+        let deadline = ProcessInfo.processInfo.systemUptime + 0.7
+        func chain(_ start: AXUIElement?, label: String, limit: Int) {
+            var current = start
+            for depth in 0..<limit {
+                guard let element = current, ProcessInfo.processInfo.systemUptime < deadline,
+                      let values = WindowInputTarget.axValues(element, [kAXRoleAttribute, kAXParentAttribute], deadline: deadline) else { break }
+                var pid: pid_t = 0; AXUIElementGetPid(element, &pid)
+                let id = WindowInputTarget.axWindowID(element, deadline: deadline) ?? 0
+                print("HOSTED_POPUP_MENU_CHAIN source=\(label) depth=\(depth) role=\(values[0] as? String ?? "nil") ax=\(pid):\(id)")
+                current = CFGetTypeID(values[1]) == AXUIElementGetTypeID() ? (values[1] as! AXUIElement) : nil
+            }
+        }
+        chain(item, label: "item", limit: 8)
+        for (label, pid) in [("host-focus", host), ("service-focus", service)] {
+            let app = AXUIElementCreateApplication(pid)
+            let focused = WindowInputTarget.axValues(app, [kAXFocusedUIElementAttribute], deadline: deadline)?.first
+            let element = focused.flatMap { CFGetTypeID($0) == AXUIElementGetTypeID() ? ($0 as! AXUIElement) : nil }
+            print("HOSTED_POPUP_MENU_FOCUS source=\(label) pid=\(pid) present=\(element != nil)")
+            chain(element, label: label, limit: 4)
         }
     }
     func testHostedFormatPopupSelectsItsSecondItem() throws { try interact(select: true) }
@@ -235,12 +270,31 @@ final class HostedPopupInputTests: XCTestCase {
         XCTAssertNotNil(target.frame, "Escape dismisses the menu, not the save panel")
         XCTAssertEqual(state()["writes"]?.intValue, 0, "The test never saves a document")
         XCTAssertEqual(try XCTUnwrap(CGEvent(source: nil)).location, pointer)
+        print("HOSTED_POPUP_RESULT select=\(select) value=\(selected ?? "nil") menuClosed=\(menu.frame == nil) panelAlive=\(target.frame != nil)")
+        // Diagnostic reference only, after the production assertion has failed.
+        // Revalidate the exact owned menu; never send a global key or retry the
+        // production operation. A success here does not turn the test green.
+        if standalone && !select, let frame = menu.frame,
+           DesktopInputTarget.target(at: secondPoint, excluding: []) == menu {
+            diagnoseMenu(second, host: target.pid, service: remotePID)
+            var outcomes: [InputOutcome] = []
+            let source = try XCTUnwrap(CGEventSource(stateID: .privateState))
+            for down in [true, false] {
+                let event = try XCTUnwrap(CGEvent(keyboardEventSource: source, virtualKey: 53, keyDown: down))
+                var escape: UniChar = 0x1B
+                event.keyboardSetUnicodeString(stringLength: 1, unicodeString: &escape)
+                event.flags = []
+                event.location = secondPoint
+                outcomes.append(menu.post(event, permitted: { menu.frame == frame }))
+            }
+            let dismissed = Date().addingTimeInterval(1)
+            while menu.frame != nil && Date() < dismissed { pump(0.05) }
+            print("HOSTED_POPUP_EXACT_MENU_ESCAPE target=\(menu.pid):\(menu.windowID) outcomes=\(outcomes) menuClosed=\(menu.frame == nil) panelAlive=\(target.frame != nil)")
+        }
         if standalone {
             XCTAssertEqual(target.keyboardDestination()?.keyboardReceiver,
                 WindowInputTarget.KeyboardReceiver(pid: remotePID, windowID: virtualID))
         }
-        print("HOSTED_POPUP_RESULT select=\(select) value=\(selected ?? "nil") menuClosed=\(menu.frame == nil) panelAlive=\(target.frame != nil)")
-        if menu.frame != nil { print("HOSTED_POPUP_FAILED_RECEIVER \(String(describing: target.keyboardDestination()?.keyboardReceiver))") }
     }
 
     private static let fixture = #"""
@@ -258,6 +312,12 @@ final class Document: NSDocument {
     override class var writableTypes: [String] { readableTypes }
     override class func isNativeType(_ type: String) -> Bool { readableTypes.contains(type) }
     override var windowForSheet: NSWindow? { standalone ? nil : super.windowForSheet }
+    override func willPresentError(_ error: Error) -> Error {
+        let detail = error as NSError
+        print("OWNED_DOCUMENT_ERROR domain=\(detail.domain) code=\(detail.code) message=\(detail.localizedDescription)")
+        fflush(stdout)
+        return super.willPresentError(error)
+    }
     override func data(ofType typeName: String) throws -> Data {
         writes += 1; throw NSError(domain: "FixtureNeverSaves", code: 1)
     }
@@ -287,7 +347,18 @@ let record = Timer(timeInterval: 0.05, repeats: true) { _ in
     let identities = Set(visible.map(\.windowNumber))
     if identities != recordedWindows {
         recordedWindows = identities
-        for item in visible { print("OWNED_PANEL_WINDOW id=\(item.windowNumber) class=\(type(of: item)) frame=\(item.frame) sheetParent=\(item.sheetParent?.windowNumber ?? 0)") }
+        for item in visible {
+            print("OWNED_PANEL_WINDOW id=\(item.windowNumber) class=\(type(of: item)) frame=\(item.frame) sheetParent=\(item.sheetParent?.windowNumber ?? 0)")
+            if String(describing: type(of: item)) == "_NSAlertPanel", let content = item.contentView {
+                var pending = [content], visited = 0
+                while let view = pending.popLast(), visited < 64 {
+                    visited += 1
+                    if let field = view as? NSTextField { print("OWNED_ALERT_TEXT \(field.stringValue)") }
+                    if let button = view as? NSButton { print("OWNED_ALERT_BUTTON \(button.title)") }
+                    pending += view.subviews
+                }
+            }
+        }
         fflush(stdout)
     }
 }
