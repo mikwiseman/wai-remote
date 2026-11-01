@@ -54,6 +54,9 @@ public struct WireMessage: Codable, Sendable {
     public var clickCount: Int?
     public var deltaX: Double?
     public var deltaY: Double?
+    /// Absent for legacy wheel input. Touch and momentum phases are exclusive.
+    public var scrollPhase: String?
+    public var momentumPhase: String?
     public var key: String?
     public var text: String?
     public var modifiers: [String]?

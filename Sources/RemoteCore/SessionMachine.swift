@@ -37,6 +37,12 @@ public final class SessionMachine {
               m.surfaceID == state.surface.id, m.geometryRevision == state.surface.revision,
               m.sequence >= state.nextSequence, m.sequence < Int.max,
               !m.operationID.isEmpty, m.operationID.utf8.count <= 128 else { return e }
+        if m.scrollPhase != nil || m.momentumPhase != nil {
+            guard m.type == "pointer", m.action == "scroll",
+                  m.scrollPhase == nil || m.momentumPhase == nil,
+                  m.scrollPhase.map({ ["began", "changed", "ended", "cancelled"].contains($0) }) ?? true,
+                  m.momentumPhase.map({ ["began", "changed", "ended"].contains($0) }) ?? true else { return e }
+        }
         switch m.type {
         case "heartbeat": break
         case "release", "resync":

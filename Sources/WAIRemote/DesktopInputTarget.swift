@@ -6,6 +6,8 @@ struct DesktopInputTarget {
     private(set) var keyboardTarget: WindowInputTarget?
     private var gestureTarget: WindowInputTarget?
     private var buttons = Set<Int>()
+    private var scrollTarget: WindowInputTarget?
+    private var scrollPinned = false
 
     mutating func pointer(action: String, button: Int, at point: CGPoint,
                           hitTest: (CGPoint) -> WindowInputTarget?) -> WindowInputTarget? {
@@ -20,7 +22,25 @@ struct DesktopInputTarget {
         return target
     }
 
-    mutating func liftHeld() { gestureTarget = nil; buttons.removeAll() }
+    mutating func scroll(at point: CGPoint, phase: String?, momentum: String?,
+                         hitTest: (CGPoint) -> WindowInputTarget?) -> WindowInputTarget? {
+        if phase == nil && momentum == nil {
+            scrollTarget = nil; scrollPinned = false
+            return pointer(action: "scroll", button: 0, at: point, hitTest: hitTest)
+        }
+        if phase == "began" {
+            scrollTarget = buttons.isEmpty ? hitTest(point) : gestureTarget
+            scrollPinned = true
+        }
+        guard scrollPinned else { return nil }
+        let target = scrollTarget
+        // Finger-up can be followed by momentum. Keep the same window, even
+        // when the pointer moves or a different window appears above it.
+        if phase == "cancelled" || momentum == "ended" { scrollTarget = nil; scrollPinned = false }
+        return target
+    }
+
+    mutating func liftHeld() { gestureTarget = nil; buttons.removeAll(); scrollTarget = nil; scrollPinned = false }
     mutating func reset() { liftHeld(); keyboardTarget = nil }
 
     // WindowServer hit-testing respects input regions. Bounding-box scans do

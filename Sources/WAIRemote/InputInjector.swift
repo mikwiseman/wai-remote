@@ -11,6 +11,54 @@ struct PixelScrollAccumulator {
     }
 }
 
+struct ScrollEventBuilder {
+    private enum Active { case touch, momentum }
+    private var active: Active?
+    private var pixels = PixelScrollAccumulator()
+    private(set) var isPhased = false
+
+    mutating func event(deltaX: Double, deltaY: Double, scrollPhase: String? = nil,
+                        momentumPhase: String? = nil, source: CGEventSource? = nil) -> CGEvent? {
+        if scrollPhase == "began" || scrollPhase == nil && momentumPhase == nil && isPhased { self = ScrollEventBuilder() }
+        isPhased = scrollPhase != nil || momentumPhase != nil
+        let delta = pixels.consume(x: deltaX, y: deltaY)
+        let phase: CGScrollPhase?
+        switch scrollPhase {
+        case "began": phase = .began; active = .touch
+        case "changed": phase = .changed; active = .touch
+        case "ended": phase = .ended; active = nil
+        case "cancelled": phase = .cancelled; active = nil; pixels = PixelScrollAccumulator()
+        default: phase = nil
+        }
+        let momentum: CGMomentumScrollPhase
+        switch momentumPhase {
+        case "began": momentum = .begin; active = .momentum
+        case "changed": momentum = CGMomentumScrollPhase(rawValue: 2)!; active = .momentum // kCGMomentumScrollPhaseContinue
+        case "ended": momentum = .end; active = nil; pixels = PixelScrollAccumulator()
+        default: momentum = .none
+        }
+        // AppKit needs lifecycle boundaries even when there is no pixel to move.
+        let boundary = ["began", "ended", "cancelled"].contains(scrollPhase ?? "") ||
+            ["began", "ended"].contains(momentumPhase ?? "")
+        guard delta.x != 0 || delta.y != 0 || boundary else { return nil }
+        let event = CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 2,
+                            wheel1: delta.y, wheel2: delta.x, wheel3: 0)
+        // CG phases differ from NSEvent.Phase, especially changed and cancelled.
+        event?.setIntegerValueField(.scrollWheelEventScrollPhase, value: Int64(phase?.rawValue ?? 0))
+        event?.setIntegerValueField(.scrollWheelEventMomentumPhase, value: Int64(momentum.rawValue))
+        return event
+    }
+    mutating func finish(source: CGEventSource? = nil) -> CGEvent? {
+        let previous = active
+        defer { self = ScrollEventBuilder() }
+        switch previous {
+        case .touch: return event(deltaX: 0, deltaY: 0, scrollPhase: "cancelled", source: source)
+        case .momentum: return event(deltaX: 0, deltaY: 0, momentumPhase: "ended", source: source)
+        case nil: return nil
+        }
+    }
+}
+
 final class InputInjector {
     var bounds = CGDisplayBounds(CGMainDisplayID())
     private(set) var windowTarget: WindowInputTarget?
@@ -30,7 +78,7 @@ final class InputInjector {
     func apply(_ message: WireMessage) {
         let target = windowTarget, bounds = bounds, independent = independentPointer, excluded = excludedWindows
         let received = ProcessInfo.processInfo.systemUptime
-        delivery.submit(coalescingPointerMove: message.type == "pointer" && message.action == "move") { [events] current in
+        let deliver: (WireMessage, @escaping () -> Bool) -> Void = { [events] message, current in
             events.windowTarget = target; events.bounds = bounds; events.isCurrent = current
             events.independentPointer = independent; events.excludedWindows = excluded
             let started = ProcessInfo.processInfo.systemUptime
@@ -42,6 +90,12 @@ final class InputInjector {
                     "handlingMs": (ProcessInfo.processInfo.systemUptime - started) * 1000]
                 row["outcome"] = events.outcome?.rawValue
                 PerformanceLog.record("input-delivery", row)
+            }
+        }
+        if message.type == "pointer", message.action == "scroll" { delivery.submitScroll(message, deliver) }
+        else {
+            delivery.submit(coalescingPointerMove: message.type == "pointer" && message.action == "move") { current in
+                deliver(message, current)
             }
         }
     }
@@ -71,8 +125,10 @@ private final class InjectedEvents {
     private var clickCounts: [Int: Int] = [:]
     private var windowButton: WindowInputTarget.Button?
     private var windowGesture: Int64 = 1
-    private var scroll = PixelScrollAccumulator()
+    private var scroll = ScrollEventBuilder()
     private var scrollDestination = InputDestination.unavailable
+    private var scrollPoint = CGPoint.zero
+    private var scrollFlags: CGEventFlags = []
     private let source = CGEventSource(stateID: .privateState)
     var bounds = CGDisplayBounds(CGMainDisplayID())
     var windowTarget: WindowInputTarget?
@@ -92,7 +148,7 @@ private final class InjectedEvents {
     }
     func apply(_ m: WireMessage) {
         outcome = nil
-        if m.type != "pointer" || m.action != "scroll" { scroll = PixelScrollAccumulator() }
+        if (m.type != "pointer" || m.action != "scroll") && !scroll.isPhased { scroll = ScrollEventBuilder() }
         guard allowed else { liftHeld(); outcome = .cancelled; return }
         if let windowTarget {
             guard let frame = windowTarget.frame else { liftHeld(); outcome = .frameGone; return }
@@ -104,12 +160,17 @@ private final class InjectedEvents {
             let previousPoint = lastPoint
             lastPoint = p
             let b = m.button ?? buttons.sorted().first ?? 0
+            if action == "scroll", m.scrollPhase == "began" || m.scrollPhase == nil && m.momentumPhase == nil && scroll.isPhased {
+                finishScroll()
+            }
             if independentPointer {
-                let target = desktop.pointer(action: action, button: b, at: p) {
-                    DesktopInputTarget.target(at: $0, excluding: excludedWindows)
-                }
+                let hitTest = { DesktopInputTarget.target(at: $0, excluding: self.excludedWindows) }
+                let target = action == "scroll" ?
+                    desktop.scroll(at: p, phase: m.scrollPhase, momentum: m.momentumPhase, hitTest: hitTest) :
+                    desktop.pointer(action: action, button: b, at: p, hitTest: hitTest)
                 destination = target.map(InputDestination.window) ?? .unavailable
-                guard let target, target.frame != nil else {
+                // post() validates a scroll target immediately before delivery.
+                guard let target, action == "scroll" || target.frame != nil else {
                     // A press in empty space stays empty until release. Never
                     // substitute a global event or another app for a lost target.
                     if !buttons.isEmpty || windowButton != nil { liftHeld() }
@@ -148,12 +209,12 @@ private final class InjectedEvents {
             let up: CGEventType = b == 2 ? .rightMouseUp : b == 1 ? .otherMouseUp : .leftMouseUp
             let drag: CGEventType = b == 2 ? .rightMouseDragged : b == 1 ? .otherMouseDragged : .leftMouseDragged
             if action == "scroll" {
-                if scrollDestination != destination { scroll = PixelScrollAccumulator(); scrollDestination = destination }
-                let delta = scroll.consume(x: m.deltaX ?? 0, y: m.deltaY ?? 0)
-                guard delta.x != 0 || delta.y != 0 else { return }
-                let event = CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 2,
-                                    wheel1: delta.y, wheel2: delta.x, wheel3: 0)
-                event?.location = p; event?.flags = Self.flags(m.modifiers ?? []); post(event)
+                if scrollDestination != destination { finishScroll(); scrollDestination = destination }
+                scrollPoint = p; scrollFlags = Self.flags(m.modifiers ?? [])
+                let event = scroll.event(deltaX: m.deltaX ?? 0, deltaY: m.deltaY ?? 0,
+                                         scrollPhase: m.scrollPhase, momentumPhase: m.momentumPhase, source: source)
+                guard event != nil else { return }
+                event?.location = scrollPoint; event?.flags = scrollFlags; post(event)
             } else {
                 if action == "down" {
                     guard !buttons.contains(b) else { return }
@@ -209,9 +270,16 @@ private final class InjectedEvents {
             flush()
         }
     }
+    private func finishScroll(releasing: Bool = false) {
+        if let event = scroll.finish(source: source) {
+            event.location = scrollPoint; event.flags = scrollFlags
+            post(event, to: scrollDestination, releasing: releasing)
+        }
+        scrollDestination = .unavailable
+    }
     func liftHeld() {
         windowButton = nil
-        scroll = PixelScrollAccumulator(); scrollDestination = .unavailable
+        finishScroll(releasing: true)
         for b in buttons {
             let type: CGEventType = b == 2 ? .rightMouseUp : b == 1 ? .otherMouseUp : .leftMouseUp
             let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: lastPoint,

@@ -35,7 +35,9 @@ final class Signaling {
     }
     private func receive(_ current: URLSessionWebSocketTask) {
         current.receive { [weak self] result in
-            DispatchQueue.main.async {
+            // Liveness timers also run during menu tracking. Process replies in
+            // the same modes so an open menu cannot make a live gateway look silent.
+            RunLoop.main.perform(inModes: [.common]) {
                 guard let self, self.socket === current else { return }
                 switch result {
                 case .failure(let error): self.reconnect(after: current, error: error)
@@ -95,7 +97,7 @@ final class Signaling {
         guard let current = socket else { return }
         current.send(.string(string)) { [weak self, weak current] error in
             guard error != nil else { return }
-            DispatchQueue.main.async {
+            RunLoop.main.perform(inModes: [.common]) {
                 guard let self, let current, self.socket === current else { return }
                 self.reconnect(after: current, error: error)
             }

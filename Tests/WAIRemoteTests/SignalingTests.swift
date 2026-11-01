@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 import Network
 import RemoteCore
 import XCTest
@@ -76,6 +76,65 @@ final class SignalingTests: XCTestCase {
         XCTAssertEqual(gateway.connections.count, 2)
     }
 
+    func testResponsiveGatewayDoesNotLoseHostRegistrationDuringMenuTracking() throws {
+        _ = NSApplication.shared
+        let gateway = try TestGateway(queue: DispatchQueue(label: "test.signaling.gateway"), repliesToPings: true)
+        defer { gateway.stop() }
+        let signal = Signaling(identity: DeviceIdentity(), heartbeatInterval: 0.05, responseTimeout: 0.3)
+        defer { signal.close() }
+        let ready = expectation(description: "Host registered")
+        signal.onReady = { _ in ready.fulfill() }
+        signal.onFailure = { XCTFail($0) }
+        var reconnects = 0
+        signal.onReconnecting = { reconnects += 1 }
+        signal.connect(url: try start(gateway))
+        wait(for: [ready], timeout: 2)
+        let tracked = expectation(description: "Bounded menu tracking finished")
+        DispatchQueue.main.async {
+            let repliesBeforeTracking = gateway.pongs
+            let deadline = Date().addingTimeInterval(0.7)
+            while Date() < deadline { RunLoop.main.run(mode: .eventTracking, before: deadline) }
+            XCTAssertGreaterThan(gateway.pongs, repliesBeforeTracking,
+                                 "The real gateway must reply while the main queue is tracking.")
+            tracked.fulfill()
+        }
+        wait(for: [tracked], timeout: 2)
+        XCTAssertEqual(reconnects, 0, "A responsive socket must not be declared silent just because a menu is open.")
+        XCTAssertEqual(gateway.connections.count, 1)
+    }
+
+    func testLostHostRegistrationCanRecoverBeforeMenuTrackingEnds() throws {
+        _ = NSApplication.shared
+        let gateway = try TestGateway(queue: DispatchQueue(label: "test.signaling.recovery"), repliesToPings: true)
+        defer { gateway.stop() }
+        let signal = Signaling(identity: DeviceIdentity())
+        defer { signal.close() }
+        let ready = expectation(description: "Initial host registration")
+        let tracked = expectation(description: "Bounded menu tracking finished")
+        var registrations = 0, tracking = false, recoveredDuringTracking = false
+        signal.onReady = { _ in
+            registrations += 1
+            if registrations == 1 { ready.fulfill() }
+            else { recoveredDuringTracking = tracking }
+        }
+        signal.onFailure = { XCTFail($0) }
+        signal.connect(url: try start(gateway))
+        wait(for: [ready], timeout: 2)
+        DispatchQueue.main.async {
+            tracking = true
+            gateway.connections[0].cancel()
+            let deadline = Date().addingTimeInterval(2.5)
+            while !recoveredDuringTracking && Date() < deadline {
+                RunLoop.main.run(mode: .eventTracking, before: deadline)
+            }
+            tracking = false
+            tracked.fulfill()
+        }
+        wait(for: [tracked], timeout: 4)
+        XCTAssertTrue(recoveredDuringTracking, "A new socket must complete its challenge while the menu remains open.")
+        XCTAssertEqual(registrations, 2)
+    }
+
     func testAuthenticationFailureIsTerminal() throws {
         try assertTerminalFailure { TestGateway.reject("authentication failed", connection: $0) }
     }
@@ -108,7 +167,7 @@ final class SignalingTests: XCTestCase {
             if case .ready = state { listening.fulfill() }
             if case .failed(let error) = state { XCTFail("\(error)"); listening.fulfill() }
         }
-        gateway.listener.start(queue: .main)
+        gateway.listener.start(queue: gateway.queue)
         wait(for: [listening], timeout: 2)
         return URL(string: "ws://127.0.0.1:\(try XCTUnwrap(gateway.listener.port).rawValue)/signal")!
     }
@@ -117,10 +176,16 @@ final class SignalingTests: XCTestCase {
 /// A real loopback WebSocket peer exercises URLSession failure and re-registration.
 private final class TestGateway {
     let listener: NWListener
-    var connections: [NWConnection] = []
+    let queue: DispatchQueue
+    private let lock = NSLock()
+    private var opened: [NWConnection] = []
+    private var replies = 0
+    var connections: [NWConnection] { lock.withLock { opened } }
+    var pongs: Int { lock.withLock { replies } }
     var onHello: ((NWConnection, Int) -> Void)?
 
-    init() throws {
+    init(queue: DispatchQueue = .main, repliesToPings: Bool = false) throws {
+        self.queue = queue
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
         let websocket = NWProtocolWebSocket.Options()
@@ -129,8 +194,7 @@ private final class TestGateway {
         listener = try NWListener(using: parameters)
         listener.newConnectionHandler = { [weak self] connection in
             guard let self else { return }
-            self.connections.append(connection)
-            let number = self.connections.count
+            let number = self.lock.withLock { self.opened.append(connection); return self.opened.count }
             connection.stateUpdateHandler = { [weak self, weak connection] state in
                 guard case .ready = state, let self, let connection else { return }
                 Self.send(["type": "challenge", "nonce": "test-challenge"], to: connection)
@@ -144,9 +208,22 @@ private final class TestGateway {
                         domain: "wai-remote/signal/v1", publicKey: hello?["publicKey"] as? String ?? ""))
                     if let onHello = self.onHello { onHello(connection, number) }
                     else { Self.send(["type": "ready"], to: connection) }
+                    if repliesToPings { self.receivePing(connection) }
                 }
             }
-            connection.start(queue: .main)
+            connection.start(queue: queue)
+        }
+    }
+
+    private func receivePing(_ connection: NWConnection) {
+        connection.receiveMessage { [weak self, weak connection] data, _, _, error in
+            guard let self, let connection, let data, error == nil else { return }
+            let message = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            if message?["type"] as? String == "ping" {
+                self.lock.withLock { self.replies += 1 }
+                Self.send(["type": "pong"], to: connection)
+            }
+            self.receivePing(connection)
         }
     }
 
