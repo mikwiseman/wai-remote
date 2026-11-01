@@ -418,6 +418,7 @@ extension PhoneModel {
         signal(message, invite: invite, token: attempt)
     }
     func showBusyForTesting(canSwitch: Bool) {
+        identity = DeviceIdentity()
         let host = DeviceIdentity()
         guard let invite = try? RemoteInvite("http://127.0.0.1:1/#host=\(host.id)&key=\(host.publicKey)") else { return }
         showBusy(invite: invite, sessionID: canSwitch ? "demo-session" : nil)
