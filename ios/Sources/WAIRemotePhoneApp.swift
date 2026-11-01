@@ -54,6 +54,17 @@ extension PhoneModel {
             return
         }
         guard let image = Self.demoScreen, !connected else { return }
+        // Opt-in native UI acceptance: observe real input without a Mac connection.
+        if let path = UserDefaults.standard.string(forKey: "WAIDemoEventsPath") {
+            FileManager.default.createFile(atPath: path, contents: nil)
+            if let output = try? FileHandle(forWritingTo: URL(fileURLWithPath: path)) {
+                onTransmitForTesting = { message in
+                    guard var data = try? JSONEncoder().encode(message) else { return }
+                    data.append(0x0A)
+                    try? output.write(contentsOf: data)
+                }
+            }
+        }
         let state: [String: Any] = ["sessionID": "demo", "controllerEpoch": 0, "inputEpoch": 0, "modeGeneration": 0, "layerEpoch": 0, "reason": "",
             "nextSequence": 0, "mode": RemoteMode(rawValue: moment)?.rawValue ?? "control", "permissions": ["control": true, "annotate": true],
             "surface": ["id": "demo", "revision": 1, "width": Int(image.size.width), "height": Int(image.size.height)]]
