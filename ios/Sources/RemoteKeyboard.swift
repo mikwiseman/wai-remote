@@ -10,7 +10,7 @@ struct RemoteKeyboard: UIViewRepresentable {
 
     func makeUIView(context: Context) -> KeyCatcher { KeyCatcher(model: model, modifiers: modifiers) }
     func updateUIView(_ view: KeyCatcher, context: Context) {
-        view.onResign = { DispatchQueue.main.async { active = false } }
+        view.onResign = { active = false }
         if active, !view.isFirstResponder { DispatchQueue.main.async { _ = view.becomeFirstResponder() } }
         if !active, view.isFirstResponder { _ = view.resignFirstResponder() }
     }
@@ -36,8 +36,17 @@ final class KeyCatcher: UIView, UIKeyInput {
 
     override var canBecomeFirstResponder: Bool { true }
     override func resignFirstResponder() -> Bool {
+        let hadFocus = isFirstResponder
         let resigned = super.resignFirstResponder()
-        if resigned { modifiers.held = []; onResign() }
+        if hadFocus, resigned {
+            // Resigning can happen inside updateUIView. Publish afterward, and
+            // ignore an old dismissal if the keyboard has already reopened.
+            DispatchQueue.main.async { [weak self] in
+                guard let self, !self.isFirstResponder else { return }
+                if !self.modifiers.held.isEmpty { self.modifiers.held = [] }
+                self.onResign()
+            }
+        }
         return resigned
     }
 
