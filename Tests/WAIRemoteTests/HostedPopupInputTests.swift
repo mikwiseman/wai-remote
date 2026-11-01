@@ -65,80 +65,22 @@ final class HostedPopupInputTests: XCTestCase {
             injector.apply(event)
         }
     }
-    /// Only the owned fixture is inspected. A mismatched hit is evidence, not
-    /// permission to replace the expected panel with a different window.
-    private func diagnoseHit(_ popup: AXUIElement, target: WindowInputTarget, point: CGPoint,
+    private func diagnoseHit(target: WindowInputTarget, point: CGPoint,
                              actual: WindowInputTarget?, state: [String: NSNumber]) {
-        let deadline = ProcessInfo.processInfo.systemUptime + 0.7
-        func describe(_ element: AXUIElement) -> String {
-            var pid: pid_t = 0; AXUIElementGetPid(element, &pid)
-            let id = WindowInputTarget.axWindowID(element, deadline: deadline) ?? 0
-            let values = WindowInputTarget.axValues(element,
-                [kAXRoleAttribute, kAXPositionAttribute, kAXSizeAttribute, kAXTopLevelUIElementAttribute], deadline: deadline)
-            var position = CGPoint.zero, size = CGSize.zero, top: CGWindowID = 0
-            if let values, CFGetTypeID(values[1]) == AXValueGetTypeID(), CFGetTypeID(values[2]) == AXValueGetTypeID() {
-                _ = AXValueGetValue(values[1] as! AXValue, .cgPoint, &position)
-                _ = AXValueGetValue(values[2] as! AXValue, .cgSize, &size)
-            }
-            if let values, CFGetTypeID(values[3]) == AXUIElementGetTypeID() {
-                top = WindowInputTarget.axWindowID(values[3] as! AXUIElement, deadline: deadline) ?? 0
-            }
-            return "role=\(values?.first as? String ?? "nil") ax=\(pid):\(id) owner=\(owner(id) ?? 0) top=\(top) frame=\(CGRect(origin: position, size: size))"
-        }
         print("HOSTED_POPUP_HIT expected=\(target.pid):\(target.windowID) actual=\(String(describing: actual)) point=\(point) state=\(state)")
-        var current: AXUIElement? = popup
-        for depth in 0..<12 {
-            guard let element = current, ProcessInfo.processInfo.systemUptime < deadline else { break }
-            print("HOSTED_POPUP_ANCESTOR depth=\(depth) \(describe(element))")
-            let parent = WindowInputTarget.axValues(element, [kAXParentAttribute], deadline: deadline)?.first
-            current = parent.flatMap { CFGetTypeID($0) == AXUIElementGetTypeID() ? ($0 as! AXUIElement) : nil }
-        }
-        if ProcessInfo.processInfo.systemUptime < deadline {
-            let app = AXUIElementCreateApplication(target.pid)
-            AXUIElementSetMessagingTimeout(app, Float(deadline - ProcessInfo.processInfo.systemUptime))
-            var hit: AXUIElement?
-            let result = AXUIElementCopyElementAtPosition(app, Float(point.x), Float(point.y), &hit)
-            print("HOSTED_POPUP_APP_HIT result=\(result.rawValue) \(hit.map(describe) ?? "nil")")
-            if let hit, actual?.pid == target.pid,
-               WindowInputTarget.axWindowID(hit, deadline: deadline) == actual?.windowID {
-                var pending = [(hit, 0)], visited = 0
-                while let (element, depth) = pending.popLast(), visited < 32,
-                      ProcessInfo.processInfo.systemUptime < deadline {
-                    visited += 1
-                    guard let values = WindowInputTarget.axValues(element,
-                        [kAXRoleAttribute, kAXTitleAttribute, kAXDescriptionAttribute, kAXValueAttribute, kAXChildrenAttribute], deadline: deadline) else { break }
-                    let text = values[1...3].compactMap { $0 as? String }.filter { !$0.isEmpty }
-                    print("HOSTED_POPUP_COVERING_CONTENT depth=\(depth) role=\(values[0] as? String ?? "nil") text=\(text)")
-                    if depth < 6 { pending += ((values[4] as? [AXUIElement]) ?? []).map { ($0, depth + 1) } }
-                }
-            }
-        }
         let windows = (CGWindowListCopyWindowInfo(.optionOnScreenOnly, 0) as? [[String: Any]]) ?? []
         for window in windows where (window[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == target.pid {
-            print("HOSTED_POPUP_OWNED_WINDOW id=\(window[kCGWindowNumber as String] ?? 0) layer=\(window[kCGWindowLayer as String] ?? 0) name=\(window[kCGWindowName as String] ?? "nil") bounds=\(window[kCGWindowBounds as String] ?? [:])")
+            print("HOSTED_POPUP_OWNED_WINDOW id=\(window[kCGWindowNumber as String] ?? 0) layer=\(window[kCGWindowLayer as String] ?? 0) bounds=\(window[kCGWindowBounds as String] ?? [:])")
         }
     }
-    private func diagnoseMenu(_ item: AXUIElement, host: pid_t, service: pid_t) {
-        let deadline = ProcessInfo.processInfo.systemUptime + 0.7
-        func chain(_ start: AXUIElement?, label: String, limit: Int) {
-            var current = start
-            for depth in 0..<limit {
-                guard let element = current, ProcessInfo.processInfo.systemUptime < deadline,
-                      let values = WindowInputTarget.axValues(element, [kAXRoleAttribute, kAXParentAttribute], deadline: deadline) else { break }
-                var pid: pid_t = 0; AXUIElementGetPid(element, &pid)
-                let id = WindowInputTarget.axWindowID(element, deadline: deadline) ?? 0
-                print("HOSTED_POPUP_MENU_CHAIN source=\(label) depth=\(depth) role=\(values[0] as? String ?? "nil") ax=\(pid):\(id)")
-                current = CFGetTypeID(values[1]) == AXUIElementGetTypeID() ? (values[1] as! AXUIElement) : nil
-            }
-        }
-        chain(item, label: "item", limit: 8)
-        for (label, pid) in [("host-focus", host), ("service-focus", service)] {
-            let app = AXUIElementCreateApplication(pid)
-            let focused = WindowInputTarget.axValues(app, [kAXFocusedUIElementAttribute], deadline: deadline)?.first
-            let element = focused.flatMap { CFGetTypeID($0) == AXUIElementGetTypeID() ? ($0 as! AXUIElement) : nil }
-            print("HOSTED_POPUP_MENU_FOCUS source=\(label) pid=\(pid) present=\(element != nil)")
-            chain(element, label: label, limit: 4)
-        }
+    private func assertStaleReceiverRejectsKeyUp(_ target: WindowInputTarget) throws {
+        let source = try XCTUnwrap(CGEventSource(stateID: .privateState))
+        let event = try XCTUnwrap(CGEvent(keyboardEventSource: source, virtualKey: 53, keyDown: false))
+        event.flags = []
+        var delivered = 0, delivery = WindowInputTarget.Delivery.system
+        delivery.key = { _, _ in delivered += 1 }
+        XCTAssertEqual(target.post(event, permitted: { true }, delivery: delivery), .frameGone)
+        XCTAssertEqual(delivered, 0, "A stale menu key must never reach its former service or another window")
     }
     func testHostedFormatPopupSelectsItsSecondItem() throws { try interact(select: true) }
     func testEscapeDismissesHostedFormatMenuWithoutClosingThePanel() throws { try interact(select: false) }
@@ -146,7 +88,11 @@ final class HostedPopupInputTests: XCTestCase {
         try interact(select: false, standalone: true)
     }
 
-    private func interact(select: Bool, standalone: Bool = false) throws {
+    func testStandaloneHostedMenuCannotBorrowAnUnrelatedWindow() throws {
+        try interact(select: false, standalone: true, inspectScope: true)
+    }
+
+    private func interact(select: Bool, standalone: Bool = false, inspectScope: Bool = false) throws {
         try XCTSkipUnless(CGPreflightPostEventAccess() && AXIsProcessTrusted(), "Requires existing native input permissions; never requests access")
         let initialFailures = testRun?.failureCount ?? 0
         let app = NSApplication.shared, previousPolicy = NSApplication.shared.activationPolicy()
@@ -177,7 +123,12 @@ final class HostedPopupInputTests: XCTestCase {
         FileManager.default.createFile(atPath: childLog.path, contents: nil)
         let output = try FileHandle(forWritingTo: childLog)
         let child = Process(); child.executableURL = executable
-        child.arguments = [stateURL.path, directory.path, standalone ? "standalone" : "sheet"]
+        // NSDocumentController treats argv paths as documents to open.
+        child.environment = ProcessInfo.processInfo.environment.merging([
+            "WAI_HOSTED_POPUP_STATE_PATH": stateURL.path,
+            "WAI_HOSTED_POPUP_DIRECTORY_PATH": directory.path,
+            "WAI_HOSTED_POPUP_MODE": standalone ? "standalone" : "sheet"
+        ]) { _, fixtureValue in fixtureValue }
         child.standardOutput = output; child.standardError = output
         try child.run()
         defer {
@@ -232,7 +183,7 @@ final class HostedPopupInputTests: XCTestCase {
         XCTAssertNotEqual(remotePID, target.pid, "This must exercise an actual cross-process hosted popup")
         guard virtualID != target.windowID, remotePID != target.pid else { return }
         let actualTarget = DesktopInputTarget.target(at: point, excluding: [])
-        if actualTarget != target { diagnoseHit(popup, target: target, point: point, actual: actualTarget, state: state()) }
+        if actualTarget != target { diagnoseHit(target: target, point: point, actual: actualTarget, state: state()) }
         XCTAssertEqual(actualTarget, target)
         guard actualTarget == target else { return }
         let pointer = try XCTUnwrap(CGEvent(source: nil)).location
@@ -255,6 +206,28 @@ final class HostedPopupInputTests: XCTestCase {
         let second = try XCTUnwrap(item), secondPoint = try XCTUnwrap(center(second))
         print("HOSTED_POPUP_MENU target=\(menu.pid):\(menu.windowID) itemWindow=\(windowID(second) ?? 0)")
         XCTAssertEqual(menu.pid, remotePID)
+        var retainedMenuDestination: WindowInputTarget?
+        if inspectScope {
+            let documentID = try XCTUnwrap(state()["document"]).uint32Value
+            XCTAssertNotEqual(documentID, target.windowID)
+            XCTAssertEqual(state()["attached"]?.intValue, 0, "The unrelated document has no attached sheet")
+            let unrelated = WindowInputTarget(pid: target.pid, windowID: documentID)
+            XCTAssertNotNil(unrelated.frame)
+            let otherDestination = try XCTUnwrap(unrelated.keyboardDestination())
+            XCTAssertEqual(otherDestination.pid, unrelated.pid)
+            XCTAssertEqual(otherDestination.windowID, unrelated.windowID)
+            XCTAssertNil(otherDestination.keyboardReceiver, "An unrelated document cannot borrow the open remote menu")
+            let selectedDestination = try XCTUnwrap(target.keyboardDestination())
+            let selectedReceiver = try XCTUnwrap(selectedDestination.keyboardReceiver)
+            XCTAssertEqual(selectedReceiver.pid, menu.pid)
+            XCTAssertEqual(selectedReceiver.windowID, menu.windowID)
+            let menuFrame = try XCTUnwrap(selectedReceiver.windowFrame)
+            XCTAssertEqual(menuFrame, menu.frame)
+            retainedMenuDestination = selectedDestination
+            var changedGeometry = selectedDestination
+            changedGeometry.keyboardReceiver?.windowFrame = menuFrame.offsetBy(dx: 1, dy: 0)
+            try assertStaleReceiverRejectsKeyUp(changedGeometry)
+        }
         if select { click(secondPoint, injector: injector) }
         else {
             for action in ["down", "up"] {
@@ -271,59 +244,37 @@ final class HostedPopupInputTests: XCTestCase {
         XCTAssertEqual(state()["writes"]?.intValue, 0, "The test never saves a document")
         XCTAssertEqual(try XCTUnwrap(CGEvent(source: nil)).location, pointer)
         print("HOSTED_POPUP_RESULT select=\(select) value=\(selected ?? "nil") menuClosed=\(menu.frame == nil) panelAlive=\(target.frame != nil)")
-        // Diagnostic reference only, after the production assertion has failed.
-        // Revalidate the exact owned menu; never send a global key or retry the
-        // production operation. A success here does not turn the test green.
-        if standalone && !select, let frame = menu.frame,
-           DesktopInputTarget.target(at: secondPoint, excluding: []) == menu {
-            diagnoseMenu(second, host: target.pid, service: remotePID)
-            var outcomes: [InputOutcome] = []
-            let source = try XCTUnwrap(CGEventSource(stateID: .privateState))
-            for down in [true, false] {
-                let event = try XCTUnwrap(CGEvent(keyboardEventSource: source, virtualKey: 53, keyDown: down))
-                var escape: UniChar = 0x1B
-                event.keyboardSetUnicodeString(stringLength: 1, unicodeString: &escape)
-                event.flags = []
-                event.location = secondPoint
-                outcomes.append(menu.post(event, permitted: { menu.frame == frame }))
-            }
-            let dismissed = Date().addingTimeInterval(1)
-            while menu.frame != nil && Date() < dismissed { pump(0.05) }
-            print("HOSTED_POPUP_EXACT_MENU_ESCAPE target=\(menu.pid):\(menu.windowID) outcomes=\(outcomes) menuClosed=\(menu.frame == nil) panelAlive=\(target.frame != nil)")
-        }
-        if standalone {
-            XCTAssertEqual(target.keyboardDestination()?.keyboardReceiver,
-                WindowInputTarget.KeyboardReceiver(pid: remotePID, windowID: virtualID))
+        if menu.frame == nil {
+            if let retainedMenuDestination { try assertStaleReceiverRejectsKeyUp(retainedMenuDestination) }
+            let receiver = try XCTUnwrap(target.keyboardDestination()?.keyboardReceiver)
+            XCTAssertEqual(receiver.pid, remotePID)
+            XCTAssertEqual(receiver.windowID, virtualID, "A dismissed menu cannot remain the keyboard receiver")
+            XCTAssertNotEqual(receiver.windowID, menu.windowID)
         }
     }
 
     private static let fixture = #"""
 import AppKit
 import Darwin
-let metadata = URL(fileURLWithPath: CommandLine.arguments[1])
+let configuration = ProcessInfo.processInfo.environment
+let metadata = URL(fileURLWithPath: configuration["WAI_HOSTED_POPUP_STATE_PATH"]!)
 DispatchQueue.global().asyncAfter(deadline: .now() + 25) { exit(2) }
 let app = NSApplication.shared
 app.setActivationPolicy(.regular); app.finishLaunching()
 var writes = 0
-let standalone = CommandLine.arguments[3] == "standalone"
+let standalone = configuration["WAI_HOSTED_POPUP_MODE"] == "standalone"
 var preparedPanel: NSSavePanel?
 final class Document: NSDocument {
     override class var readableTypes: [String] { ["public.plain-text", "public.rtf"] }
     override class var writableTypes: [String] { readableTypes }
     override class func isNativeType(_ type: String) -> Bool { readableTypes.contains(type) }
     override var windowForSheet: NSWindow? { standalone ? nil : super.windowForSheet }
-    override func willPresentError(_ error: Error) -> Error {
-        let detail = error as NSError
-        Swift.print("OWNED_DOCUMENT_ERROR domain=\(detail.domain) code=\(detail.code) message=\(detail.localizedDescription)")
-        fflush(stdout)
-        return super.willPresentError(error)
-    }
     override func data(ofType typeName: String) throws -> Data {
         writes += 1; throw NSError(domain: "FixtureNeverSaves", code: 1)
     }
     override func prepareSavePanel(_ savePanel: NSSavePanel) -> Bool {
         preparedPanel = savePanel
-        savePanel.directoryURL = URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true)
+        savePanel.directoryURL = URL(fileURLWithPath: configuration["WAI_HOSTED_POPUP_DIRECTORY_PATH"]!, isDirectory: true)
         savePanel.canCreateDirectories = false
         savePanel.nameFieldStringValue = "Owned unsaved popup fixture.txt"
         return true
@@ -336,31 +287,12 @@ let window = NSWindow(contentRect: CGRect(x: 180, y: 150, width: 700, height: 50
 window.isReleasedWhenClosed = false; window.animationBehavior = .none
 window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
 document.addWindowController(NSWindowController(window: window))
-var recordedWindows = Set<Int>()
 let record = Timer(timeInterval: 0.05, repeats: true) { _ in
     guard let sheet = standalone ? preparedPanel : window.attachedSheet, sheet.isVisible else { return }
     let data: [String: NSNumber] = ["sheet": NSNumber(value: sheet.windowNumber),
-        "document": NSNumber(value: window.windowNumber), "prepared": NSNumber(value: preparedPanel?.windowNumber ?? 0),
+        "document": NSNumber(value: window.windowNumber), "attached": NSNumber(value: window.attachedSheet?.windowNumber ?? 0),
         "active": NSNumber(value: app.isActive), "writes": NSNumber(value: writes)]
     try! JSONSerialization.data(withJSONObject: data).write(to: metadata, options: .atomic)
-    let visible = app.windows.filter { $0.isVisible }
-    let identities = Set(visible.map(\.windowNumber))
-    if identities != recordedWindows {
-        recordedWindows = identities
-        for item in visible {
-            print("OWNED_PANEL_WINDOW id=\(item.windowNumber) class=\(type(of: item)) frame=\(item.frame) sheetParent=\(item.sheetParent?.windowNumber ?? 0)")
-            if String(describing: type(of: item)) == "_NSAlertPanel", let content = item.contentView {
-                var pending = [content], visited = 0
-                while let view = pending.popLast(), visited < 64 {
-                    visited += 1
-                    if let field = view as? NSTextField { print("OWNED_ALERT_TEXT \(field.stringValue)") }
-                    if let button = view as? NSButton { print("OWNED_ALERT_BUTTON \(button.title)") }
-                    pending += view.subviews
-                }
-            }
-        }
-        fflush(stdout)
-    }
 }
 RunLoop.main.add(record, forMode: .common)
 DispatchQueue.main.async {

@@ -6,7 +6,11 @@ import Darwin
 struct WindowInputTarget: Equatable {
     let pid: pid_t
     let windowID: CGWindowID
-    struct KeyboardReceiver: Equatable { let pid: pid_t; let windowID: CGWindowID }
+    struct KeyboardReceiver: Equatable {
+        let pid: pid_t
+        let windowID: CGWindowID
+        var windowFrame: CGRect? = nil
+    }
     var keyboardReceiver: KeyboardReceiver? = nil
     static func onMainRunLoop<Output>(_ perform: @escaping () -> Output) -> Output {
         if Thread.isMainThread { return perform() }
@@ -128,6 +132,9 @@ struct WindowInputTarget: Equatable {
             if sheets.isEmpty {
                 if [kAXSheetRole, kAXWindowRole].contains(value(current, kAXRoleAttribute) as? String ?? "") {
                     destination.keyboardReceiver = destination.remoteKeyboardReceiver(children: children, deadline: deadline)
+                    if let menu = destination.remoteMenuKeyboardReceiver(in: current, deadline: deadline) {
+                        destination.keyboardReceiver = menu
+                    }
                 }
                 return destination
             }
@@ -157,6 +164,56 @@ struct WindowInputTarget: Equatable {
               ProcessInfo.processInfo.systemUptime < deadline,
               let owner = Self.windowOwner?(remoteID), owner != pid else { return nil }
         return KeyboardReceiver(pid: owner, windowID: remoteID)
+    }
+    /// A hosted popup's menu has its own real window. Its AX ancestry must lead
+    /// through this outer window's linked remote root; a service PID alone can
+    /// also own menus from unrelated documents.
+    private func remoteMenuKeyboardReceiver(in root: AXUIElement, deadline: TimeInterval) -> KeyboardReceiver? {
+        guard let windows = CGWindowListCopyWindowInfo(.optionOnScreenOnly, 0) as? [[String: Any]] else { return nil }
+        let menus = windows.filter { (($0[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0) > 0 }
+        guard !menus.isEmpty else { return nil }
+        let containers = [kAXGroupRole, kAXSplitGroupRole, kAXScrollAreaRole, kAXToolbarRole, kAXPopUpButtonRole]
+        var pending: [(AXUIElement, AXUIElement?, Int, KeyboardReceiver?, Bool)] = [(root, nil, 0, nil, false)]
+        var visited = 0, result: KeyboardReceiver?
+        while let (element, parent, depth, inherited, popupChild) = pending.popLast(), visited < 64 {
+            visited += 1
+            guard let values = Self.axValues(element, [kAXRoleAttribute, kAXChildrenAttribute], deadline: deadline),
+                  let role = values[0] as? String else { return nil }
+            guard depth == 0 || containers.contains(role) || role == kAXMenuRole else { continue }
+            guard let id = Self.axWindowID(element, deadline: deadline) else { return nil }
+            var remote = inherited
+            if let remote {
+                guard id == remote.windowID else { return nil }
+            } else if id != windowID {
+                guard [kAXGroupRole, kAXSplitGroupRole].contains(role), let parent,
+                      let owner = Self.windowOwner?(id), owner != pid,
+                      let actualParent = Self.axValues(element, [kAXParentAttribute], deadline: deadline)?.first,
+                      CFGetTypeID(actualParent) == AXUIElementGetTypeID(), CFEqual(actualParent, parent) else { return nil }
+                var proxyPID: pid_t = 0
+                guard AXUIElementGetPid(element, &proxyPID) == .success, proxyPID == pid || proxyPID == owner else { return nil }
+                // Most keystrokes have no tracking menu. Avoid inspecting the
+                // remote contents unless its service has an onscreen popup.
+                guard menus.contains(where: { ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == owner }) else { continue }
+                remote = KeyboardReceiver(pid: owner, windowID: id)
+            }
+            if role == kAXMenuRole {
+                guard popupChild, let remote,
+                      let bounds = Self.axValues(element, [kAXPositionAttribute, kAXSizeAttribute], deadline: deadline),
+                      let frame = Self.rect(bounds[0], bounds[1]) else { return nil }
+                let matches = menus.compactMap { window -> WindowInputTarget? in
+                    guard let id = (window[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
+                          let target = DesktopInputTarget.target(windowID: id, windows: [window]),
+                          target.pid == remote.pid, target.frame(in: [window]) == frame else { return nil }
+                    return target
+                }
+                guard result == nil, matches.count == 1, let menu = matches.first else { return nil }
+                result = KeyboardReceiver(pid: menu.pid, windowID: menu.windowID, windowFrame: frame)
+            } else {
+                guard depth < 8 else { return nil }
+                pending += ((values[1] as? [AXUIElement]) ?? []).map { ($0, element, depth + 1, remote, role == kAXPopUpButtonRole) }
+            }
+        }
+        return pending.isEmpty ? result : nil
     }
     var frame: CGRect? {
         guard let list = CGWindowListCopyWindowInfo(.optionIncludingWindow, windowID) as? [[String: Any]] else { return nil }
@@ -276,6 +333,8 @@ struct WindowInputTarget: Equatable {
                 guard permitted() else { return .cancelled }
             }
             if let receiver = keyboardReceiver {
+                if let expected = receiver.windowFrame,
+                   WindowInputTarget(pid: receiver.pid, windowID: receiver.windowID).frame != expected { return .frameGone }
                 event.setIntegerValueField(.eventTargetUnixProcessID, value: Int64(receiver.pid))
                 event.setIntegerValueField(CGEventField(rawValue: 51)!, value: Int64(receiver.windowID))
                 delivery.key(receiver.pid, event)
