@@ -85,10 +85,16 @@ final class ModalInputTests: XCTestCase {
         XCTAssertEqual(fixture.target.keyboardDestination(), fixture.sheetTarget)
         XCTAssertEqual(fixture.sheetTarget.keyboardDestination(), fixture.sheetTarget)
         let started = ProcessInfo.processInfo.systemUptime
+        var maximumCall: TimeInterval = 0
         // The default-budget checks above exercise normal routing. Repeated
         // scope assertions must not turn runner scheduling into a 10 ms gate.
-        for _ in 0..<100 { XCTAssertEqual(fixture.target.keyboardDestination(budget: 0.1), fixture.sheetTarget) }
-        print("Modal routing: \((ProcessInfo.processInfo.systemUptime - started) * 10) ms/call (same-process AppKit, 100 calls)")
+        for _ in 0..<100 {
+            let callStarted = ProcessInfo.processInfo.systemUptime
+            let destination = fixture.target.keyboardDestination(budget: 0.1)
+            maximumCall = max(maximumCall, ProcessInfo.processInfo.systemUptime - callStarted)
+            XCTAssertEqual(destination, fixture.sheetTarget)
+        }
+        print("Modal routing: \((ProcessInfo.processInfo.systemUptime - started) * 10) ms/call, max \(maximumCall * 1_000) ms (100 scope checks, 100 ms budget)")
         fixture.window.endSheet(fixture.alert.window, returnCode: .cancel)
         RunLoop.main.run(until: Date().addingTimeInterval(0.05))
         XCTAssertEqual(fixture.target.keyboardDestination(), fixture.target)
