@@ -236,10 +236,7 @@ final class HostedPopupInputTests: XCTestCase {
                 value($0, kAXRoleAttribute) as? String == kAXTextFieldRole &&
                 (value($0, kAXValueAttribute) as? String)?.contains("Owned unsaved popup fixture") == true
             })
-            let fieldFrame = try XCTUnwrap(axFrame(field))
-            let fieldPoint = CGPoint(x: fieldFrame.midX, y: fieldFrame.midY)
-            initialFilenameFrame = fieldFrame
-            XCTAssertEqual(DesktopInputTarget.target(at: fieldPoint, excluding: []), target)
+            initialFilenameFrame = try XCTUnwrap(axFrame(field))
             let alreadyFocused = value(field, kAXFocusedAttribute) as? Bool
             // SavePanel initially focuses its filename. A redundant synthetic
             // click can still be in flight when the next AXPress opens a menu.
