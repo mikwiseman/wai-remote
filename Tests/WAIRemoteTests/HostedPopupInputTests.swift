@@ -314,7 +314,7 @@ final class Document: NSDocument {
     override var windowForSheet: NSWindow? { standalone ? nil : super.windowForSheet }
     override func willPresentError(_ error: Error) -> Error {
         let detail = error as NSError
-        print("OWNED_DOCUMENT_ERROR domain=\(detail.domain) code=\(detail.code) message=\(detail.localizedDescription)")
+        Swift.print("OWNED_DOCUMENT_ERROR domain=\(detail.domain) code=\(detail.code) message=\(detail.localizedDescription)")
         fflush(stdout)
         return super.willPresentError(error)
     }
