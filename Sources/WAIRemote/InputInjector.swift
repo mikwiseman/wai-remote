@@ -141,7 +141,7 @@ private final class InjectedEvents {
         event?.setIntegerValueField(.eventSourceUserData, value: 0x574149)
         guard let event else { return }
         switch target ?? destination {
-        case .window(let window): outcome = window.post(event, permitted: { releasing || isCurrent() }, hover: hover, activating: activating)
+        case .window(let window): outcome = window.post(event, permitted: { releasing || self.isCurrent() }, hover: hover, activating: activating)
         case .system: event.post(tap: .cghidEventTap); outcome = .system
         case .unavailable: outcome = .noTarget
         }
@@ -200,7 +200,7 @@ private final class InjectedEvents {
                         "lookupMs": (ProcessInfo.processInfo.systemUptime - lookupStarted) * 1000])
                 }
                 if let pressed {
-                    if activating { _ = destination.window?.activateForDesktopClick(if: isCurrent) }
+                    if activating { _ = destination.window?.activateForDesktopClick(at: p, if: isCurrent) }
                     guard isCurrent() else { outcome = .cancelled; return }
                     windowButton = pressed; outcome = .axPress; return
                 }

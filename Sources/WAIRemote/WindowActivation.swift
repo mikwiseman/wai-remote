@@ -4,11 +4,14 @@ extension WindowInputTarget {
     /// Full-desktop clicks behave like ordinary Mac clicks, while event delivery
     /// retains the independent cursor and the selected window. Window grants do
     /// not call this path and keep their background input behavior.
-    @discardableResult func activateForDesktopClick(if current: @escaping () -> Bool) -> Bool {
+    @discardableResult func activateForDesktopClick(at point: CGPoint, if current: @escaping () -> Bool) -> Bool {
         if pid == ProcessInfo.processInfo.processIdentifier && !Thread.isMainThread {
-            return Self.onMainRunLoop { self.activateForDesktopClick(if: current) }
+            return Self.onMainRunLoop { self.activateForDesktopClick(at: point, if: current) }
         }
         guard current(), frame != nil else { return false }
+        // Re-raising an active window can dismiss its tracking menu before the
+        // clicked item receives input. It already has the intended activation.
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid, isTransient(at: point) { return current() }
         let deadline = ProcessInfo.processInfo.systemUptime + 0.05
         let app = AXUIElementCreateApplication(pid)
         guard let windows = Self.axValues(app, [kAXWindowsAttribute], deadline: deadline)?.first as? [AXUIElement] else { return false }

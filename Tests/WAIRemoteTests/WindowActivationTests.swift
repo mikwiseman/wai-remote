@@ -67,7 +67,7 @@ final class WindowActivationTests: XCTestCase {
         let target = WindowInputTarget(pid: process.processIdentifier, windowID: rear)
         let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier
         var checks = 0
-        XCTAssertFalse(target.activateForDesktopClick(if: { checks += 1; return checks == 1 }))
+        XCTAssertFalse(target.activateForDesktopClick(at: point, if: { checks += 1; return checks == 1 }))
         XCTAssertGreaterThan(checks, 1, "Cancellation must be rechecked after the AX lookup")
         XCTAssertEqual(NSWorkspace.shared.frontmostApplication?.processIdentifier, frontmost)
         XCTAssertEqual(order(), [front, rear])

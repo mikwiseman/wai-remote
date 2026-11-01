@@ -214,14 +214,14 @@ struct WindowInputTarget: Equatable {
     }
     /// `hover` places the pointer over the target first, for a press that no
     /// move preceded (touch taps). Hover-armed controls ignore a bare press.
-    @discardableResult func post(_ event: CGEvent, permitted: () -> Bool, hover: Bool = false, activating: Bool = false, delivery: Delivery = .system) -> InputOutcome {
+    @discardableResult func post(_ event: CGEvent, permitted: @escaping () -> Bool, hover: Bool = false, activating: Bool = false, delivery: Delivery = .system) -> InputOutcome {
         // A point inside a window does not move with the window. Address the
         // event with the geometry the user aimed at, even if activation moves it.
         guard permitted() else { return .cancelled }
         guard let frame = delivery.frame(self), address(event, frame: frame) else { return .frameGone }
         let down = [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(event.type)
         if activating && down {
-            _ = withoutActuallyEscaping(permitted) { activateForDesktopClick(if: $0) }
+            _ = activateForDesktopClick(at: event.location, if: permitted)
             guard permitted() else { return .cancelled }
         }
         var primed = false
@@ -270,7 +270,7 @@ struct WindowInputTarget: Equatable {
             // active app, so a background app ignores a posted Command-V.
             if event.type == .keyDown, event.flags.contains(.maskCommand), delivery.frontmostPID() != pid,
                let item = delivery.menuItem(self, event) {
-                if withoutActuallyEscaping(permitted, do: { item.press(if: $0) }) { return .menu }
+                if item.press(if: permitted) { return .menu }
                 guard permitted() else { return .cancelled }
             }
             if let receiver = keyboardReceiver {
@@ -296,7 +296,7 @@ struct WindowInputTarget: Equatable {
         for byte in 0..<4 { record[0x3C + byte] = UInt8(truncatingIfNeeded: windowID >> (byte * 8)) }
         if focusRecord(&process, &record) == 0 { Thread.sleep(forTimeInterval: 0.05) }
     }
-    /// Native buttons can track the real desktop pointer and cancel a synthetic
+    /// Native buttons and menu items can track the real pointer and cancel a synthetic
     /// background click. Their standard Press action does not need that pointer.
     /// Foreign-app AX runs on the input queue. Same-process AX calls bypass IPC,
     /// so inspect our own AppKit/SwiftUI views on their main thread.
@@ -373,8 +373,8 @@ struct WindowInputTarget: Equatable {
         var hit: AXUIElement?
         return AXUIElementCopyElementAtPosition(app, Float(point.x), Float(point.y), &hit) == .success ? hit : nil
     }
-    /// The hit is often a title or image inside the button. Climb a few parents
-    /// to an enabled button of this window; anything else gets ordinary events.
+    /// The hit may be a title or image inside a button or menu item. Climb a few
+    /// parents to an enabled control of this window; otherwise use ordinary events.
     func button(climbingFrom hit: AXUIElement, at point: CGPoint, deadline: TimeInterval = ProcessInfo.processInfo.systemUptime + 0.05) -> Button? {
         let names = [kAXRoleAttribute, kAXPositionAttribute, kAXSizeAttribute, kAXEnabledAttribute, kAXTopLevelUIElementAttribute, kAXParentAttribute]
         var element = hit
@@ -382,7 +382,7 @@ struct WindowInputTarget: Equatable {
             guard let values = Self.axValues(element, names, deadline: deadline) else { return nil }
             // AXWindow deliberately returns a sheet's parent document. The top
             // level element preserves the sheet's own WindowServer address.
-            if values[0] as? String == kAXButtonRole, values[3] as? Bool == true, let bounds = Self.rect(values[1], values[2]),
+            if [kAXButtonRole, kAXMenuItemRole].contains(values[0] as? String ?? ""), values[3] as? Bool == true, let bounds = Self.rect(values[1], values[2]),
                bounds.contains(point) {
                 var actions: CFArray?
                 guard ownsButton(element, topLevel: values[4], deadline: deadline) else { return nil }
@@ -479,14 +479,11 @@ struct WindowInputTarget: Equatable {
         if let windows = CGWindowListCopyWindowInfo(.optionIncludingWindow, windowID) as? [[String: Any]],
            let window = windows.first(where: { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == windowID }),
            ((window[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0) > 0 { return true }
-        let names = [kAXRoleAttribute, kAXParentAttribute] as CFArray
-        var element = element(at: point)
+        let deadline = ProcessInfo.processInfo.systemUptime + 0.05
+        var element = element(at: point, deadline: deadline)
         for _ in 0..<8 {
-            guard let current = element else { return false }
-            AXUIElementSetMessagingTimeout(current, 0.05)
-            var raw: CFArray?
-            guard AXUIElementCopyMultipleAttributeValues(current, names, [], &raw) == .success,
-                  let values = raw as? [AnyObject], values.count == 2 else { return false }
+            guard let current = element,
+                  let values = Self.axValues(current, [kAXRoleAttribute, kAXParentAttribute], deadline: deadline) else { return false }
             if let role = values[0] as? String, [kAXMenuRole, "AXPopover"].contains(role) { return true }
             element = CFGetTypeID(values[1]) == AXUIElementGetTypeID() ? (values[1] as! AXUIElement) : nil
         }
