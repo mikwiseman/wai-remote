@@ -93,7 +93,7 @@ struct WindowInputTarget: Equatable {
     static var isSupported: Bool { setWindowLocation != nil && postPointer != nil && processNumber != nil && focusRecord != nil }
     /// Follow this window's attached sheet or directly linked remote view.
     /// App-wide focus can point at an unrelated document and is never a fallback.
-    func keyboardDestination(budget: TimeInterval = 0.01) -> WindowInputTarget? {
+    func keyboardDestination(budget: TimeInterval = 0.05) -> WindowInputTarget? {
         if pid == ProcessInfo.processInfo.processIdentifier && !Thread.isMainThread {
             return Self.onMainRunLoop { self.keyboardDestination(budget: budget) }
         }
@@ -109,7 +109,7 @@ struct WindowInputTarget: Equatable {
         func number(_ element: AXUIElement) -> CGWindowID? {
             let remaining = deadline - ProcessInfo.processInfo.systemUptime
             guard remaining > 0 else { return nil }
-            AXUIElementSetMessagingTimeout(element, Float(min(0.01, remaining)))
+            AXUIElementSetMessagingTimeout(element, Float(min(0.05, remaining)))
             var id: CGWindowID = 0
             return windowNumber(element, &id) == .success && id > 0 ? id : nil
         }
