@@ -6,6 +6,21 @@ import Darwin
 struct WindowInputTarget: Equatable {
     let pid: pid_t
     let windowID: CGWindowID
+    private static func onMainRunLoop<Output>(_ perform: @escaping () -> Output) -> Output {
+        if Thread.isMainThread { return perform() }
+        let finished = DispatchSemaphore(value: 0)
+        var result: Output?
+        // A menu entered from a main-queue callback cannot drain main.sync.
+        // Common-mode run-loop work can enter its nested tracking loop instead.
+        RunLoop.main.perform(inModes: [.common]) {
+            result = perform()
+            finished.signal()
+        }
+        // Keep the input queue ordered and its cancellation closure alive until
+        // the main-thread lookup or action has actually finished.
+        finished.wait()
+        return result!
+    }
     struct Button {
         let frame: CGRect
         let requiresMainThread: Bool
@@ -14,7 +29,7 @@ struct WindowInputTarget: Equatable {
             let perform = { current() && action() }
             // AX short-circuits same-process calls onto the caller's thread.
             // SwiftUI actions must execute on MainActor, also through AX.
-            if requiresMainThread && !Thread.isMainThread { return DispatchQueue.main.sync(execute: perform) }
+            if requiresMainThread && !Thread.isMainThread { return WindowInputTarget.onMainRunLoop(perform) }
             return perform()
         }
     }
@@ -186,7 +201,7 @@ struct WindowInputTarget: Equatable {
     /// so inspect our own AppKit/SwiftUI views on their main thread.
     func button(at point: CGPoint) -> Button? {
         if pid == ProcessInfo.processInfo.processIdentifier && !Thread.isMainThread {
-            return DispatchQueue.main.sync { button(at: point) }
+            return Self.onMainRunLoop { self.button(at: point) }
         }
         guard let frame, frame.contains(point), let hit = element(at: point) else { return nil }
         return button(climbingFrom: hit, at: point)
@@ -230,7 +245,7 @@ struct WindowInputTarget: Equatable {
     /// app's state, so every lookup reads them afresh, within a fixed budget.
     func menuItem(for event: CGEvent, budget: TimeInterval = 0.25) -> Button? {
         if pid == ProcessInfo.processInfo.processIdentifier && !Thread.isMainThread {
-            return DispatchQueue.main.sync { menuItem(for: event, budget: budget) }
+            return Self.onMainRunLoop { self.menuItem(for: event, budget: budget) }
         }
         guard let character = Self.shortcutCharacter(event) else { return nil }
         let flags = event.flags, deadline = ProcessInfo.processInfo.systemUptime + budget
@@ -295,7 +310,7 @@ struct WindowInputTarget: Equatable {
     /// menus are only recognizable by their accessibility role.
     func isTransient(at point: CGPoint) -> Bool {
         if pid == ProcessInfo.processInfo.processIdentifier && !Thread.isMainThread {
-            return DispatchQueue.main.sync { isTransient(at: point) }
+            return Self.onMainRunLoop { self.isTransient(at: point) }
         }
         if let windows = CGWindowListCopyWindowInfo(.optionIncludingWindow, windowID) as? [[String: Any]],
            let window = windows.first(where: { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == windowID }),
