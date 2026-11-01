@@ -185,6 +185,51 @@ final class ModalInputTests: XCTestCase {
         for action in ["down", "up"] { var event = message("key"); event.key = key; event.action = action; injector.apply(event) }
         runApplication(for: 1.5)
     }
+    /// Failure-only diagnostics for this test's own panel. Never print AX titles
+    /// or values; identities distinguish an OS topology change from a timeout.
+    private func diagnoseReceiver(_ fixture: SaveFixture) {
+        print("SavePanel receiver: OS=\(ProcessInfo.processInfo.operatingSystemVersionString) outer=\(fixture.target.pid):\(fixture.target.windowID)")
+        for budget in [0.01, 0.05, 0.25] {
+            let started = ProcessInfo.processInfo.systemUptime
+            let target = fixture.target.keyboardDestination(budget: budget)
+            print("SavePanel resolution: budget=\(budget) elapsed=\(ProcessInfo.processInfo.systemUptime - started) receiver=\(String(describing: target?.keyboardReceiver))")
+        }
+        typealias Number = @convention(c) (AXUIElement, UnsafeMutablePointer<CGWindowID>) -> AXError
+        guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "_AXUIElementGetWindow") else { return }
+        let number = unsafeBitCast(symbol, to: Number.self)
+        let deadline = ProcessInfo.processInfo.systemUptime + 2
+        func prepare(_ element: AXUIElement) -> Bool {
+            let remaining = deadline - ProcessInfo.processInfo.systemUptime
+            guard remaining > 0 else { return false }
+            AXUIElementSetMessagingTimeout(element, Float(min(0.02, remaining))); return true
+        }
+        func windowID(_ element: AXUIElement) -> CGWindowID {
+            var id: CGWindowID = 0
+            if prepare(element) { _ = number(element, &id) }; return id
+        }
+        let app = AXUIElementCreateApplication(getpid())
+        guard prepare(app), let windows = axValue(app, kAXWindowsAttribute) as? [AXUIElement],
+              let parent = windows.first(where: { windowID($0) == CGWindowID(fixture.window.windowNumber) }) else { return }
+        var pending = [(parent, 0)], count = 0
+        while let (element, depth) = pending.popLast(), count < 64, prepare(element) {
+            count += 1
+            var raw: CFArray?, owner: pid_t = 0
+            let names = [kAXRoleAttribute, kAXChildrenAttribute, kAXTopLevelUIElementAttribute]
+            let error = AXUIElementCopyMultipleAttributeValues(element, names as CFArray, [], &raw)
+            guard let values = raw as? [AnyObject], values.count == 3 else {
+                print("SavePanel AX: depth=\(depth) error=\(error.rawValue)"); continue
+            }
+            _ = AXUIElementGetPid(element, &owner)
+            var topOwner: pid_t = 0, topID: CGWindowID = 0
+            if CFGetTypeID(values[2]) == AXUIElementGetTypeID() {
+                let top = values[2] as! AXUIElement
+                _ = AXUIElementGetPid(top, &topOwner); topID = windowID(top)
+            }
+            print("SavePanel AX: depth=\(depth) role=\(values[0] as? String ?? "?") owner=\(owner) window=\(windowID(element)) top=\(topOwner):\(topID)")
+            if depth < 8 { pending += ((values[1] as? [AXUIElement]) ?? []).reversed().map { ($0, depth + 1) } }
+        }
+        print("SavePanel AX: nodes=\(count) truncated=\(!pending.isEmpty)")
+    }
     func testActualSavePanelCancelUsesItsWindowServerTarget() throws {
         try XCTSkipUnless(CGPreflightPostEventAccess(), "Native input requires existing post-event permission; this test never requests it.")
         let fixture = try saveFixture(); defer { fixture.close() }
@@ -203,6 +248,7 @@ final class ModalInputTests: XCTestCase {
         try XCTSkipUnless(CGPreflightPostEventAccess(), "Native input requires existing post-event permission; this test never requests it.")
         let fixture = try saveFixture(); defer { fixture.close() }
         let resolved = try XCTUnwrap(fixture.target.keyboardDestination())
+        if resolved.keyboardReceiver == nil { diagnoseReceiver(fixture) }
         let receiver = try XCTUnwrap(resolved.keyboardReceiver)
         XCTAssertEqual(resolved.pid, fixture.target.pid)
         XCTAssertEqual(resolved.windowID, fixture.target.windowID)
@@ -238,6 +284,7 @@ final class ModalInputTests: XCTestCase {
         var text = message("text"); text.text = unicode; injector.apply(text)
         runApplication(for: 0.5)
         let typed = try XCTUnwrap(axValue(fixture.filename, kAXValueAttribute) as? String)
+        if !typed.contains(unicode) { diagnoseReceiver(fixture) }
         XCTAssertTrue(typed.contains(unicode), typed)
         key("KeyX", injector: injector)
         let physical = try XCTUnwrap(axValue(fixture.filename, kAXValueAttribute) as? String)
