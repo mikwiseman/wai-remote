@@ -91,7 +91,9 @@ final class BudgetFeeder {
     enum Clock: String { case threadSleep, strictTimer }
     private let source: BudgetSceneSource
     private let clock: Clock
-    private let start: Double, end: Double
+    private let start: Double, end: Double, interval: Double
+    private let stampOffset: Int
+    private var nextDeadline: Double
     private let emit: (BudgetSceneSource.Frame, Int, Double) -> Double
     private let record: (String, [String: Any], Double) -> Void
     private let completed: () -> Void
@@ -101,10 +103,11 @@ final class BudgetFeeder {
     private var timer: DispatchSourceTimer?
     private var index = 0, totalMissed = 0
     private var lastPush: Double?
-    init(source: BudgetSceneSource, clock: Clock, start: Double, duration: Double,
+    init(source: BudgetSceneSource, clock: Clock, start: Double, duration: Double, fps: Double = 60, stampOffset: Int = 0,
          emit: @escaping (BudgetSceneSource.Frame, Int, Double) -> Double,
          record: @escaping (String, [String: Any], Double) -> Void, completed: @escaping () -> Void) {
         self.source = source; self.clock = clock; self.start = start; end = start + duration
+        interval = 1 / fps; self.stampOffset = stampOffset; nextDeadline = start
         self.emit = emit; self.record = record; self.completed = completed
     }
     func startFeeding() {
@@ -129,20 +132,20 @@ final class BudgetFeeder {
     }
     func stop() { lock.lock(); stopped = true; lock.unlock() }
     private var isStopped: Bool { lock.lock(); defer { lock.unlock() }; return stopped }
-    private struct Pending { let frame: BudgetSceneSource.Frame; let generationMs: Double; let deadline: Double }
+    private struct Pending { let frame: BudgetSceneSource.Frame?; let generationMs: Double; let deadline: Double }
     private func prepare() -> Pending? {
         guard !isStopped, ProcessInfo.processInfo.systemUptime < end else { return nil }
-        let deadline = lastPush.map { $0 + 1.0 / 60 } ?? start
+        let deadline = nextDeadline
         guard deadline < end else { return nil }
         let begin = ProcessInfo.processInfo.systemUptime
         do {
-            let frame = try source.frame(index)
+            let frame = try source.frame(index + stampOffset)
             return Pending(frame: frame, generationMs: (ProcessInfo.processInfo.systemUptime - begin) * 1000, deadline: deadline)
         } catch BudgetSceneSource.Failure.allocation(let code) {
-            record("source-allocation-failed", ["index": index, "status": code], begin)
-        } catch { record("source-geometry-failed", ["index": index], begin) }
-        // A failed generation invalidates the run rather than spinning on allocation.
-        return nil
+            record("source-allocation-failed", ["index": index + stampOffset, "status": code], begin)
+        } catch { record("source-geometry-failed", ["index": index + stampOffset], begin) }
+        // Skip this planned attempt; retry only at the next paced deadline, never spin.
+        return Pending(frame: nil, generationMs: (ProcessInfo.processInfo.systemUptime - begin) * 1000, deadline: deadline)
     }
     private func scheduleNext() {
         guard let pending = prepare() else { finish(); return }
@@ -165,24 +168,29 @@ final class BudgetFeeder {
         guard !isStopped, woke < end else { return false }
         let gap = lastPush.map { woke - $0 }
         // A platform wake before the deadline is discarded; never replay another planned slot.
-        guard gap == nil || gap! >= 1.0 / 120 else { return false }
-        let pushedAt = autoreleasepool { emit(pending.frame, index, woke) }
+        guard gap == nil || gap! >= interval / 2 else { return false }
+        guard let frame = pending.frame else {
+            nextDeadline = woke + interval
+            record("source-skipped", ["index": index + stampOffset, "reason": "generation-unavailable"], woke)
+            return true
+        }
+        let pushedAt = autoreleasepool { emit(frame, index + stampOffset, woke) }
         let returned = ProcessInfo.processInfo.systemUptime
-        let missed = max(0, Int(floor((pushedAt - start) * 60)) - index)
+        let missed = max(0, Int(floor((pushedAt - start) / interval)) - index)
         let newlyMissed = max(0, missed - totalMissed); totalMissed = missed
-        record("source", ["index": index, "plannedMissedSlots": newlyMissed,
+        record("source", ["index": index + stampOffset, "plannedMissedSlots": newlyMissed,
                           "requestedSleepMs": requestedWait * 1000, "actualSleepMs": (woke - before) * 1000,
                           "wakeLateMs": max(0, woke - pending.deadline) * 1000,
-                          "allocationMs": pending.frame.allocationMs, "copyMs": pending.frame.copyMs,
-                          "overlayMs": pending.frame.overlayMs, "generationMs": pending.generationMs,
+                          "allocationMs": frame.allocationMs, "copyMs": frame.copyMs,
+                          "overlayMs": frame.overlayMs, "generationMs": pending.generationMs,
                           "pushMs": (returned - pushedAt) * 1000,
                           "scheduleLateMs": max(0, pushedAt - pending.deadline) * 1000], pushedAt)
-        lastPush = pushedAt; index += 1
+        lastPush = pushedAt; nextDeadline = pushedAt + interval; index += 1
         return true
     }
     private func finish() {
         timer?.setEventHandler {}; timer?.cancel(); timer = nil
-        record("source-finished", ["emitted": index, "plannedMissedSlots": max(0, Int((end - start) * 60) - index)], ProcessInfo.processInfo.systemUptime)
+        record("source-finished", ["emitted": index, "plannedMissedSlots": max(0, Int(((end - start) / interval).rounded()) - index)], ProcessInfo.processInfo.systemUptime)
         completed()
     }
 }

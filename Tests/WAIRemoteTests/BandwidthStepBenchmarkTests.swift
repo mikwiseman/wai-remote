@@ -34,6 +34,7 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
             XCTAssertGreaterThan(result["decodedFrames"] as? Int ?? 0, 0, "No actual decoded video")
             XCTAssertGreaterThan(result["readableStamps"] as? Int ?? 0, 0, "No synthetic pixel stamp survived")
             for phase in result["summary"] as! [[String: Any]] {
+                XCTAssertGreaterThan(phase["decoded"] as! Int, 0, "No actual decoded frames during measured phase")
                 XCTAssertGreaterThanOrEqual(Double(phase["source"] as! Int) / (phase["durationSeconds"] as! Double), 55,
                                             "CI source below 55 fps; this phase is not a valid sustained-source comparison")
             }
@@ -49,13 +50,14 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
         let duration = baseline ? 30.0 : 86.0
         let frameCount = Int(duration * 60)
         let trace = BudgetTrace()
-        let samples = BudgetSamples(phase: baseline ? "baseline" : "initial")
+        let samples = BudgetSamples(phase: "startup")
         let factory = RTCPeerConnectionFactory(encoderFactory: BudgetEncoderFactory(trace), decoderFactory: ScreenVideoDecoderFactory())
         let source = factory.videoSource(forScreenCast: true)
         let capturer = RTCVideoCapturer(delegate: source)
         let host = PeerTransport(factory: factory, source: source, ice: .local)
         let viewer = ViewerTransport(ice: .local)
-        let sink = BudgetRenderer(trace, samples: samples, maximumIndex: frameCount)
+        let firstDecoded = expectation(description: "Negotiated encoder and decoder startup")
+        let sink = BudgetRenderer(trace, samples: samples, maximumIndex: frameCount) { firstDecoded.fulfill() }
         var track: RTCVideoTrack?
         viewer.onVideo = { track = $0; $0.add(sink) }
         defer { track?.remove(sink); host.close(); viewer.close() }
@@ -94,6 +96,36 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
         }
         // Reapply/read back after SDP has negotiated the real sender.
         try cap(4_000_000)
+        let startupStart = ProcessInfo.processInfo.systemUptime + 0.2
+        let startupStopped = expectation(description: "Warm-up source stopped")
+        let warmup = BudgetFeeder(source: scenes, clock: .strictTimer, start: startupStart, duration: 5,
+                                  fps: 12, stampOffset: 60_000, emit: { generated, _, pushedAt in
+            let frame = RTCVideoFrame(buffer: RTCCVPixelBuffer(pixelBuffer: generated.pixels), rotation: ._0,
+                                      timeStampNs: Int64(pushedAt * 1_000_000_000))
+            let submittedAt = ProcessInfo.processInfo.systemUptime
+            source.capturer(capturer, didCapture: frame)
+            return submittedAt
+        }, record: { trace.add("startup-" + $0, $1, at: $2) }, completed: { startupStopped.fulfill() })
+        warmup.startFeeding()
+        await fulfillment(of: [firstDecoded], timeout: 7)
+        warmup.stop()
+        await fulfillment(of: [startupStopped], timeout: 1)
+        let startupRows = trace.snapshot().map { row -> [String: Any] in
+            var row = row; row["t"] = (row.removeValue(forKey: "time") as! Double) - startupStart; return row
+        }
+        let decodedAt = startupRows.first { ["decoded", "startup-decoded"].contains($0["stage"] as? String ?? "") }?["t"] as? Double
+        let startup: [String: Any] = ["sourceRevision": ProcessInfo.processInfo.environment["GITHUB_SHA"] ?? "unknown",
+                                     "firstDecodedSeconds": decodedAt.map { $0 as Any } ?? NSNull(), "maximumRepeatFPS": 12,
+                                     "maximumSourceSeconds": 5, "decodeTimeoutSeconds": 7,
+                                     "submittedFrames": startupRows.filter { $0["stage"] as? String == "startup-source" }.count,
+                                     "allocationFailures": startupRows.filter { $0["stage"] as? String == "startup-source-allocation-failed" }.count,
+                                     "skippedAttempts": startupRows.filter { $0["stage"] as? String == "startup-source-skipped" }.count,
+                                     "method": "Actual negotiated media path; bounded 12Hz warm-up with separate stamps 60000-60059. Hard 8-buffer limit; allocation pressure skips a paced attempt. Stop after first decoded frame, then begin measured 30s. Unused slots in the maximum 5s window are not observed dropped frames.",
+                                     "rows": startupRows]
+        try JSONSerialization.data(withJSONObject: startup, options: [.prettyPrinted, .sortedKeys])
+            .write(to: directory.appendingPathComponent(name + "-startup.json"))
+        guard decodedAt != nil else { throw BudgetFailure.noWarmFrame }
+        samples.setPhase(baseline ? "baseline" : "initial")
         let start = ProcessInfo.processInfo.systemUptime + 0.2
         let finished = expectation(description: "\(duration)-second synthetic desktop")
         let feeder = BudgetFeeder(source: scenes, clock: .strictTimer, start: start, duration: duration,
@@ -160,12 +192,14 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
         return ["policy": name, "sourceRevision": ProcessInfo.processInfo.environment["GITHUB_SHA"] ?? "unknown",
                 "baseRevision": "b799faefe011d254eac491769231bb38e1087bc0", "durationSeconds": duration, "baselineOnly": baseline,
                 "sourceSize": [3840, 2160], "requestedSourceFPS": 60,
-                "method": "Local ICE and production transports/factories. Baseline: 30s at 4Mbps. Comparison mode: 4Mbps for 10s, 250kbps for 15s, 4Mbps for at least 60s. Sender cap is not network shaping or optical latency. Two pre-rendered text scenes alternate every 300 emitted frames with a moving bar and unique sequential frame stamp; this is not scrolling and must not be compared directly with the prior workload. Stamps count emitted frames, not planned 60Hz slots. Strict one-shot timer prepares before waiting and rebases on actual previous emission; missed slots are never replayed. Hard pool limit 8. PNG/detail work happens after measurement and peer closure.",
+                "method": "Local ICE and production transports/factories. Baseline: 30s at 4Mbps. Comparison mode: 4Mbps for 10s, 250kbps for 15s, 4Mbps for at least 60s. Sender cap is not network shaping or optical latency. Two pre-rendered text scenes alternate every 300 emitted frames with a moving bar and unique sequential frame stamp; this is not scrolling and must not be compared directly with the prior workload. Stamps count emitted frames, not planned 60Hz slots. Strict one-shot timer prepares before waiting and rebases on actual previous emission; missed slots are never replayed. Hard pool limit 8; allocation pressure skips a paced attempt and reduces actual source cadence. Encoder/decoder startup uses separately recorded bounded 12Hz repeats before the full measured phase. PNG/detail work happens after measurement and peer closure.",
                 "sourceGapsMs": gapSummary(rows.filter { $0["stage"] as? String == "source" }.map { $0["t"] as! Double }),
                 "sourceFrames": rows.filter { $0["stage"] as? String == "source" }.count,
+                "sourceAllocationFailures": rows.filter { $0["stage"] as? String == "source-allocation-failed" }.count,
+                "sourceSkippedAttempts": rows.filter { $0["stage"] as? String == "source-skipped" }.count,
                 "decodedFrames": rows.filter { $0["stage"] as? String == "decoded" }.count,
                 "readableStamps": rows.filter { $0["stage"] as? String == "decoded" && ($0["index"] as? Int ?? -1) >= 0 }.count,
-                "detail": detail, "summary": summaries, "rows": rows]
+                "startup": startup, "detail": detail, "summary": summaries, "rows": rows]
     }
     private func pacingProfiles(scenes: BudgetSceneSource, directory: URL) async throws -> Bool {
         var profiles: [[String: Any]] = []
@@ -210,7 +244,7 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
     }
 }
 
-private enum BudgetFailure: Error { case noLocalConnection }
+private enum BudgetFailure: Error { case noLocalConnection, noWarmFrame }
 
 private final class BudgetTrace {
     private let lock = NSLock()
@@ -291,8 +325,12 @@ private final class BudgetRenderer: NSObject, RTCVideoRenderer {
     private let trace: BudgetTrace
     private let samples: BudgetSamples
     private let maximumIndex: Int
-    init(_ trace: BudgetTrace, samples: BudgetSamples, maximumIndex: Int) {
-        self.trace = trace; self.samples = samples; self.maximumIndex = maximumIndex
+    private let firstFrame: () -> Void
+    private let firstFrameLock = NSLock()
+    private var reportedFirstFrame = false
+    private var measuredFrameSeen = false
+    init(_ trace: BudgetTrace, samples: BudgetSamples, maximumIndex: Int, firstFrame: @escaping () -> Void) {
+        self.trace = trace; self.samples = samples; self.maximumIndex = maximumIndex; self.firstFrame = firstFrame
     }
     func setSize(_ size: CGSize) {}
     func renderFrame(_ frame: RTCVideoFrame?) {
@@ -312,8 +350,15 @@ private final class BudgetRenderer: NSObject, RTCVideoRenderer {
             index = Self.stamp(i420.dataY, stride: Int(i420.strideY), width: Int(i420.width), height: Int(i420.height))
         }
         let validatedIndex = index < maximumIndex ? index : -1
-        trace.add("decoded", ["index": validatedIndex, "width": frame.width, "height": frame.height, "ns": frame.timeStampNs])
+        firstFrameLock.lock()
+        let first = !reportedFirstFrame; reportedFirstFrame = true
+        if validatedIndex >= 0 { measuredFrameSeen = true }
+        let startupFrame = index >= 60_000 || (index < 0 && !measuredFrameSeen)
+        firstFrameLock.unlock()
+        trace.add(startupFrame ? "startup-decoded" : "decoded",
+                  ["index": validatedIndex, "stampIndex": index, "width": frame.width, "height": frame.height, "ns": frame.timeStampNs])
         samples.capture(frame, index: validatedIndex)
+        if first { firstFrame() }
     }
     private static func stamp(_ y: UnsafePointer<UInt8>, stride: Int, width: Int, height: Int) -> Int {
         var value = 0
