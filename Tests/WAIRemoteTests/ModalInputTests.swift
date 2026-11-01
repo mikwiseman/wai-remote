@@ -244,10 +244,13 @@ final class ModalInputTests: XCTestCase {
         XCTAssertEqual(fixture.response.completions, 1)
         XCTAssertEqual(fixture.response.coveredPresses, 0)
     }
-    func testActualSavePanelEscapeUsesItsLinkedKeyboardReceiver() throws {
+    // An expanded panel can consume Escape after disclosure even through normal
+    // NSApp.sendEvent. Test Escape with a focused compact panel; exercise the
+    // expanded filename and its Cancel control separately below.
+    func testCompactSavePanelEscapeUsesItsLinkedKeyboardReceiver() throws {
         try XCTSkipUnless(CGPreflightPostEventAccess(), "Native input requires existing post-event permission; this test never requests it.")
         let fixture = try saveFixture(); defer { fixture.close() }
-        try setExpanded(true, fixture: fixture)
+        try setExpanded(false, fixture: fixture)
         let resolved = try XCTUnwrap(fixture.target.keyboardDestination())
         if resolved.keyboardReceiver == nil { diagnoseReceiver(fixture) }
         let receiver = try XCTUnwrap(resolved.keyboardReceiver)
@@ -259,6 +262,7 @@ final class ModalInputTests: XCTestCase {
         XCTAssertNil(fixture.target.keyboardDestination(budget: 0)?.keyboardReceiver)
         let injector = InputInjector(); injector.setWindowTarget(fixture.target)
         defer { injector.resetSession() }
+        try click(fixture.filename, fixture: fixture, injector: injector)
         key("Escape", injector: injector)
         XCTAssertEqual(fixture.response.response, .cancel)
         XCTAssertEqual(fixture.response.completions, 1)
@@ -275,9 +279,10 @@ final class ModalInputTests: XCTestCase {
         _ = resolved.post(try XCTUnwrap(CGEvent(keyboardEventSource: nil, virtualKey: 7, keyDown: true)), permitted: { true }, delivery: delivery)
         XCTAssertEqual(posts, 0)
     }
-    func testActualSavePanelUnicodeAndPhysicalKeyReachItsFilename() throws {
+    func testExpandedSavePanelUnicodeAndPhysicalKeyReachItsFilename() throws {
         try XCTSkipUnless(CGPreflightPostEventAccess(), "Native input requires existing post-event permission; this test never requests it.")
         let fixture = try saveFixture(); defer { fixture.close() }
+        try setExpanded(true, fixture: fixture)
         let injector = InputInjector(); injector.setWindowTarget(fixture.target)
         defer { injector.resetSession() }
         try click(fixture.filename, fixture: fixture, injector: injector)
@@ -292,6 +297,9 @@ final class ModalInputTests: XCTestCase {
         XCTAssertNotEqual(physical, typed)
         XCTAssertTrue(physical.contains(unicode), physical)
         XCTAssertNil(fixture.response.response)
+        try click(fixture.cancel, fixture: fixture, injector: injector)
+        XCTAssertEqual(fixture.response.response, .cancel)
+        XCTAssertEqual(fixture.response.completions, 1)
         XCTAssertEqual(fixture.response.coveredPresses, 0)
     }
     private func setExpanded(_ expanded: Bool, fixture: SaveFixture) throws {
@@ -325,5 +333,16 @@ final class ModalInputTests: XCTestCase {
         key("Escape", injector: injector)
         XCTAssertEqual(fixture.response.response, .cancel)
         XCTAssertEqual(fixture.response.completions, 1)
+    }
+    func testExpandedSavePanelCancelUsesOnlyItsOwnSheet() throws {
+        try XCTSkipUnless(CGPreflightPostEventAccess(), "Native input requires existing post-event permission; this test never requests it.")
+        let fixture = try saveFixture(); defer { fixture.close() }
+        try setExpanded(true, fixture: fixture)
+        let injector = InputInjector(); injector.setWindowTarget(fixture.target)
+        defer { injector.resetSession() }
+        try click(fixture.cancel, fixture: fixture, injector: injector)
+        XCTAssertEqual(fixture.response.response, .cancel)
+        XCTAssertEqual(fixture.response.completions, 1)
+        XCTAssertEqual(fixture.response.coveredPresses, 0)
     }
 }
