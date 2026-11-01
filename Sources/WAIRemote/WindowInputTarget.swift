@@ -52,6 +52,25 @@ struct WindowInputTarget: Equatable {
         guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "SLEventPostToPid") else { return nil }
         return unsafeBitCast(symbol, to: PostPointer.self)
     }()
+    private typealias Connection = @convention(c) () -> Int32
+    private typealias WindowOwner = @convention(c) (Int32, CGWindowID, UnsafeMutablePointer<Int32>) -> Int32
+    private typealias ConnectionPID = @convention(c) (Int32, UnsafeMutablePointer<pid_t>) -> Int32
+    private static let windowOwner: ((CGWindowID) -> pid_t?)? = {
+        _ = setWindowLocation
+        let library = UnsafeMutableRawPointer(bitPattern: -2)
+        guard let connectionSymbol = dlsym(library, "SLSMainConnectionID"),
+              let ownerSymbol = dlsym(library, "SLSGetWindowOwner"),
+              let pidSymbol = dlsym(library, "SLSConnectionGetPID") else { return nil }
+        let connection = unsafeBitCast(connectionSymbol, to: Connection.self)
+        let owner = unsafeBitCast(ownerSymbol, to: WindowOwner.self)
+        let process = unsafeBitCast(pidSymbol, to: ConnectionPID.self)
+        return { id in
+            var ownerConnection: Int32 = 0, pid: pid_t = 0
+            guard owner(connection(), id, &ownerConnection) == 0,
+                  process(ownerConnection, &pid) == 0, pid > 0 else { return nil }
+            return pid
+        }
+    }()
     private typealias ProcessNumber = @convention(c) (pid_t, UnsafeMutableRawPointer) -> Int32
     private typealias FocusRecord = @convention(c) (UnsafeRawPointer, UnsafeRawPointer) -> Int32
     private static let processNumber: ProcessNumber? = {
@@ -122,36 +141,20 @@ struct WindowInputTarget: Equatable {
     }
     /// A SavePanel's outer sheet belongs to its app, but keyboard events belong
     /// to the linked remote view service. Its virtual window is not listed by
-    /// CGWindowList. Keep validation/geometry on the outer sheet and address only
-    /// keys to the receiver proven by that sheet's accessibility child chain.
+    /// CGWindowList, but WindowServer still knows its owner. Keep geometry and
+    /// validation on the outer sheet and resolve only its linked child window.
     private func remoteKeyboardReceiver(children: [AXUIElement], deadline: TimeInterval) -> KeyboardReceiver? {
-        var roots: [(AXUIElement, CGWindowID)] = []
+        var roots: [CGWindowID] = []
         for child in children {
             guard let role = Self.axValues(child, [kAXRoleAttribute], deadline: deadline)?.first as? String else { return nil }
-            if role == kAXSplitGroupRole, let id = Self.axWindowID(child, deadline: deadline), id != windowID { roots.append((child, id)) }
+            if role == kAXSplitGroupRole, let id = Self.axWindowID(child, deadline: deadline), id != windowID { roots.append(id) }
         }
-        guard roots.count == 1, let (root, remoteID) = roots.first else { return nil }
-        var pending = [(root, 0)], visited = 0
-        while let (element, depth) = pending.popLast(), visited < 64 {
-            visited += 1
-            guard let values = Self.axValues(element, [kAXRoleAttribute, kAXChildrenAttribute, kAXTopLevelUIElementAttribute], deadline: deadline),
-                  ![kAXSheetRole, kAXWindowRole].contains(values[0] as? String ?? "") else { return nil }
-            var owner: pid_t = 0
-            if AXUIElementGetPid(element, &owner) == .success, owner > 0, owner != pid,
-               CFGetTypeID(values[2]) == AXUIElementGetTypeID() {
-                let top = values[2] as! AXUIElement
-                // AppKit may wrap the top-level remote window in a host-owned
-                // proxy. The actual foreign descendant supplies the receiver PID.
-                var topOwner: pid_t = 0
-                guard AXUIElementGetPid(top, &topOwner) == .success, topOwner == owner || topOwner == pid,
-                      Self.axWindowID(top, deadline: deadline) == remoteID,
-                      Self.axWindowID(element, deadline: deadline) == remoteID else { return nil }
-                return KeyboardReceiver(pid: owner, windowID: remoteID)
-            }
-            guard depth < 8 else { return nil }
-            pending += ((values[1] as? [AXUIElement]) ?? []).map { ($0, depth + 1) }
-        }
-        return nil
+        // macOS 26's compact panel exposes only host-owned AX proxies. Looking
+        // for a foreign AX descendant therefore misses a valid remote receiver.
+        guard roots.count == 1, let remoteID = roots.first,
+              ProcessInfo.processInfo.systemUptime < deadline,
+              let owner = Self.windowOwner?(remoteID), owner != pid else { return nil }
+        return KeyboardReceiver(pid: owner, windowID: remoteID)
     }
     var frame: CGRect? {
         guard let list = CGWindowListCopyWindowInfo(.optionIncludingWindow, windowID) as? [[String: Any]] else { return nil }

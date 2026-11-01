@@ -247,6 +247,7 @@ final class ModalInputTests: XCTestCase {
     func testActualSavePanelEscapeUsesItsLinkedKeyboardReceiver() throws {
         try XCTSkipUnless(CGPreflightPostEventAccess(), "Native input requires existing post-event permission; this test never requests it.")
         let fixture = try saveFixture(); defer { fixture.close() }
+        try setExpanded(true, fixture: fixture)
         let resolved = try XCTUnwrap(fixture.target.keyboardDestination())
         if resolved.keyboardReceiver == nil { diagnoseReceiver(fixture) }
         let receiver = try XCTUnwrap(resolved.keyboardReceiver)
@@ -292,5 +293,37 @@ final class ModalInputTests: XCTestCase {
         XCTAssertTrue(physical.contains(unicode), physical)
         XCTAssertNil(fixture.response.response)
         XCTAssertEqual(fixture.response.coveredPresses, 0)
+    }
+    private func setExpanded(_ expanded: Bool, fixture: SaveFixture) throws {
+        if fixture.panel.isExpanded != expanded {
+            let root = try XCTUnwrap(axValue(fixture.cancel, kAXParentAttribute)) as! AXUIElement
+            let children = try XCTUnwrap(axValue(root, kAXChildrenAttribute) as? [AXUIElement])
+            let disclosure = try XCTUnwrap(children.first { axValue($0, kAXRoleAttribute) as? String == kAXDisclosureTriangleRole })
+            let result = AXUIElementPerformAction(disclosure, kAXPressAction as CFString)
+            XCTAssertTrue(result == .success || result == .cannotComplete)
+            // Expanding starts the remote file browser and animates its layout.
+            // Wait for the fixture, never retry the disclosure action.
+            runApplication(for: 0.75)
+        }
+        XCTAssertEqual(fixture.panel.isExpanded, expanded)
+    }
+    func testCompactSavePanelKeyboardUsesItsLinkedReceiver() throws {
+        try XCTSkipUnless(CGPreflightPostEventAccess(), "Native input requires existing post-event permission; this test never requests it.")
+        let fixture = try saveFixture(); defer { fixture.close() }
+        try setExpanded(false, fixture: fixture)
+        XCTAssertNotNil(fixture.target.keyboardDestination()?.keyboardReceiver)
+        let injector = InputInjector(); injector.setWindowTarget(fixture.target)
+        defer { injector.resetSession() }
+        try click(fixture.filename, fixture: fixture, injector: injector)
+        var text = message("text"); text.text = "Compact café 🦊"; injector.apply(text)
+        runApplication(for: 0.3)
+        let typed = try XCTUnwrap(axValue(fixture.filename, kAXValueAttribute) as? String)
+        if !typed.contains("Compact café 🦊") { diagnoseReceiver(fixture) }
+        XCTAssertTrue(typed.contains("Compact café 🦊"))
+        key("KeyX", injector: injector)
+        XCTAssertNotEqual(axValue(fixture.filename, kAXValueAttribute) as? String, typed)
+        key("Escape", injector: injector)
+        XCTAssertEqual(fixture.response.response, .cancel)
+        XCTAssertEqual(fixture.response.completions, 1)
     }
 }
