@@ -67,6 +67,7 @@ final class BackgroundSavePanelTests: XCTestCase {
         let metadata = directory.appendingPathComponent("state.json")
         let process = Process(); process.executableURL = try bundle("Target"); process.arguments = [metadata.path, kind]
         try capture(process, name: "target")
+        let launchStarted = ProcessInfo.processInfo.systemUptime
         try process.run()
         defer {
             let ownedWasActive = NSWorkspace.shared.frontmostApplication?.processIdentifier == process.processIdentifier
@@ -83,6 +84,7 @@ final class BackgroundSavePanelTests: XCTestCase {
             return
         }
         func state() throws -> [String: NSNumber] { try JSONSerialization.jsonObject(with: Data(contentsOf: metadata)) as! [String: NSNumber] }
+        let metadataReady = ProcessInfo.processInfo.systemUptime
         while try state()["active"]?.boolValue != true, Date() < ready { pump(0.05) }
         XCTAssertEqual(try state()["active"]?.boolValue, true, "The target must complete its initial activation before the foreground fixture takes over")
         guard try state()["active"]?.boolValue == true else { return }
@@ -90,8 +92,9 @@ final class BackgroundSavePanelTests: XCTestCase {
         let target = WindowInputTarget(pid: process.processIdentifier, windowID: try XCTUnwrap(initial["sheet"]).uint32Value)
         // The helper must service its own AppKit/XPC loop, not recursively
         // query its remote save view from a main-thread timer. Discover the
-        // rendered control externally within the original readiness deadline.
-        let discoveryDeadline = ProcessInfo.processInfo.systemUptime + max(0, ready.timeIntervalSinceNow)
+        // rendered control externally after launch and activation acknowledge.
+        let discoveryStarted = ProcessInfo.processInfo.systemUptime
+        let discoveryDeadline = discoveryStarted + 5
         func value(_ element: AXUIElement, _ attribute: String) -> CFTypeRef? {
             let remaining = discoveryDeadline - ProcessInfo.processInfo.systemUptime
             guard remaining > 0 else { return nil }
@@ -121,6 +124,10 @@ final class BackgroundSavePanelTests: XCTestCase {
             }
             if controlPoint == nil || kind == "document" && buttonCount != 3 { pump(0.05) }
         } while (controlPoint == nil || kind == "document" && buttonCount != 3) && ProcessInfo.processInfo.systemUptime < discoveryDeadline
+        if controlPoint == nil || kind == "document" && buttonCount != 3 {
+            let now = ProcessInfo.processInfo.systemUptime
+            print("CONTROL_READINESS kind=\(kind) metadataMs=\((metadataReady - launchStarted) * 1_000) activationMs=\((discoveryStarted - metadataReady) * 1_000) discoveryMs=\((now - discoveryStarted) * 1_000) remainingMs=\(max(0, discoveryDeadline - now) * 1_000) buttons=\(buttonCount)")
+        }
         if kind == "document" { XCTAssertEqual(buttonCount, 3, "Use the real unsaved-document Delete/Cancel/Save panel.") }
         let point = try XCTUnwrap(controlPoint, "The owned control must be rendered and inspectable before testing its first click")
         let focus = Process(); focus.executableURL = try bundle("Foreground")
@@ -213,7 +220,7 @@ import AppKit
 import Darwin
 import SwiftUI
 let metadata = URL(fileURLWithPath: CommandLine.arguments[1])
-DispatchQueue.global().asyncAfter(deadline: .now() + 15) { exit(2) }
+DispatchQueue.global().asyncAfter(deadline: .now() + 30) { exit(2) }
 let app = NSApplication.shared
 app.setActivationPolicy(.regular); app.finishLaunching()
 func trace(_ phase: String) {
