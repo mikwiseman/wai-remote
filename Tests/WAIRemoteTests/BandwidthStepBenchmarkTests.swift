@@ -81,6 +81,9 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
             try JSONSerialization.data(withJSONObject: paths, options: [.sortedKeys])
                 .write(to: directory.appendingPathComponent("diagnostic-inputs.json"), options: .atomic)
         }
+        // Match the app's active-session assertion, including source admission and warm-up.
+        let activity = ProcessInfo.processInfo.beginActivity(options: .userInteractive, reason: "WAI Remote benchmark active session")
+        defer { ProcessInfo.processInfo.endActivity(activity) }
         let profile = try scenes.profile()
         try JSONSerialization.data(withJSONObject: profile, options: [.prettyPrinted, .sortedKeys])
             .write(to: directory.appendingPathComponent("source-profile.json"))
@@ -139,7 +142,7 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
         let frameCount = Int(duration * 60)
         let trace = BudgetTrace()
         let samples = BudgetSamples(phase: "startup")
-        let factory = RTCPeerConnectionFactory(encoderFactory: BudgetEncoderFactory(trace), decoderFactory: ScreenVideoDecoderFactory())
+        let factory = RTCPeerConnectionFactory(encoderFactory: BudgetEncoderFactory(trace, samples: samples), decoderFactory: ScreenVideoDecoderFactory())
         let source = factory.videoSource(forScreenCast: true)
         let capturer = RTCVideoCapturer(delegate: source)
         let host = PeerTransport(factory: factory, source: source, ice: .local)
@@ -152,14 +155,15 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
         let pc: RTCPeerConnection = try XCTUnwrap(child(host, "pc"))
         let remote: RTCPeerConnection = try XCTUnwrap(child(viewer, "peer"))
         let sender = try XCTUnwrap(pc.senders.first)
-        func cap(_ bitrate: Int, scale: Double? = nil, stage: String = "cap") throws {
-            let requestedAt = ProcessInfo.processInfo.systemUptime
+        func cap(_ bitrate: Int, scale: Double? = nil, stage: String = "cap", armRecovery: Bool = false) throws {
             let parameters = sender.parameters
             parameters.degradationPreference = NSNumber(value: preference.rawValue)
             for encoding in parameters.encodings {
                 encoding.maxBitrateBps = NSNumber(value: bitrate)
                 if let scale { encoding.scaleResolutionDownBy = NSNumber(value: scale) }
             }
+            let requestedAt = ProcessInfo.processInfo.systemUptime
+            if armRecovery { samples.armRecovery(at: requestedAt) }
             sender.parameters = parameters
             let readback = sender.parameters
             let actual = try XCTUnwrap(readback.encodings.first?.maxBitrateBps?.intValue)
@@ -282,7 +286,7 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
             try cap(250_000, scale: candidate ? 4 : nil)
             budgetPhase = "limited"; samples.setPhase("limited")
             try await Task.sleep(for: .seconds(15))
-            try cap(4_000_000, scale: candidate ? 4 : nil)
+            try cap(4_000_000, scale: candidate ? 4 : nil, armRecovery: true)
             budgetPhase = "recovery"; samples.setPhase("recovery")
             if candidate {
                 recovery.arm()
@@ -419,11 +423,14 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
             "eligibleForRelease": false]
         return ["policy": name, "sourceRevision": ProcessInfo.processInfo.environment["GITHUB_SHA"] ?? "unknown",
                 "baseRevision": "b799faefe011d254eac491769231bb38e1087bc0", "durationSeconds": duration, "baselineOnly": baseline,
-                "schemaVersion": 2, "diagnosticOnly": diagnostic, "eligibleForRelease": false,
+                "schemaVersion": 3, "diagnosticOnly": diagnostic, "eligibleForRelease": false,
                 "correctionCandidate": candidate, "candidateAcceptance": candidateAcceptance,
                 "candidateMethod": candidate ? "Preserve-both preference throughout; initial scale1, atomic250kbps+scale4, restore4Mbps cap retaining scale4, then one scale1 restore after a measured adjusted encoder allocation reaches4Mbps. No QP/min-rate/limiter override. Source and native encoder input may stay4K; encoded/renderer dimensions establish scaling. Transition gaps are included." : "none",
                 "clockAnchor": clockAnchor, "diagnosticInstrumentation": instrumentation,
-                "schemaSemantics": ["renderer": "BudgetRenderer callback after pixel-stamp extraction, not decoder output or display presentation.",
+                "processActivity": "userInteractive across source-only admission, warm-up, measurement, drain and cleanup; matches the app's active-session option",
+                "schemaSemantics": ["renderer": "BudgetRenderer callback after pixel-stamp extraction, not decoder output or display presentation; entryAtUptimeSeconds preserves callback entry time.",
+                                    "renderer-entry": "Callback entry before pixel access or stamp extraction; rtp is the original frame's unsigned receiver RTP timestamp.",
+                                    "decode-output": "Performance frame-timing timestamp retains raw decoder nanoseconds; detail is unsigned receiver RTP, captured before forwarding the native callback.",
                                     "sourceToRendererAgeMs": "Source submission to that renderer callback; not optical latency.",
                                     "framesDecoded": "Native RTC cumulative decoder counter, separate from renderer callback counts.",
                                     "native-drop-totals": "M153 SendStatisticsProxy exact unclamped lifetime counters, collected only during teardown."],
@@ -593,18 +600,22 @@ private final class BudgetTrace {
 private final class BudgetEncoderFactory: NSObject, RTCVideoEncoderFactory {
     private let base = ScreenVideoEncoderFactory()
     private let trace: BudgetTrace
-    init(_ trace: BudgetTrace) { self.trace = trace }
+    private let samples: BudgetSamples
+    init(_ trace: BudgetTrace, samples: BudgetSamples) { self.trace = trace; self.samples = samples }
     func supportedCodecs() -> [RTCVideoCodecInfo] { base.supportedCodecs() }
     func createEncoder(_ info: RTCVideoCodecInfo) -> RTCVideoEncoder? {
         guard let encoder = base.createEncoder(info) else { return nil }
-        return BudgetEncoder(encoder, trace)
+        return BudgetEncoder(encoder, trace, samples: samples)
     }
 }
 
 private final class BudgetEncoder: NSObject, RTCVideoEncoder {
     private let base: RTCVideoEncoder
     private let trace: BudgetTrace
-    init(_ base: RTCVideoEncoder, _ trace: BudgetTrace) { self.base = base; self.trace = trace }
+    private let samples: BudgetSamples
+    init(_ base: RTCVideoEncoder, _ trace: BudgetTrace, samples: BudgetSamples) {
+        self.base = base; self.trace = trace; self.samples = samples
+    }
     func implementationName() -> String { base.implementationName() }
     func scalingSettings() -> RTCVideoEncoderQpThresholds? { base.scalingSettings() }
     var resolutionAlignment: Int { base.resolutionAlignment }
@@ -619,7 +630,10 @@ private final class BudgetEncoder: NSObject, RTCVideoEncoder {
     func release() -> Int { base.release() }
     func setBitrate(_ bitrateKbit: UInt32, framerate: UInt32) -> Int32 {
         let result = base.setBitrate(bitrateKbit, framerate: framerate)
-        trace.add("encoder-rate", ["kbps": bitrateKbit, "fps": framerate, "result": result]); return result
+        let observedAt = ProcessInfo.processInfo.systemUptime
+        trace.add("encoder-rate", ["kbps": bitrateKbit, "fps": framerate, "result": result], at: observedAt)
+        samples.observeEncoderRate(kbps: bitrateKbit, result: result, at: observedAt)
+        return result
     }
     func setCallback(_ callback: RTCVideoEncoderCallback?) {
         guard let callback else { base.setCallback(nil); return }
@@ -652,7 +666,11 @@ private final class BudgetRenderer: NSObject, RTCVideoRenderer {
     }
     func setSize(_ size: CGSize) {}
     func renderFrame(_ frame: RTCVideoFrame?) {
+        let enteredAt = ProcessInfo.processInfo.systemUptime
         guard let frame else { return }
+        let rtp = UInt32(bitPattern: frame.timeStamp)
+        trace.add("renderer-entry", ["rtp": rtp, "ns": frame.timeStampNs,
+                                     "width": frame.width, "height": frame.height], at: enteredAt)
         let index: Int
         if let native = frame.buffer as? RTCCVPixelBuffer,
            CVPixelBufferGetPlaneCount(native.pixelBuffer) == 2,
@@ -674,8 +692,10 @@ private final class BudgetRenderer: NSObject, RTCVideoRenderer {
         let startupFrame = index >= 60_000 || (index < 0 && !measuredFrameSeen)
         firstFrameLock.unlock()
         trace.add(startupFrame ? "startup-renderer" : "renderer",
-                  ["index": validatedIndex, "stampIndex": index, "width": frame.width, "height": frame.height, "ns": frame.timeStampNs])
-        samples.capture(frame, index: validatedIndex)
+                  ["index": validatedIndex, "stampIndex": index, "rtp": rtp,
+                   "width": frame.width, "height": frame.height, "ns": frame.timeStampNs,
+                   "entryAtUptimeSeconds": enteredAt])
+        samples.capture(frame, index: validatedIndex, at: enteredAt)
         if first { firstFrame() }
     }
     private static func stamp(_ y: UnsafePointer<UInt8>, stride: Int, width: Int, height: Int) -> Int {

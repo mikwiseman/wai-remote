@@ -31,12 +31,12 @@ class DiagnosticBoundaryTests(unittest.TestCase):
             {"event": "frame-timing", "time": 123.5, "stage": "decode-input",
              "samples": [[1000, 42, 56]], "address": "PRIVATE"},
             {"event": "rtc", "address": "PRIVATE"},
-            {"event": "frame-timing", "stage": "decode-output", "samples": [[2000, 99, 0]]},
+            {"event": "frame-timing", "stage": "decode-output", "samples": [[2000, 99, 4294967295]]},
             {"event": "frame-timing", "stage": "other", "samples": [[1, 2, 3]]},
         ]
         self.assertEqual(collector.decoder_rows(rows), [
             {"stage": "decode-input", "uptimeUs": 1000, "timestamp": 42, "detail": 56},
-            {"stage": "decode-output", "uptimeUs": 2000, "timestamp": 99, "detail": 0},
+            {"stage": "decode-output", "uptimeUs": 2000, "timestamp": 99, "detail": 4294967295},
         ])
 
     def test_malformed_timing_fails_closed(self):

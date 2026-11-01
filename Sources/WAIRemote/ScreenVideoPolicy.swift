@@ -70,7 +70,8 @@ private final class MeasuredVideoDecoder: NSObject, RTCVideoDecoder {
     func release() -> Int { decoder.release() }
     func setCallback(_ callback: @escaping RTCVideoDecoderCallback) {
         decoder.setCallback { [output] frame in
-            output.frame(frame.timeStampNs)
+            // Preserve the raw timestamp; RTP survives the later native render-time rewrite.
+            output.frame(frame.timeStampNs, detail: Int64(UInt32(bitPattern: frame.timeStamp)))
             callback(frame)
         }
     }

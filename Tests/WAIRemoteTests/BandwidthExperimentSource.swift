@@ -195,39 +195,84 @@ final class BudgetFeeder {
     }
 }
 
-/// Retains only the last decoded frame of each phase. PNG and detail work runs after media stops.
+/// Retains phase-end frames and three recovery checkpoints; image work runs after media stops.
 final class BudgetSamples {
     private struct Sample { let frame: RTCVideoFrame; let index: Int; let time: Double }
+    struct Snapshot { let metadata: [String: Any]; let frame: RTCVideoFrame? }
     private let lock = NSLock()
     private var phase: String
     private var phases: Set<String>
     private var samples: [String: Sample] = [:]
+    private let checkpoints: [(String, Double)] = [("recovery-0.5s", 0.5), ("recovery-1s", 1), ("recovery-2s", 2)]
+    private var recoveryRequestAt: Double?
+    private var recoveryAllocationAt: Double?
     init(phase: String) { self.phase = phase; self.phases = [phase] }
     func setPhase(_ phase: String) { lock.lock(); self.phase = phase; phases.insert(phase); lock.unlock() }
-    func capture(_ frame: RTCVideoFrame, index: Int) {
-        lock.lock(); samples[phase] = Sample(frame: frame, index: index, time: ProcessInfo.processInfo.systemUptime); lock.unlock()
+    func armRecovery(at time: Double) {
+        lock.lock(); defer { lock.unlock() }
+        if recoveryRequestAt == nil { recoveryRequestAt = time }
+    }
+    func observeEncoderRate(kbps: UInt32, result: Int32, at time: Double) {
+        lock.lock(); defer { lock.unlock() }
+        guard let requested = recoveryRequestAt, recoveryAllocationAt == nil,
+              time >= requested, kbps >= 4_000, result == 0 else { return }
+        recoveryAllocationAt = time
+    }
+    func capture(_ frame: RTCVideoFrame, index: Int, at time: Double) {
+        lock.lock(); defer { lock.unlock() }
+        let sample = Sample(frame: frame, index: index, time: time)
+        samples[phase] = sample
+        guard let allocation = recoveryAllocationAt, time >= allocation else { return }
+        for (name, offset) in checkpoints where time <= allocation + offset {
+            // Entry timestamps define eligibility even when callback processing overlaps.
+            if let previous = samples[name], previous.time > time { continue }
+            samples[name] = sample
+        }
+    }
+    func snapshot(start: Double) -> [Snapshot] {
+        lock.lock(); defer { lock.unlock() }
+        func entry(_ phase: String, allocation: Double? = nil, deadline: Double? = nil) -> Snapshot {
+            let sample = samples[phase]
+            var values: [String: Any] = ["phase": phase,
+                "allocationAtSeconds": allocation.map { $0 - start } as Any? ?? NSNull(),
+                "deadlineAtSeconds": deadline.map { $0 - start } as Any? ?? NSNull(),
+                "decodedAtSeconds": sample.map { $0.time - start } as Any? ?? NSNull(),
+                "index": sample.map { $0.index } as Any? ?? NSNull(),
+                "width": sample.map { Int($0.frame.width) } as Any? ?? NSNull(),
+                "height": sample.map { Int($0.frame.height) } as Any? ?? NSNull(),
+                "rtp": sample.map { UInt32(bitPattern: $0.frame.timeStamp) } as Any? ?? NSNull()]
+            if sample == nil {
+                values["missing"] = checkpoints.contains { $0.0 == phase }
+                    ? (allocation == nil ? "Recovery allocation not observed" : "No renderer entry between allocation and deadline")
+                    : "No decoded frame in this phase"
+            } else if sample!.index < 0 {
+                values["missing"] = "Latest renderer entry has an unreadable stamp; reference/detail metric unavailable"
+            }
+            return Snapshot(metadata: values, frame: sample?.frame)
+        }
+        return phases.sorted().map { entry($0) } + checkpoints.map { name, offset in
+            entry(name, allocation: recoveryAllocationAt, deadline: recoveryAllocationAt.map { $0 + offset })
+        }
     }
     func write(source: BudgetSceneSource, directory: URL, prefix: String, start: Double) throws -> [[String: Any]] {
-        lock.lock(); let captured = samples, phases = self.phases; lock.unlock()
+        let captured = snapshot(start: start)
         var results: [[String: Any]] = []
-        for phase in phases.sorted() {
-            guard let sample = captured[phase] else {
-                results.append(["phase": phase, "missing": "No decoded frame in this phase"]); continue
-            }
-            let decodedPNG = try AgentFrameCapture.Captured(frame: sample.frame, generation: 0, sequence: 0, receivedAt: sample.time).png()
+        for sample in captured {
+            var values = sample.metadata
+            let phase = values["phase"] as! String
+            guard let frame = sample.frame else { results.append(values); continue }
+            let index = values["index"] as! Int
+            let time = (values["decodedAtSeconds"] as! Double) + start
+            let decodedPNG = try AgentFrameCapture.Captured(frame: frame, generation: 0, sequence: 0, receivedAt: time).png()
             try decodedPNG.data.write(to: directory.appendingPathComponent(prefix + "-" + phase + "-decoded.png"))
-            guard sample.index >= 0 else {
-                results.append(["phase": phase, "index": sample.index, "decodedAtSeconds": sample.time - start,
-                                "missing": "Latest decoded frame has an unreadable stamp; reference/detail metric unavailable"])
-                continue
-            }
-            let reference = try source.frame(sample.index)
+            guard index >= 0 else { results.append(values); continue }
+            let reference = try source.frame(index)
             let refFrame = RTCVideoFrame(buffer: RTCCVPixelBuffer(pixelBuffer: reference.pixels), rotation: ._0, timeStampNs: 0)
-            let referencePNG = try AgentFrameCapture.Captured(frame: refFrame, generation: 0, sequence: UInt64(sample.index), receivedAt: sample.time).png()
+            let referencePNG = try AgentFrameCapture.Captured(frame: refFrame, generation: 0, sequence: UInt64(index), receivedAt: time).png()
             try referencePNG.data.write(to: directory.appendingPathComponent(prefix + "-" + phase + "-reference.png"))
             let original = SyntheticDesktop.luma(of: refFrame.buffer)
-            let decoded = SyntheticDesktop.luma(of: sample.frame.buffer)
-            let width = Int(sample.frame.width), height = Int(sample.frame.height)
+            let decoded = SyntheticDesktop.luma(of: frame.buffer)
+            let width = Int(frame.width), height = Int(frame.height)
             guard decoded.pixels.count == width * height else { throw BudgetSceneSource.Failure.geometry }
             var scaled = [UInt8](repeating: 0, count: 3840 * 2160)
             let scalingError = decoded.pixels.withUnsafeBytes { input in scaled.withUnsafeMutableBytes { output -> vImage_Error in
@@ -255,10 +300,12 @@ final class BudgetSamples {
                     }
                 }
             }
-            results.append(["phase": phase, "index": sample.index, "decodedAtSeconds": sample.time - start, "width": width, "height": height,
-                            "roi": [x, top, roiWidth, roiHeight], "textROIPsnr": SyntheticDesktop.psnr(reference: refROI, decoded: decROI, decodedFullRange: decoded.fullRange) ?? -1,
-                            "textEdgeMeanAbsoluteError": edgeCount > 0 ? edgeError / Double(edgeCount) : -1, "textEdgePixels": edgeCount,
-                            "method": "Decoded luma upsampled to 3840x2160 with vImage high-quality resampling; range-correct text-ROI PSNR and reference-edge MAE. Detail metrics, not OCR or human readability acceptance."])
+            values["roi"] = [x, top, roiWidth, roiHeight]
+            values["textROIPsnr"] = SyntheticDesktop.psnr(reference: refROI, decoded: decROI, decodedFullRange: decoded.fullRange) ?? -1
+            values["textEdgeMeanAbsoluteError"] = edgeCount > 0 ? edgeError / Double(edgeCount) : -1
+            values["textEdgePixels"] = edgeCount
+            values["method"] = "Decoded luma upsampled to 3840x2160 with vImage high-quality resampling; range-correct text-ROI PSNR and reference-edge MAE. Detail metrics, not OCR or human readability acceptance."
+            results.append(values)
         }
         return results
     }
