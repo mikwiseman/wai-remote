@@ -6,7 +6,6 @@ import XCTest
 
 @MainActor
 final class ModalInputTests: XCTestCase {
-    private static var launched = false
     @MainActor private struct Fixture {
         let window: NSWindow
         let alert: NSAlert
@@ -19,7 +18,7 @@ final class ModalInputTests: XCTestCase {
         }
     }
     private func fixture() throws -> Fixture {
-        if !Self.launched { NSApplication.shared.finishLaunching(); Self.launched = true }
+        if !NSRunningApplication.current.isFinishedLaunching { NSApplication.shared.finishLaunching() }
         let window = NSWindow(contentRect: NSRect(x: -30_000, y: -30_000, width: 700, height: 500),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false; window.animationBehavior = .none
@@ -131,7 +130,7 @@ final class ModalInputTests: XCTestCase {
     private func saveFixture() throws -> SaveFixture {
         let previous = NSWorkspace.shared.frontmostApplication
         NSApplication.shared.setActivationPolicy(.regular)
-        if !Self.launched { NSApplication.shared.finishLaunching(); Self.launched = true }
+        if !NSRunningApplication.current.isFinishedLaunching { NSApplication.shared.finishLaunching() }
         let window = NSWindow(contentRect: NSRect(x: -30_000, y: -30_000, width: 700, height: 500),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "WAI Remote SavePanel test"
