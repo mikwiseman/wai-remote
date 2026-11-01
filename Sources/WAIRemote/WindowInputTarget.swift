@@ -31,7 +31,8 @@ struct WindowInputTarget: Equatable {
         let frame: CGRect
         let requiresMainThread: Bool
         var isMenuItem = false
-        var menuDocumentWindowID: CGWindowID? = nil
+        var menuDocument: WindowInputTarget? = nil
+        var menuDocumentWindowID: CGWindowID? { menuDocument?.windowID }
         let action: () -> Bool
         func press(if current: @escaping () -> Bool) -> Bool {
             let perform = { current() && action() }
@@ -367,8 +368,14 @@ struct WindowInputTarget: Equatable {
         }
         let deadline = ProcessInfo.processInfo.systemUptime + 0.05
         guard let frame, frame.contains(point), let hit = element(at: point, deadline: deadline) else { return nil }
-        return button(climbingFrom: hit, at: point, deadline: deadline, includingDisabledMenuItems: includingDisabledMenuItems, excluding: excluding) ??
-            button(inHitContainer: hit, at: point, deadline: deadline)
+        let lookup = {
+            self.button(climbingFrom: hit, at: point, deadline: deadline, includingDisabledMenuItems: includingDisabledMenuItems, excluding: excluding) ??
+                self.button(inHitContainer: hit, at: point, deadline: deadline)
+        }
+        var hitOwner: pid_t = 0
+        if !Thread.isMainThread, AXUIElementGetPid(hit, &hitOwner) == .success,
+           hitOwner == ProcessInfo.processInfo.processIdentifier { return Self.onMainRunLoop(lookup) }
+        return lookup()
     }
     /// Save panels bridge a separate process. Their app-scoped hit test can stop
     /// at the sheet, and their proxy buttons omit AXTopLevelUIElement entirely.
@@ -514,6 +521,30 @@ struct WindowInputTarget: Equatable {
         }
         return false
     }
+    /// Preserve typing only in this verified menu's actual originating window.
+    /// Hosted AX proxies name the host process while their virtual window and
+    /// transient menu belong to the service, so both owner and window matter.
+    private func menuDocument(of item: AXUIElement, topLevel: AnyObject, proxyPID: pid_t, deadline: TimeInterval) -> WindowInputTarget? {
+        func target(_ element: AXUIElement) -> WindowInputTarget? {
+            guard let id = Self.axWindowID(element, deadline: deadline),
+                  let windows = CGWindowListCopyWindowInfo(.optionIncludingWindow, id) as? [[String: Any]],
+                  let target = DesktopInputTarget.target(windowID: id, windows: windows), target.pid == proxyPID else { return nil }
+            return target
+        }
+        if proxyPID == pid {
+            guard CFGetTypeID(topLevel) == AXUIElementGetTypeID() else { return nil }
+            return target(topLevel as! AXUIElement)
+        }
+        guard let virtualID = Self.axWindowID(item, deadline: deadline), Self.windowOwner?(virtualID) == pid else { return nil }
+        var current = item
+        for _ in 0..<12 {
+            guard let values = Self.axValues(current, [kAXRoleAttribute, kAXParentAttribute], deadline: deadline) else { return nil }
+            if [kAXSheetRole, kAXWindowRole].contains(values[0] as? String ?? "") { return target(current) }
+            guard CFGetTypeID(values[1]) == AXUIElementGetTypeID() else { return nil }
+            current = values[1] as! AXUIElement
+        }
+        return nil
+    }
     /// The hit may be a title or image inside a button or menu item. Climb a few
     /// parents to an enabled control of this window; otherwise use ordinary events.
     func button(climbingFrom hit: AXUIElement, at point: CGPoint, deadline: TimeInterval = ProcessInfo.processInfo.systemUptime + 0.05,
@@ -543,17 +574,10 @@ struct WindowInputTarget: Equatable {
                 let pressed = element
                 var actionOwner = pid
                 _ = AXUIElementGetPid(pressed, &actionOwner)
-                var menuDocumentWindowID: CGWindowID?
-                if isMenuItem, CFGetTypeID(values[4]) == AXUIElementGetTypeID() {
-                    let topLevel = values[4] as! AXUIElement
-                    var owner: pid_t = 0
-                    if AXUIElementGetPid(topLevel, &owner) == .success, owner == pid {
-                        menuDocumentWindowID = Self.axWindowID(topLevel, deadline: deadline)
-                    }
-                }
+                let document = isMenuItem ? menuDocument(of: pressed, topLevel: values[4], proxyPID: actionOwner, deadline: deadline) : nil
                 return Button(frame: bounds, requiresMainThread: pid == ProcessInfo.processInfo.processIdentifier ||
                               actionOwner == ProcessInfo.processInfo.processIdentifier,
-                              isMenuItem: isMenuItem, menuDocumentWindowID: menuDocumentWindowID, action: {
+                              isMenuItem: isMenuItem, menuDocument: document, action: {
                     // Disabled menu taps keep their document provenance but must
                     // never issue AXPress or fall through to pointer delivery.
                     guard enabled else { return false }

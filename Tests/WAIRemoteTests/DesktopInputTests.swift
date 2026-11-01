@@ -92,21 +92,35 @@ final class DesktopInputTests: XCTestCase {
         _ = routing.pointer(action: "down", button: 0, at: point, hitTest: { _ in self.first })
         _ = routing.pointer(action: "up", button: 0, at: point, hitTest: { _ in self.first })
         _ = routing.pointer(action: "down", button: 0, at: point, hitTest: { _ in menu })
-        routing.preserveKeyboardTargetForMenu(documentWindowID: first.windowID)
+        routing.preserveKeyboardTargetForMenu(document: first)
         XCTAssertEqual(routing.keyboardTarget, first)
         XCTAssertEqual(routing.pointer(action: "move", button: 0, at: point, hitTest: { _ in self.second }), menu)
         XCTAssertEqual(routing.pointer(action: "up", button: 0, at: point, hitTest: { _ in self.second }), menu)
         XCTAssertEqual(routing.keyboardTarget, first, "Closing the menu must not strand subsequent typing on its transient window.")
     }
 
+    func testForeignServiceMenuKeepsTypingInItsProvenOriginalDocument() {
+        var routing = DesktopInputTarget()
+        let serviceMenu = WindowInputTarget(pid: 303, windowID: 33)
+        _ = routing.pointer(action: "down", button: 0, at: point, hitTest: { _ in self.first })
+        _ = routing.pointer(action: "up", button: 0, at: point, hitTest: { _ in self.first })
+        _ = routing.pointer(action: "down", button: 0, at: point, hitTest: { _ in serviceMenu })
+        routing.preserveKeyboardTargetForMenu(document: first)
+        XCTAssertEqual(routing.keyboardTarget, first, "The menu service PID must not replace the proven document owner")
+        XCTAssertEqual(routing.pointer(action: "move", button: 0, at: point, hitTest: { _ in self.second }), serviceMenu)
+        XCTAssertEqual(routing.pointer(action: "up", button: 0, at: point, hitTest: { _ in self.second }), serviceMenu)
+        XCTAssertEqual(routing.keyboardTarget, first)
+    }
+
     func testMenuCannotReuseAnUnrelatedOrUnprovenKeyboardTarget() {
-        let cases: [(pid_t, CGWindowID?)] = [(first.pid, 99), (second.pid, first.windowID), (first.pid, nil)]
-        for (owner, document) in cases {
+        let cases: [WindowInputTarget?] = [WindowInputTarget(pid: first.pid, windowID: 99),
+            WindowInputTarget(pid: second.pid, windowID: first.windowID), nil]
+        for document in cases {
             var routing = DesktopInputTarget()
             _ = routing.pointer(action: "down", button: 0, at: point, hitTest: { _ in self.first })
             _ = routing.pointer(action: "up", button: 0, at: point, hitTest: { _ in self.first })
-            _ = routing.pointer(action: "down", button: 0, at: point, hitTest: { _ in WindowInputTarget(pid: owner, windowID: 33) })
-            routing.preserveKeyboardTargetForMenu(documentWindowID: document)
+            _ = routing.pointer(action: "down", button: 0, at: point, hitTest: { _ in WindowInputTarget(pid: 303, windowID: 33) })
+            routing.preserveKeyboardTargetForMenu(document: document)
             XCTAssertNil(routing.keyboardTarget, "A same-app different document, foreign app, or missing parent proof cannot redirect typing.")
         }
     }
@@ -115,13 +129,13 @@ final class DesktopInputTests: XCTestCase {
         var routing = DesktopInputTarget()
         let menu = WindowInputTarget(pid: first.pid, windowID: 33)
         _ = routing.pointer(action: "down", button: 0, at: point, hitTest: { _ in menu })
-        routing.preserveKeyboardTargetForMenu(documentWindowID: first.windowID)
+        routing.preserveKeyboardTargetForMenu(document: first)
         XCTAssertNil(routing.keyboardTarget)
         _ = routing.pointer(action: "up", button: 0, at: point, hitTest: { _ in menu })
         _ = routing.pointer(action: "down", button: 0, at: point, hitTest: { _ in self.first })
         routing.reset()
         _ = routing.pointer(action: "down", button: 0, at: point, hitTest: { _ in menu })
-        routing.preserveKeyboardTargetForMenu(documentWindowID: first.windowID)
+        routing.preserveKeyboardTargetForMenu(document: first)
         XCTAssertNil(routing.keyboardTarget)
     }
 }

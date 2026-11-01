@@ -27,10 +27,10 @@ struct DesktopInputTarget {
 
     /// An exact-hit menu item may name its owning document. Keep typing there
     /// only if it is the same document the remote user had already selected.
-    mutating func preserveKeyboardTargetForMenu(documentWindowID: CGWindowID?) {
-        guard !buttons.isEmpty, let menu = gestureTarget else { return }
-        guard let previous = keyboardTargetBeforeGesture, previous.pid == menu.pid,
-              previous.windowID == documentWindowID else { keyboardTarget = nil; return }
+    mutating func preserveKeyboardTargetForMenu(document: WindowInputTarget?) {
+        guard !buttons.isEmpty, gestureTarget != nil else { return }
+        guard let previous = keyboardTargetBeforeGesture, let document,
+              previous.pid == document.pid, previous.windowID == document.windowID else { keyboardTarget = nil; return }
         keyboardTarget = previous
     }
 

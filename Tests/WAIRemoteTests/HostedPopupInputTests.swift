@@ -192,6 +192,21 @@ final class HostedPopupInputTests: XCTestCase {
         let pointer = try XCTUnwrap(CGEvent(source: nil)).location
         let injector = InputInjector(); injector.setIndependentPointer(true)
         defer { injector.resetSession() }
+        var filename: AXUIElement?
+        if select {
+            let windows = (value(application, kAXWindowsAttribute) as? [AXUIElement]) ?? []
+            let field = try XCTUnwrap(find(in: windows) {
+                value($0, kAXRoleAttribute) as? String == kAXTextFieldRole &&
+                (value($0, kAXValueAttribute) as? String)?.contains("Owned unsaved popup fixture") == true
+            })
+            let fieldPoint = try XCTUnwrap(center(field))
+            XCTAssertEqual(DesktopInputTarget.target(at: fieldPoint, excluding: []), target)
+            click(fieldPoint, injector: injector)
+            let focused = Date().addingTimeInterval(1)
+            while value(field, kAXFocusedAttribute) as? Bool != true && Date() < focused { pump(0.05) }
+            XCTAssertEqual(value(field, kAXFocusedAttribute) as? Bool, true)
+            filename = field
+        }
         click(point, injector: injector)
         let opened = Date().addingTimeInterval(2)
         var item: AXUIElement?, menuTarget: WindowInputTarget?
@@ -250,6 +265,22 @@ final class HostedPopupInputTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(CGEvent(source: nil)).location, pointer)
         print("HOSTED_POPUP_RESULT select=\(select) value=\(selected ?? "nil") menuClosed=\(menu.frame == nil) panelAlive=\(target.frame != nil)")
         if menu.frame == nil {
+            if select {
+                let filename = try XCTUnwrap(filename)
+                for action in ["down", "up"] {
+                    var event = WireMessage(type: "key", state: SessionMachine(surface: .init(id: "hosted-popup", width: 800, height: 600)).state)
+                    event.key = "KeyA"; event.action = action; event.modifiers = ["Meta"]; injector.apply(event)
+                }
+                let expected = "After menu café 🦊.rtf"
+                var text = WireMessage(type: "text", state: SessionMachine(surface: .init(id: "hosted-popup", width: 800, height: 600)).state)
+                text.text = expected; injector.apply(text)
+                let typed = Date().addingTimeInterval(2)
+                while value(filename, kAXValueAttribute) as? String != expected && Date() < typed { pump(0.05) }
+                XCTAssertEqual(value(filename, kAXValueAttribute) as? String, expected,
+                               "Typing after an XPC menu selection must return to its original field without another click")
+                XCTAssertEqual(state()["writes"]?.intValue, 0)
+                XCTAssertEqual(try XCTUnwrap(CGEvent(source: nil)).location, pointer)
+            }
             if let retainedMenuDestination { try assertStaleReceiverRejectsKeyUp(retainedMenuDestination) }
             let receiver = try XCTUnwrap(target.keyboardDestination()?.keyboardReceiver)
             XCTAssertEqual(receiver.pid, remotePID)

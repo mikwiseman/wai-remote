@@ -196,7 +196,7 @@ private final class InjectedEvents {
                     destination.window?.button(at: p, includingDisabledMenuItems: true, excluding: excludedWindows) : nil
                 let pressed = eligible ? control : nil
                 if independentPointer, let control, control.isMenuItem {
-                    desktop.preserveKeyboardTargetForMenu(documentWindowID: control.menuDocumentWindowID)
+                    desktop.preserveKeyboardTargetForMenu(document: control.menuDocument)
                     activating = false
                 }
                 if PerformanceLog.enabled {
