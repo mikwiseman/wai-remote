@@ -8,7 +8,7 @@ struct WindowInputTarget: Equatable {
     let windowID: CGWindowID
     struct KeyboardReceiver: Equatable { let pid: pid_t; let windowID: CGWindowID }
     var keyboardReceiver: KeyboardReceiver? = nil
-    private static func onMainRunLoop<Output>(_ perform: @escaping () -> Output) -> Output {
+    static func onMainRunLoop<Output>(_ perform: @escaping () -> Output) -> Output {
         if Thread.isMainThread { return perform() }
         let finished = DispatchSemaphore(value: 0)
         var result: Output?
@@ -214,12 +214,16 @@ struct WindowInputTarget: Equatable {
     }
     /// `hover` places the pointer over the target first, for a press that no
     /// move preceded (touch taps). Hover-armed controls ignore a bare press.
-    @discardableResult func post(_ event: CGEvent, permitted: () -> Bool, hover: Bool = false, delivery: Delivery = .system) -> InputOutcome {
+    @discardableResult func post(_ event: CGEvent, permitted: () -> Bool, hover: Bool = false, activating: Bool = false, delivery: Delivery = .system) -> InputOutcome {
         // A point inside a window does not move with the window. Address the
         // event with the geometry the user aimed at, even if activation moves it.
         guard permitted() else { return .cancelled }
         guard let frame = delivery.frame(self), address(event, frame: frame) else { return .frameGone }
         let down = [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(event.type)
+        if activating && down {
+            _ = withoutActuallyEscaping(permitted) { activateForDesktopClick(if: $0) }
+            guard permitted() else { return .cancelled }
+        }
         var primed = false
         // An active app needs no synthetic activation. An open menu or popover is
         // already tracking, and an off-window primer would dismiss it first.
@@ -256,10 +260,10 @@ struct WindowInputTarget: Equatable {
             if address(move, frame: frame) { delivery.pointer(pid, move) }
         }
         guard permitted() else { return .cancelled }
-        // Only background activation above can block. Ordinary motion, scrolling
+        // Activation above can block. Ordinary motion, scrolling
         // and typing already validated this window; another WindowServer round
         // trip here adds latency to every event without intervening work.
-        if backgroundDown, delivery.frame(self) == nil { return .frameGone }
+        if backgroundDown || activating, delivery.frame(self) == nil { return .frameGone }
         switch event.type {
         case .keyDown, .keyUp, .flagsChanged:
             // AppKit and Chromium perform menu key equivalents only for the
@@ -306,7 +310,7 @@ struct WindowInputTarget: Equatable {
     }
     /// Save panels bridge a separate process. Their app-scoped hit test can stop
     /// at the sheet, and their proxy buttons omit AXTopLevelUIElement entirely.
-    private static func axValues(_ element: AXUIElement, _ names: [String], deadline: TimeInterval) -> [AnyObject]? {
+    static func axValues(_ element: AXUIElement, _ names: [String], deadline: TimeInterval) -> [AnyObject]? {
         let remaining = deadline - ProcessInfo.processInfo.systemUptime
         guard remaining > 0 else { return nil }
         AXUIElementSetMessagingTimeout(element, Float(remaining))
@@ -315,7 +319,7 @@ struct WindowInputTarget: Equatable {
               let values = raw as? [AnyObject], values.count == names.count else { return nil }
         return values
     }
-    private static func axWindowID(_ element: AXUIElement, deadline: TimeInterval) -> CGWindowID? {
+    static func axWindowID(_ element: AXUIElement, deadline: TimeInterval) -> CGWindowID? {
         let remaining = deadline - ProcessInfo.processInfo.systemUptime
         guard remaining > 0, let windowNumber else { return nil }
         AXUIElementSetMessagingTimeout(element, Float(remaining))

@@ -1,6 +1,6 @@
 # Independent desktop input
 
-The independent mouse shares the main display and selects the application window under each remote click. The owner no longer has to choose one window before connecting. From build 65, this is the default for ordinary screen access. Settings → Independent Mouse can explicitly enable the shared system pointer instead.
+The independent mouse shares the main display. A remote click brings its selected window and application forward while leaving the owner’s physical pointer separate. Foreground application and keyboard focus are shared. The owner no longer has to choose one window before connecting. From build 65, this is the default for ordinary screen access. Settings → Independent Mouse can explicitly enable the shared system pointer instead.
 
 ## Basis
 
@@ -12,11 +12,17 @@ The independent mouse shares the main display and selects the application window
 
 WindowServer hit-testing selects the actual input window. Bounding-box scans are insufficient: on both test machines the Dock exposes a transparent rectangle covering the whole display. `SLSFindWindowAndOwner` follows the window regions and can continue below an explicitly excluded window. The pointer and ink panels must be skipped this way: `ignoresMouseEvents` alone does not remove them from geometric hit-testing. The lookup never skips an unrelated or unaddressable window, and validates the result's current process ID and bounds. Missing SPI prevents independent sharing with an explanation; the owner can explicitly select the shared system pointer in Settings.
 
+Only the first full-desktop button-down activates the selected app and raises the selected window, using normal activation without the all-windows option. The original hit target and click geometry are retained; activation never causes another hit test or a duplicate click. Native accessibility buttons activate on down before their existing Press action on up. Hover, scroll, keys and releases do not activate apps.
+
 A button-down pins its window until all held buttons are released. Hover and scroll do not redirect keyboard input. Each held key retains its original destination for key-up, even after another window is clicked. Empty or closed targets never fall through to the global HID queue. Disconnect and a change of input mode or target cancel pending work. Pause, stalls and permission loss release held input and hide the remote pointer after the input already queued, so keys and text behind a slow background click still arrive in order. Typing keeps following the last clicked window until a disconnect or a change of input mode or target.
 
-The existing single-window grants remain scoped to their original window. Full-display restoration uses the persistent pointer preference, whose default is independent. Switching to the owner's system mouse requires an explicit Settings opt-out; that choice applies to the next connection and survives relaunch.
+The existing single-window grants remain scoped to their original window and retain background input without app activation. Full-display restoration uses the persistent pointer preference, whose default is independent. Switching to the owner's system mouse requires an explicit Settings opt-out; that choice applies to the next connection and survives relaunch.
 
 ## Verification
+
+The earlier focus-isolation measurements below describe the previous desktop-click behavior. Full-desktop clicks now intentionally activate the clicked app; physical-pointer independence remains.
+
+Native regressions launch a separate AppKit process with two overlapping windows. Before correction, both its accessibility button and ordinary pointer target received one click but stayed behind the other window. Both now activate their app and raise the selected window exactly once. A single-window grant still delivers in the background; cancellation after lookup, hover and scrolling do not activate the app. The focused run passes 27 tests without skips. Each native scenario retained one physical pointer position across 22 samples, with maximum sample gaps below 10.83 ms; this does not exclude changes shorter than that sampling interval. Live Mini and physical iPhone acceptance remain separate.
 
 Routing regressions cover window identity, excluded overlays, drag capture across applications, multiple held buttons, empty-space presses, hover versus typing, cancellation and restoration of the selected mode. On 16 October 2026, `swift test` ran 120 tests with no failures and one optional test skipped. The routing test first failed against the unimplemented selector. A separate regression reproduced a resumed video track remaining hidden behind the connection overlay; rearming the first-frame notification fixes it without rebuilding the track.
 

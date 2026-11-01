@@ -136,12 +136,12 @@ private final class InjectedEvents {
     var excludedWindows = Set<CGWindowID>()
     var isCurrent: () -> Bool = { true }
     var allowed: Bool { CGPreflightPostEventAccess() }
-    private func post(_ event: CGEvent?, to target: InputDestination? = nil, releasing: Bool = false, hover: Bool = false) {
+    private func post(_ event: CGEvent?, to target: InputDestination? = nil, releasing: Bool = false, hover: Bool = false, activating: Bool = false) {
         guard releasing || isCurrent() else { outcome = .cancelled; return }
         event?.setIntegerValueField(.eventSourceUserData, value: 0x574149)
         guard let event else { return }
         switch target ?? destination {
-        case .window(let window): outcome = window.post(event, permitted: { releasing || isCurrent() }, hover: hover)
+        case .window(let window): outcome = window.post(event, permitted: { releasing || isCurrent() }, hover: hover, activating: activating)
         case .system: event.post(tap: .cghidEventTap); outcome = .system
         case .unavailable: outcome = .noTarget
         }
@@ -178,6 +178,7 @@ private final class InjectedEvents {
                     return
                 }
             }
+            let activating = independentPointer && action == "down" && buttons.isEmpty && windowButton == nil
             if action == "down", buttons.isEmpty, windowButton == nil {
                 buttonDestination = destination
                 if lastClickDestination != destination { clickSequence.reset() }
@@ -198,7 +199,11 @@ private final class InjectedEvents {
                         "accessibilityTrusted": AXIsProcessTrusted(),
                         "lookupMs": (ProcessInfo.processInfo.systemUptime - lookupStarted) * 1000])
                 }
-                if let pressed { windowButton = pressed; outcome = .axPress; return }
+                if let pressed {
+                    if activating { _ = destination.window?.activateForDesktopClick(if: isCurrent) }
+                    guard isCurrent() else { outcome = .cancelled; return }
+                    windowButton = pressed; outcome = .axPress; return
+                }
             }
             if windowButton != nil {
                 if action == "move" { return }
@@ -237,7 +242,7 @@ private final class InjectedEvents {
                     event?.setIntegerValueField(.mouseEventDeltaY, value: Int64((p.y - previousPoint.y).rounded()))
                 }
                 // Taps from touch viewers arrive without a preceding move.
-                post(event, hover: action == "down" && hovered != p)
+                post(event, hover: action == "down" && hovered != p, activating: activating)
                 hovered = p
                 if action == "up" { buttons.remove(b); clickCounts[b] = nil }
                 if action == "move" && !buttons.isEmpty { clickSequence.reset() }
