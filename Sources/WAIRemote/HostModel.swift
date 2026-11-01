@@ -14,6 +14,7 @@ struct Offer: Codable {
     let name: String
     let sdp: String
     var localPointer: Bool? = nil
+    var replaceSessionID: String? = nil
 }
 struct PendingPeer: Identifiable {
     var id: String { offer.peerID }
@@ -63,6 +64,7 @@ final class HostModel: ObservableObject {
     private var capturedWindow: SCWindow?
     private var resizingWindow = false
     private var signaling: Signaling?
+    private let signalSender: (([String: Any]) -> Void)?
     private var transport: PeerTransport?
     private var iceConfiguration = ICEConfiguration.local
     private var machine: SessionMachine?
@@ -90,8 +92,10 @@ final class HostModel: ObservableObject {
     private var surface = Surface(id: "lab", width: 1280, height: 800)
 
     init(identity: DeviceIdentity, defaults: UserDefaults = .standard, peersURL: URL = KeyStore.peersURL,
-         disableBackgroundAccess: @escaping () -> Void = BackgroundAccess.disable) {
+         disableBackgroundAccess: @escaping () -> Void = BackgroundAccess.disable,
+         signalSender: (([String: Any]) -> Void)? = nil) {
         self.identity = identity
+        self.signalSender = signalSender
         self.defaults = defaults
         self.independentPointerPreferred = defaults.object(forKey: "independentPointerPreferred") as? Bool ?? true
         self.peersURL = peersURL
@@ -367,6 +371,9 @@ final class HostModel: ObservableObject {
     }
     func copyInvite() { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(invite, forType: .string) }
     func openViewer() { if let url = URL(string: gateway) { NSWorkspace.shared.open(url) } }
+    private func sendSignal(_ object: [String: Any]) {
+        if let signalSender { signalSender(object) } else { signaling?.send(object) }
+    }
     func receiveSignal(_ object: [String: Any]) {
         guard sharing, object["type"] as? String == "offer", let from = object["from"] as? String,
               let body = object["body"] as? [String: Any], let payloadString = body["payload"] as? String,
@@ -374,6 +381,7 @@ final class HostModel: ObservableObject {
               let offer = try? JSONDecoder().decode(Offer.self, from: payload), offer.peerID == from,
               offer.hostID == identity.id, offer.name.utf8.count <= 100, !offer.name.isEmpty,
               offer.sdp.utf8.count <= 80_000, offer.nonce.count == 43,
+              offer.replaceSessionID.map({ !$0.isEmpty && $0.utf8.count <= 128 }) ?? true,
               offer.expiresAt >= Date().timeIntervalSince1970 * 1000,
               offer.expiresAt <= (Date().timeIntervalSince1970 + 120) * 1000,
               let pub = Data(base64URL: offer.publicKey), DeviceIdentity.id(publicKeyData: pub) == from,
@@ -382,17 +390,48 @@ final class HostModel: ObservableObject {
         let trusted = peers.first { $0.id == from && $0.publicKey == offer.publicKey && $0.isAuthorized() }
         let proofValid = secret.map { DeviceIdentity.verifyPairingProof(body["proof"] as? String ?? "", secret: $0, payload: payload) } ?? false
         guard trusted != nil || proofValid else {
-            signaling?.send(["type":"reject", "to":from, "body":["reason":"new-invite-required"]]); return
+            sendSignal(["type":"reject", "to":from, "body":["reason":"new-invite-required"]]); return
         }
-        // A signed retry from the same device can replace its unfinished attempt.
-        // An established session or another device still owns the connection.
-        if transport != nil, machine?.author == from,
-           transport?.isReady == false || machine?.stalled == true || machine?.state.reason == "transport-disconnected" { disconnectViewer(cause: "replaced") }
-        guard transport == nil, pending == nil else { signaling?.send(["type":"reject","to":from,"body":["reason":"busy"]]); return }
+        // Consume every authorized offer before either rejecting or replacing a
+        // session. A delayed duplicate must not become a new connection later.
         seenNonces[offer.nonce] = Date()
+        let replaceableSessionID = handoffSessionID(for: trusted)
+        if let requestedSessionID = offer.replaceSessionID, transport != nil || pending != nil {
+            guard requestedSessionID == replaceableSessionID else {
+                rejectBusy(offer, sessionID: replaceableSessionID); return
+            }
+            if let previous = machine?.author, previous != offer.peerID {
+                sendSignal(["type": "reject", "to": previous, "body": ["reason": "session-replaced"]])
+            }
+            disconnectViewer(cause: "replaced")
+            machine = nil
+        } else if transport != nil, machine?.author == from,
+                  transport?.isReady == false || machine?.stalled == true || machine?.state.reason == "transport-disconnected" {
+            // Passive recovery is limited to this same device's unfinished session.
+            disconnectViewer(cause: "replaced")
+        }
+        guard transport == nil, pending == nil else {
+            rejectBusy(offer, sessionID: replaceableSessionID); return
+        }
         if let trusted, isLab || !trusted.labOnly { connect(offer, permissions: trusted.permissions) }
         else if proofValid { pending = PendingPeer(offer: offer); NSApp.activate(ignoringOtherApps: true) }
-        else { signaling?.send(["type":"reject","to":from,"body":["reason":"new-invite-required"]]) }
+        else { sendSignal(["type":"reject","to":from,"body":["reason":"new-invite-required"]]) }
+    }
+    private func handoffSessionID(for peer: TrustedPeer?) -> String? {
+        guard !isLab, !localDrawing, pending == nil, controlAllowed,
+              let peer, peer.isAuthorized(), !peer.labOnly, peer.permissions.control,
+              let activePeer, activePeer.isAuthorized(), !activePeer.labOnly,
+              let machine, machine.connected, machine.state.mode != .paused,
+              machine.author == activePeer.id, transport != nil else { return nil }
+        return machine.state.sessionID
+    }
+    private func rejectBusy(_ offer: Offer, sessionID: String?) {
+        var payload: [String: Any] = ["hostID": identity.id, "peerID": offer.peerID, "nonce": offer.nonce]
+        if let sessionID { payload["sessionID"] = sessionID }
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
+              let signature = try? identity.sign(data, domain: "wai-remote/busy/v1") else { return }
+        sendSignal(["type": "reject", "to": offer.peerID, "body": [
+            "reason": "busy", "payload": data.base64URL, "signature": signature]])
     }
     func approve(control: Bool, expiresAt: Date? = nil) {
         guard let offer = pending?.offer, sharing else { return }
@@ -410,7 +449,7 @@ final class HostModel: ObservableObject {
             "seconds": max(0, expiresAt?.timeIntervalSinceNow ?? 0), "control": control])
         secret = nil; invite = ""; connect(offer, permissions: permission)
     }
-    func reject() { if let pending { signaling?.send(["type":"reject","to":pending.id,"body":["reason":"declined"]]) }; pending = nil }
+    func reject() { if let pending { sendSignal(["type":"reject","to":pending.id,"body":["reason":"declined"]]) }; pending = nil }
     private func connect(_ offer: Offer, permissions: Permissions) {
         guard sharing, let approved = peers.first(where: {
             $0.id == offer.peerID && $0.publicKey == offer.publicKey && $0.isAuthorized() && (isLab || !$0.labOnly)
@@ -421,7 +460,7 @@ final class HostModel: ObservableObject {
         // survives relaunch. No existing peer's scope or expiry is changed.
         if !isLab, capturedDisplay != nil, independentPointer != independentPointerPreferred {
             guard !independentPointerPreferred || DesktopInputTarget.isSupported else {
-                signaling?.send(["type": "reject", "to": offer.peerID, "body": ["reason": "network"]])
+                sendSignal(["type": "reject", "to": offer.peerID, "body": ["reason": "network"]])
                 status = "Независимая мышь недоступна. Проверьте настройки WAI Remote."; return
             }
             independentPointer = independentPointerPreferred
@@ -496,12 +535,12 @@ final class HostModel: ObservableObject {
             guard let self, self.connectionGeneration == generation, self.transport === peer else { return }
             switch result {
             case .failure:
-                self.signaling?.send(["type":"reject","to":offer.peerID,"body":["reason":"network"]])
+                self.sendSignal(["type":"reject","to":offer.peerID,"body":["reason":"network"]])
                 self.disconnectViewer(cause: "negotiation"); self.status = "Не удалось установить соединение. Можно попробовать снова."
             case .success(let sdp):
                 let answer: [String: Any] = ["hostID":self.identity.id,"peerID":offer.peerID,"nonce":offer.nonce,"sdp":sdp,"lab":self.isLab,"name":String((Host.current().localizedName ?? "Mac").prefix(60))]
                 guard let data = try? JSONSerialization.data(withJSONObject: answer), let sig = try? self.identity.sign(data, domain: "wai-remote/answer/v1") else { return }
-                self.signaling?.send(["type":"answer","to":offer.peerID,"body":["payload":data.base64URL,"signature":sig]])
+                self.sendSignal(["type":"answer","to":offer.peerID,"body":["payload":data.base64URL,"signature":sig]])
             }
         }
     }
@@ -630,7 +669,7 @@ final class HostModel: ObservableObject {
     }
     @discardableResult private func expireViewerIfNeeded(now: Date = Date()) -> Bool {
         guard let activePeer, !activePeer.isAuthorized(at: now) else { return false }
-        signaling?.send(["type":"reject", "to":activePeer.id, "body":["reason":"new-invite-required"]])
+        sendSignal(["type":"reject", "to":activePeer.id, "body":["reason":"new-invite-required"]])
         disconnectViewer(cause: "approval-expired")
         status = "Срок доступа устройства истёк"
         detail = "Для этого устройства нужно новое приглашение и ваше подтверждение."
@@ -672,7 +711,7 @@ final class HostModel: ObservableObject {
         }
         if sharing && !isLab && !screenAllowed { stop(reason: "Разрешение на экран отозвано", cause: "screen-permission-revoked"); return }
         if let deadline = connectionDeadline, ProcessInfo.processInfo.systemUptime >= deadline {
-            if let author = machine?.author { signaling?.send(["type":"reject","to":author,"body":["reason":"network"]]) }
+            if let author = machine?.author { sendSignal(["type":"reject","to":author,"body":["reason":"network"]]) }
             disconnectViewer(cause: "connect-timeout"); status = "Не удалось установить соединение. Можно попробовать снова."
         }
         if let machine { apply(machine.tick(now: ProcessInfo.processInfo.systemUptime)) }
