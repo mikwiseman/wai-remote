@@ -264,6 +264,39 @@ final class WindowInputTests: XCTestCase {
         override func isAccessibilityEnabled() -> Bool { true }
         override func accessibilityPerformPress() -> Bool { pressed(); return true }
     }
+    private final class CountingParentView: NSView {
+        var enabledQueries = 0
+        override func isAccessibilityElement() -> Bool { true }
+        override func accessibilityRole() -> NSAccessibility.Role? { .group }
+        override func isAccessibilityEnabled() -> Bool { enabledQueries += 1; return true }
+    }
+    private final class BoundaryView: NSView {
+        var boundaryRole: NSAccessibility.Role = .window
+        override func isAccessibilityElement() -> Bool { true }
+        override func accessibilityRole() -> NSAccessibility.Role? { boundaryRole }
+        override func isAccessibilityEnabled() -> Bool { true }
+    }
+
+    @MainActor
+    func testAccessibilityPressStopsBeforeQueryingParentsAboveWindowAndSheetBoundaries() throws {
+        let parent = CountingParentView(frame: NSRect(x: 0, y: 0, width: 300, height: 200))
+        let (window, target, elements) = try accessible { content in
+            for (index, role) in [NSAccessibility.Role.window, .sheet].enumerated() {
+                let boundary = BoundaryView(frame: NSRect(x: 20 + index * 140, y: 20, width: 120, height: 150))
+                boundary.boundaryRole = role; boundary.identifier = .init(role.rawValue)
+                parent.addSubview(boundary)
+            }
+            content.addSubview(parent)
+        }
+        defer { window.orderOut(nil); window.close() }
+        for role in [NSAccessibility.Role.window, .sheet] {
+            let element = try XCTUnwrap(elements[role.rawValue]), point = try center(element)
+            parent.enabledQueries = 0
+            XCTAssertNil(target.button(climbingFrom: element, at: point))
+            XCTAssertEqual(parent.enabledQueries, 0,
+                           "No eligible control exists above \(role.rawValue); parent queries consume the hosted-control deadline")
+        }
+    }
     /// A real AppKit window far outside every display: nothing appears on screen.
     /// AX hit-testing needs a visible window, so tests start from a known element.
     @MainActor private func accessible(_ build: (NSView) -> Void) throws -> (NSWindow, WindowInputTarget, [String: AXUIElement]) {

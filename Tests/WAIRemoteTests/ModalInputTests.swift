@@ -178,8 +178,9 @@ final class ModalInputTests: XCTestCase {
     private func message(_ type: String) -> WireMessage {
         WireMessage(type: type, state: SessionMachine(surface: .init(id: "fixture", width: 700, height: 500)).state)
     }
-    private func click(_ element: AXUIElement, fixture: SaveFixture, injector: InputInjector) throws {
+    @discardableResult private func click(_ element: AXUIElement, fixture: SaveFixture, injector: InputInjector) throws -> TimeInterval {
         let point = try center(element), frame = try XCTUnwrap(fixture.target.frame)
+        let started = Date().timeIntervalSince1970
         for action in ["down", "up"] {
             var click = message("pointer"); click.action = action; click.button = 0
             click.x = (point.x - frame.minX) / max(1, frame.width - 1)
@@ -187,10 +188,27 @@ final class ModalInputTests: XCTestCase {
             injector.apply(click)
         }
         runApplication(for: 0.5)
+        return started
     }
     private func key(_ key: String, injector: InputInjector) {
         for action in ["down", "up"] { var event = message("key"); event.key = key; event.action = action; injector.apply(event) }
         runApplication(for: 1.5)
+    }
+    private func diagnoseDelivery(since started: TimeInterval) {
+        let log = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wai-remote-performance-\(ProcessInfo.processInfo.processIdentifier).jsonl")
+        print("SAVE_PANEL_DELIVERY_TRACE enabled=\(PerformanceLog.enabled) since=\(started)")
+        guard let data = try? Data(contentsOf: log) else { return }
+        var printed = 0
+        for line in data.split(separator: 10) {
+            guard let row = (try? JSONSerialization.jsonObject(with: Data(line))) as? [String: Any],
+                  let time = row["time"] as? Double, time >= started,
+                  let event = row["event"] as? String,
+                  ["input-button-lookup", "input-delivery"].contains(event) else { continue }
+            print("SAVE_PANEL_DELIVERY \(String(decoding: line, as: UTF8.self))")
+            printed += 1
+            if printed == 20 { break }
+        }
     }
     /// Failure-only diagnostics for this test's own panel. Never print AX titles
     /// or values; identities distinguish an OS topology change from a timeout.
@@ -347,9 +365,12 @@ final class ModalInputTests: XCTestCase {
         try setExpanded(true, fixture: fixture)
         let injector = InputInjector(); injector.setWindowTarget(fixture.target)
         defer { injector.resetSession() }
-        try click(fixture.cancel, fixture: fixture, injector: injector)
+        let clickStarted = try click(fixture.cancel, fixture: fixture, injector: injector)
         XCTAssertEqual(fixture.response.response, .cancel)
         XCTAssertEqual(fixture.response.completions, 1)
         XCTAssertEqual(fixture.response.coveredPresses, 0)
+        if fixture.response.response != .cancel || fixture.response.completions != 1 || fixture.response.coveredPresses != 0 {
+            diagnoseDelivery(since: clickStarted)
+        }
     }
 }

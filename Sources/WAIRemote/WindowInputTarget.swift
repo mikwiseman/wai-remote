@@ -588,6 +588,9 @@ struct WindowInputTarget: Equatable {
                     return result == .success || result == .cannotComplete
                 })
             }
+            // No control can be above its owning window or sheet. Preserve the
+            // remaining lookup budget for the hosted contents of this boundary.
+            if let role = values[0] as? String, role == kAXWindowRole || role == kAXSheetRole { return nil }
             guard CFGetTypeID(values[5]) == AXUIElementGetTypeID() else { return nil }
             element = values[5] as! AXUIElement
         }
