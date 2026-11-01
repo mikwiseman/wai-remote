@@ -1,5 +1,19 @@
 # Responsiveness verification
 
+## Build 80 device evidence, 1 November 2026
+
+The [build 80 checks](releases/0.3.7-80.md) passed specific MacBook→Mini button, text, scroll, dialog and reconnection actions through the installed agent CLI and WAI WebRTC. They do not establish physical iPhone scrolling feel, input-to-photon latency or LTE/Wi-Fi handover.
+
+Across two fresh connections, WebRTC recorded 33,712 decoded frames, zero decoder drops and 20 freezes totaling 6.69 seconds. A continuously moving fixture ran for 155 seconds at about 57 received fps with no recorded freezes; shorter pause clusters still occurred. Eleven freezes totaling 4.278 seconds fell within 19:10:10–18 and 19:14:31–34 UTC. No transport reconnect or local viewer-window transition coincided with those clusters.
+
+During the matching host windows, capture stayed near 57 fps while encoded/sent output fell to 2 fps. This narrows the missing-output boundary to after capture and before encoded output; it does not distinguish WebRTC frame dropping from an encoder stall. Average asynchronous encode wall time around 50 ms per frame is not CPU load or a 20 fps throughput ceiling. No root cause or tuning fix is established.
+
+A later read-only probe of those same build-80 intervals found that target bitrate fell from 2,497 to 235 kbps and from 4,875 to 256 kbps before the low-output seconds. The selected-pair bandwidth estimates fell too. Completed-frame encode time was shorter during the lowest-output seconds, while QP reached 51. This supports investigating bitrate pressure and resolution adaptation; it does not prove why the estimates fell or which component dropped frames. These historical samples are not build-81 measurements.
+
+The 32 button-down acknowledgements had median/p95 23.2/105.8 ms. This measures send-to-host-acknowledgement time, not app response or visible pixels. Heartbeats dominate the combined input distribution. The host's sampled input dispatch stayed below 2 ms in the two pause windows, but there were no delivery/AX samples there. A zero data-channel buffer does not measure the video encoder or pacer queue.
+
+Private evidence: `.runtime/agent80/live-acceptance.json`, `performance-summary.json` and `mini-host-metrics-result.json`. The viewer summary excludes an earlier stalled connection before the two fresh sessions; these measurements are not a controlled before/after comparison.
+
 ## Commands during WAI menu tracking, 1 November 2026
 
 Mac 71 removes a reproduced delay in own-process accessibility actions during nested menu tracking. Common-mode run-loop scheduling keeps those actions on the main thread while the menu is open; input order and cancellation remain intact. The regression failed before the fix and passed afterward, along with a cancelled-session test and 31 other focused input tests. Sparkle 70→71 was verified on the local Mac. See [release verification](releases/0.3.7-71.md). This does not establish the separate cause of menu hit-target failures or physical iPhone latency on waiMini.
