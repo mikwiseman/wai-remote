@@ -1,5 +1,24 @@
 # Responsiveness verification
 
+## iPhone touch and input corrections, 1 November 2026
+
+Local candidate; not distributed through TestFlight or the Mac updater.
+
+- A tap keeps the point where the finger landed. Previously a six-point lift-off shift moved the click 24 Mac points on a desktop reduced fourfold.
+- Two-finger scrolling follows the fingers at the displayed desktop scale and retains its initial target. Finger-spacing drift no longer takes priority over a clear scrolling movement.
+- Pinch zoom anchors the Mac point under the fingers, including when the image still has letterbox space on one axis. Fit-to-screen remains centered.
+- The iOS Metal delegate forwards WebRTC's rendering and restores 60 Hz after lazy renderer initialization resets it to 30 Hz. It stops rendering when detached. This is a requested display cadence, not a measured network frame rate.
+- Completed iOS ICE gathering now uses the same candidate filtering as the deadline path and Mac viewer. Previously early completion returned the unfiltered SDP.
+- The host accumulates fractional scroll pixels and avoids a duplicate WindowServer lookup for ordinary keyboard, movement and scroll events. Background click activation and its revalidation remain intact.
+
+Host regressions failed before the correction and **31 focused tests passed** afterwards. A native AppKit fixture received the complete five-pixel scroll from twenty quarter-pixel samples; macOS coalesced events. The fixture launch reported itself frontmost, so this does not establish background-input isolation. One thousand real single-window lookups measured p50 0.087 ms, p95 0.294 ms and max 15.93 ms: removing duplicate calls reduces work but cannot by itself explain seconds of typing delay. Evidence: `.runtime/input-latency-20261101/`.
+
+iOS regressions exercise `ScreenView` with touch events, the real Metal delegate after a decoded frame, immediate keyboard command ordering, and actual WebRTC gathering. **All 16 iOS tests passed** in [CI for bb0756a](https://github.com/mikwiseman/wai-remote/actions/runs/41282584679), together with the Mac, gateway race checks and browser build. Two earlier local simulator attempts failed to launch or timed out under severe host load; their baseline test products were preserved.
+
+The opt-in `WAI_IOS_TRANSPORT_BENCH=1` test sends 24 Unicode payloads through the production iOS `ViewerTransport` while decoding five seconds of synthetic video. All 24 echoes returned byte-for-byte, exactly once and in order. Local send-to-echo p50/p95 was **1.32/11.70 ms**. The decoder received 135 of 150 submitted frames; its first frame arrived after 544 ms and subsequent frame-gap p50/p95 was 32.99/37.34 ms. This is same-process WebRTC on a hosted iPhone simulator, not a real iPhone-to-Mac network or input-to-visible-text measurement. It does not establish that the user's network latency is resolved. The JSON measurement is retained in the test-result artifact.
+
+Research: [WebRTC's playout-delay guidance](https://webrtc.googlesource.com/src/+/refs/heads/main/docs/native-code/rtp-hdrext/playout-delay/README.md) distinguishes interactive latency from playback smoothing; [the Metal renderer](https://webrtc.googlesource.com/src/+/refs/heads/main/sdk/objc/components/renderer/metal/RTCMTLRenderer.mm) sets its initial display cadence. The existing Mac experiments below rejected zero-delay playback because freezes worsened. No new iOS jitter-buffer tuning or speculative keyboard batching was added without network measurements.
+
 Work in progress, 15 October 2026. Video comparisons use the user's MacBook and **waiMini**. The update requested for Mark's Mac is a separate installation task.
 
 ## Peer to peer through Moscow STUN, 27 October

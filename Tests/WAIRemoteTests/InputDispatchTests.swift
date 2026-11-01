@@ -5,6 +5,30 @@ import XCTest
 
 @MainActor
 final class InputDispatchTests: XCTestCase {
+    func testFractionalScrollKeepsTheWholeGestureDistanceOnBothAxes() {
+        var scroll = PixelScrollAccumulator()
+        var x: Int32 = 0, y: Int32 = 0
+        for _ in 0..<20 {
+            let step = scroll.consume(x: 0.25, y: -0.125)
+            x += step.x; y += step.y
+        }
+        XCTAssertEqual(x, -5, "Slow touch motion must accumulate instead of disappearing at every event.")
+        XCTAssertEqual(y, 2)
+        let rest = scroll.consume(x: 0, y: -0.5)
+        XCTAssertEqual(rest.y, 1, "The remainder belongs to the same gesture.")
+        scroll = PixelScrollAccumulator()
+        XCTAssertEqual(scroll.consume(x: 0, y: -0.5).y, 0, "Changing targets or releasing input clears the old remainder.")
+    }
+
+    func testFractionalScrollDirectionChangesCancelTheUnsentRemainder() {
+        var scroll = PixelScrollAccumulator()
+        XCTAssertEqual(scroll.consume(x: 0.75, y: -0.75).x, 0)
+        let reversed = scroll.consume(x: -0.5, y: 0.5)
+        XCTAssertEqual(reversed.x, 0); XCTAssertEqual(reversed.y, 0)
+        let next = scroll.consume(x: 0.75, y: -0.75)
+        XCTAssertEqual(next.x, -1); XCTAssertEqual(next.y, 1)
+    }
+
     func testPointerFloodKeepsLatestPositionWithoutDelayingClicksOrCrossingReleases() async {
         let delivery = InputDeliveryQueue()
         let entered = expectation(description: "Input temporarily busy")

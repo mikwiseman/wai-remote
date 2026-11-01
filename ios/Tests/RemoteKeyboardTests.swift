@@ -1,4 +1,5 @@
 import XCTest
+import RemoteCore
 @testable import WAI_Remote
 
 final class RemoteKeyboardTests: XCTestCase {
@@ -29,5 +30,42 @@ final class RemoteKeyboardTests: XCTestCase {
         XCTAssertNil(code("é"))
         XCTAssertNil(code("!"))
         XCTAssertNil(code("١"))
+    }
+
+    @MainActor
+    func testTypingSendsEachCharacterBeforeReturningWithoutWaitingForHost() {
+        let model = PhoneModel()
+        let host = SessionMachine(surface: Surface(id: "keyboard", revision: 1, width: 1920, height: 1080))
+        model.acceptDemo(host.state)
+        model.connected = true; model.receivedFrame = true
+        var sent: [WireMessage] = []
+        model.onTransmitForTesting = { sent.append($0) }
+        let keyboard = KeyCatcher(model: model, modifiers: KeyboardModifiers())
+        let text = ["a", "Я", "👨‍👩‍👧‍👦", "é"]
+        for (index, character) in text.enumerated() {
+            keyboard.insertText(character)
+            XCTAssertEqual(sent.count, index + 1, "Typing must not wait for a timer or acknowledgement")
+            XCTAssertEqual(sent.last?.text, character)
+        }
+        XCTAssertEqual(sent.map(\.type), Array(repeating: "text", count: text.count))
+        XCTAssertEqual(sent.map(\.sequence), Array(0..<text.count))
+    }
+
+    @MainActor
+    func testTypingBackspaceAndReturnKeepTheirOrder() {
+        let model = PhoneModel()
+        model.acceptDemo(SessionMachine(surface: Surface(id: "keyboard", revision: 1, width: 1920, height: 1080)).state)
+        model.connected = true; model.receivedFrame = true
+        var sent: [WireMessage] = []
+        model.onTransmitForTesting = { sent.append($0) }
+        let keyboard = KeyCatcher(model: model, modifiers: KeyboardModifiers())
+        keyboard.insertText("a")
+        keyboard.deleteBackward()
+        keyboard.insertText("б")
+        keyboard.insertText("\n")
+        XCTAssertEqual(sent.map(\.type), ["text", "key", "key", "text", "key", "key"])
+        XCTAssertEqual(sent.compactMap(\.text), ["a", "б"])
+        XCTAssertEqual(sent.compactMap(\.key), ["Backspace", "Backspace", "Enter", "Enter"])
+        XCTAssertEqual(sent.compactMap(\.action), ["down", "up", "down", "up"])
     }
 }

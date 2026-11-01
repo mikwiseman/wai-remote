@@ -115,7 +115,8 @@ struct WindowInputTarget: Equatable {
         var primed = false
         // An active app needs no synthetic activation. An open menu or popover is
         // already tracking, and an off-window primer would dismiss it first.
-        if down && delivery.frontmostPID() != pid { delivery.prepare(self) }
+        let backgroundDown = down && delivery.frontmostPID() != pid
+        if backgroundDown { delivery.prepare(self) }
         if down && delivery.frontmostPID() != pid && !delivery.transient(self, event.location) {
             primed = true
             // Chromium also requires a complete background activation gesture.
@@ -147,7 +148,10 @@ struct WindowInputTarget: Equatable {
             if address(move, frame: frame) { delivery.pointer(pid, move) }
         }
         guard permitted() else { return .cancelled }
-        guard delivery.frame(self) != nil else { return .frameGone }
+        // Only background activation above can block. Ordinary motion, scrolling
+        // and typing already validated this window; another WindowServer round
+        // trip here adds latency to every event without intervening work.
+        if backgroundDown, delivery.frame(self) == nil { return .frameGone }
         switch event.type {
         case .keyDown, .keyUp, .flagsChanged:
             // AppKit and Chromium perform menu key equivalents only for the
