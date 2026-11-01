@@ -61,10 +61,26 @@ final class WindowActivationTests: XCTestCase {
         let diagnostics = compilerOutput.fileHandleForReading.readDataToEndOfFile()
         compiler.waitUntilExit()
         XCTAssertEqual(compiler.terminationStatus, 0, String(decoding: diagnostics, as: UTF8.self))
+        guard compiler.terminationStatus == 0 else { return }
+        var childLogs: [(URL, FileHandle)] = []
+        func capture(_ child: Process, name: String) throws {
+            let url = directory.appendingPathComponent(name + ".log")
+            FileManager.default.createFile(atPath: url.path, contents: nil)
+            let file = try FileHandle(forWritingTo: url)
+            child.standardOutput = file; child.standardError = file
+            childLogs.append((url, file))
+        }
+        defer {
+            for (url, file) in childLogs {
+                try? file.close()
+                if let log = try? String(contentsOf: url, encoding: .utf8) { print("OWNED_CHILD \(url.lastPathComponent): \(log)") }
+            }
+        }
         let metadata = directory.appendingPathComponent("state.json")
         let process = Process()
         process.executableURL = binary
         process.arguments = [metadata.path, viewMode ? "view" : "button"] + (backgroundCaller ? ["regular"] : [])
+        try capture(process, name: "target")
         try process.run()
         var foreground: Process?
         defer {
@@ -89,25 +105,27 @@ final class WindowActivationTests: XCTestCase {
                 guard let id = ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value, [rear, front].contains(id) else { return nil }; return id
             }
         }
-        let visible = Date().addingTimeInterval(3)
-        while order() != [front, rear], Date() < visible { runApplication(for: 0.05) }
-        XCTAssertEqual(order(), [front, rear])
         if backgroundCaller {
             let foregroundBinary = try bundle("Foreground")
             try FileManager.default.copyItem(at: binary, to: foregroundBinary)
             let owner = Process()
             owner.executableURL = foregroundBinary
-            owner.arguments = [directory.appendingPathComponent("foreground.json").path, "foreground"]
+            let foregroundReady = directory.appendingPathComponent("foreground.json")
+            owner.arguments = [foregroundReady.path, "foreground"]
+            try capture(owner, name: "foreground")
             try owner.run(); foreground = owner
             let activated = Date().addingTimeInterval(3)
-            while NSWorkspace.shared.frontmostApplication?.processIdentifier != owner.processIdentifier, Date() < activated {
+            while (!FileManager.default.fileExists(atPath: foregroundReady.path) || NSWorkspace.shared.frontmostApplication?.processIdentifier != owner.processIdentifier), Date() < activated {
                 runApplication(for: 0.05)
             }
-            guard NSWorkspace.shared.frontmostApplication?.processIdentifier == owner.processIdentifier else {
+            guard FileManager.default.fileExists(atPath: foregroundReady.path), NSWorkspace.shared.frontmostApplication?.processIdentifier == owner.processIdentifier else {
                 XCTFail("A third owned process must hold activation before testing a background caller")
                 return
             }
-            XCTAssertFalse(NSApp.isActive)
+            // Scoped focus records can leave AppKit's internal active flag set.
+            // WindowServer's distinct foreground owner defines this precondition.
+            XCTAssertEqual(NSApp.activationPolicy(), .regular)
+            XCTAssertNotEqual(NSWorkspace.shared.frontmostApplication?.processIdentifier, getpid())
             XCTAssertNotEqual(owner.processIdentifier, getpid())
             XCTAssertNotEqual(owner.processIdentifier, process.processIdentifier)
             let foregroundID = try XCTUnwrap(NSRunningApplication(processIdentifier: owner.processIdentifier)?.bundleIdentifier)
@@ -119,9 +137,16 @@ final class WindowActivationTests: XCTestCase {
                 // time. Do not rely on activation immediately after launch.
                 runApplication(for: 10)
                 XCTAssertEqual(NSWorkspace.shared.frontmostApplication?.processIdentifier, owner.processIdentifier)
-                XCTAssertFalse(NSApp.isActive)
+                XCTAssertNotEqual(NSWorkspace.shared.frontmostApplication?.processIdentifier, getpid())
             }
         }
+        // Configure the fixture's own ordering after app launch/activation has
+        // settled. This uses no AX query or input and keeps the real click cold.
+        try Data().write(to: URL(fileURLWithPath: metadata.path + ".arrange"), options: .atomic)
+        let visible = Date().addingTimeInterval(3)
+        while try state()["arranged"]?.boolValue != true || order() != [front, rear], Date() < visible { runApplication(for: 0.05) }
+        XCTAssertEqual(try state()["arranged"]?.boolValue, true)
+        XCTAssertEqual(order(), [front, rear])
         XCTAssertNotEqual(NSWorkspace.shared.frontmostApplication?.processIdentifier, process.processIdentifier)
         let point = CGPoint(x: try XCTUnwrap(initial["x"]).doubleValue, y: try XCTUnwrap(initial["y"]).doubleValue)
         XCTAssertEqual(DesktopInputTarget.target(at: point, excluding: [])?.windowID, rear)
@@ -191,14 +216,24 @@ import Darwin
 let metadata = URL(fileURLWithPath: CommandLine.arguments[1])
 let viewMode = CommandLine.arguments[2] == "view"
 let app = NSApplication.shared
+DispatchQueue.global().asyncAfter(deadline: .now() + 30) { exit(2) }
+func trace(_ phase: String) {
+    FileHandle.standardError.write(Data("phase=\(phase) pid=\(getpid()) active=\(app.isActive)\n".utf8))
+}
 if CommandLine.arguments[2] == "foreground" {
     app.setActivationPolicy(.regular); app.finishLaunching()
     let window = NSWindow(contentRect: CGRect(x: 700, y: 80, width: 260, height: 140), styleMask: [.titled, .closable], backing: .buffered, defer: false)
     window.title = "WAI Remote owned foreground fixture"; window.isReleasedWhenClosed = false
     window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-    window.makeKeyAndOrderFront(nil); app.activate(ignoringOtherApps: true)
-    let timer = Timer(timeInterval: 30, repeats: false) { _ in app.terminate(nil) }
-    RunLoop.main.add(timer, forMode: .common); app.run(); exit(0)
+    DispatchQueue.main.async {
+        window.makeKeyAndOrderFront(nil); app.activate(ignoringOtherApps: true)
+        let ready = Timer(timeInterval: 0.05, repeats: true) { timer in
+            guard app.isActive, NSWorkspace.shared.frontmostApplication?.processIdentifier == getpid() else { return }
+            trace("foreground-ready"); try! Data().write(to: metadata, options: .atomic); timer.invalidate()
+        }
+        RunLoop.main.add(ready, forMode: .common)
+    }
+    app.run(); exit(0)
 }
 app.setActivationPolicy(CommandLine.arguments.contains("regular") ? .regular : .accessory)
 app.finishLaunching()
@@ -231,16 +266,20 @@ else {
     target = button
 }
 rear.contentView?.addSubview(target)
-rear.orderFrontRegardless(); front.orderFrontRegardless()
+var arranged = false
 func record() {
     let local = target.convert(CGPoint(x: target.bounds.midX, y: target.bounds.midY), to: nil)
     let screen = rear.convertPoint(toScreen: local)
-    try! JSONSerialization.data(withJSONObject: ["pid": Int(getpid()), "rear": rear.windowNumber, "front": front.windowNumber, "x": screen.x, "y": CGDisplayBounds(CGMainDisplayID()).maxY - screen.y, "presses": presses.count]).write(to: metadata, options: .atomic)
+    try! JSONSerialization.data(withJSONObject: ["pid": Int(getpid()), "rear": rear.windowNumber, "front": front.windowNumber, "x": screen.x, "y": CGDisplayBounds(CGMainDisplayID()).maxY - screen.y, "presses": presses.count, "arranged": arranged]).write(to: metadata, options: .atomic)
 }
 presses.changed = record
-record()
-let timer = Timer(timeInterval: 30, repeats: false) { _ in app.terminate(nil) }
-RunLoop.main.add(timer, forMode: .common)
+DispatchQueue.main.async { rear.orderFrontRegardless(); front.orderFrontRegardless(); trace("created"); record() }
+let arrange = Timer(timeInterval: 0.05, repeats: true) { timer in
+    guard FileManager.default.fileExists(atPath: metadata.path + ".arrange") else { return }
+    rear.orderFrontRegardless(); front.orderFrontRegardless()
+    arranged = true; trace("arranged"); record(); timer.invalidate()
+}
+RunLoop.main.add(arrange, forMode: .common)
 app.run()
 """#
 }
