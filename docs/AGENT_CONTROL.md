@@ -1,17 +1,18 @@
 # Codex control through WAI Remote
 
-Open WAI Remote on the MacBook. Codex can use the repository's Python 3 CLI without controlling the MacBook's pointer or clipboard:
+Open WAI Remote on the MacBook. Its Python 3 CLI is included in the installed app at `/Applications/WAI Remote.app/Contents/Resources/wai-remote-agent.py`. The source checkout also provides `scripts/wai-remote-agent.py`. Codex can use either without moving the MacBook's pointer or using its clipboard:
 
 ```sh
-python3 scripts/wai-remote-agent.py status
-python3 scripts/wai-remote-agent.py connect SAVED_COMPUTER_ID
-python3 scripts/wai-remote-agent.py screenshot --output /tmp/mini-before.png
-python3 scripts/wai-remote-agent.py click --snapshot SNAPSHOT_ID --x 0.5 --y 0.5
-python3 scripts/wai-remote-agent.py text --snapshot SNAPSHOT_ID 'Exact text — Привет!'
-python3 scripts/wai-remote-agent.py key --snapshot SNAPSHOT_ID Enter
-python3 scripts/wai-remote-agent.py scroll --snapshot SNAPSHOT_ID --x 0.5 --y 0.5 --dy 160
-python3 scripts/wai-remote-agent.py screenshot --output /tmp/mini-after.png
-python3 scripts/wai-remote-agent.py disconnect
+agent='/Applications/WAI Remote.app/Contents/Resources/wai-remote-agent.py'
+python3 "$agent" status
+python3 "$agent" connect SAVED_COMPUTER_ID
+python3 "$agent" screenshot --output /tmp/mini-before.png
+python3 "$agent" click --snapshot SNAPSHOT_ID --x 0.5 --y 0.5
+python3 "$agent" text --snapshot SNAPSHOT_ID 'Exact text — Привет!'
+python3 "$agent" key --snapshot SNAPSHOT_ID Enter
+python3 "$agent" scroll --snapshot SNAPSHOT_ID --x 0.5 --y 0.5 --dy 160
+python3 "$agent" screenshot --output /tmp/mini-after.png
+python3 "$agent" disconnect
 ```
 
 Every command returns JSON. `status` lists saved computer IDs without invitations or credentials. Connecting opens the usual viewer window using an existing saved computer and the ordinary WAI connection; it cannot approve a device, reopen access, or replace an active session. Wait for `connected: true` and `canControl: true` before input. Subsequent agent commands do not need that window to have keyboard focus.
