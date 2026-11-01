@@ -69,7 +69,7 @@ final class PhoneScrollStream {
             guard phase == .dragging, let endTime, pending == .zero else { return }
             let hadBegan = began
             phase = hadBegan && timestamp - endTime <= 0.08 && hypot(velocity.x, velocity.y) >= 40 ? .decelerating : .idle
-            lastTick = timestamp; samples = []; began = false
+            lastTick = max(timestamp, endTime); samples = []; began = false
             if hadBegan { emit(Output(delta: .zero, scrollPhase: "ended", momentumPhase: nil)) }
         case .decelerating:
             let elapsed = timestamp - lastTick

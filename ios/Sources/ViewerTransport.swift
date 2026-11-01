@@ -49,6 +49,11 @@ final class ViewerTransport: NSObject, RTCPeerConnectionDelegate, RTCDataChannel
         let callback = completion; completion = nil; callback?(result)
     }
     var bufferedAmount: UInt64 { closed ? 0 : channel.bufferedAmount }
+    #if DEBUG
+    func statistics(completion: @escaping (RTCStatisticsReport) -> Void) {
+        peer.statistics { report in DispatchQueue.main.async { completion(report) } }
+    }
+    #endif
     @discardableResult func send(_ data: Data) -> Bool {
         guard !closed, channel.readyState == .open, channel.bufferedAmount < 128_000, data.count <= 32_768 else { return false }
         return channel.sendData(RTCDataBuffer(data: data, isBinary: false))

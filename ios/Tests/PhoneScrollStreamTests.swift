@@ -115,4 +115,24 @@ final class PhoneScrollStreamTests: XCTestCase {
         XCTAssertEqual(output.last?.momentumPhase, "ended")
         XCTAssertFalse(stream.isActive)
     }
+
+    func testDelayedEndDoesNotStartMomentumBeforeTheTouchEnded() throws {
+        var ready = false
+        var output: [PhoneScrollStream.Output] = []
+        let stream = PhoneScrollStream(canSend: { ready }) { output.append($0) }
+        stream.begin(at: 100)
+        stream.move(by: CGPoint(x: 0, y: 20), at: 100.02)
+        stream.end(at: 100.03)
+        ready = true
+        // The display timestamp can precede a touch delivered in the same frame.
+        stream.tick(at: 100.025)
+        stream.tick(at: 100.04)
+        let first = try XCTUnwrap(output.first { $0.momentumPhase == "began" })
+        let decay = -log(Double(UIScrollView.DecelerationRate.normal.rawValue)) * 1000
+        XCTAssertEqual(Double(first.delta.y), 1000 * (1 - exp(-decay * 0.01)) / decay, accuracy: 0.00001)
+        let count = output.count
+        stream.tick(at: 100.035)
+        XCTAssertEqual(output.count, count, "An older display timestamp must not integrate motion twice.")
+        stream.cancel()
+    }
 }
