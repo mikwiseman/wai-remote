@@ -15,6 +15,12 @@ jobs:
         with:
           persist-credentials: false
       - run: swift test
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: agent-transport-proof
+          path: .runtime/agent-integration-*/*.png
+          retention-days: 7
   ios:
     runs-on: macos-latest
     timeout-minutes: 15
