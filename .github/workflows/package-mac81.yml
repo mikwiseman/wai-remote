@@ -17,6 +17,8 @@ jobs:
         with:
           ref: b799faefe011d254eac491769231bb38e1087bc0
           persist-credentials: false
+      - name: Install the existing build script's search dependency
+        run: brew install ripgrep
       - name: Verify the exact source snapshot
         shell: bash
         run: |
