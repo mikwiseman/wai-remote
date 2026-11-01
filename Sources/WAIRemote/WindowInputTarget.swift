@@ -4,14 +4,6 @@ import Darwin
 /// Window addressing follows KWWKComputerUseCore and cua-driver (MIT).
 /// See licenses/KWWK.txt and licenses/cua-driver.txt. No global-input fallback.
 struct WindowInputTarget: Equatable {
-    #if DEBUG
-    static var inputTrace: ((WindowInputTarget, String) -> Void)?
-    #endif
-    func traceInput(_ message: @autoclosure () -> String) {
-        #if DEBUG
-        Self.inputTrace?(self, message())
-        #endif
-    }
     let pid: pid_t
     let windowID: CGWindowID
     struct KeyboardReceiver: Equatable { let pid: pid_t; let windowID: CGWindowID }
@@ -34,6 +26,8 @@ struct WindowInputTarget: Equatable {
     struct Button {
         let frame: CGRect
         let requiresMainThread: Bool
+        var isMenuItem = false
+        var menuDocumentWindowID: CGWindowID? = nil
         let action: () -> Bool
         func press(if current: @escaping () -> Bool) -> Bool {
             let perform = { current() && action() }
@@ -308,15 +302,14 @@ struct WindowInputTarget: Equatable {
     /// background click. Their standard Press action does not need that pointer.
     /// Foreign-app AX runs on the input queue. Same-process AX calls bypass IPC,
     /// so inspect our own AppKit/SwiftUI views on their main thread.
-    func button(at point: CGPoint) -> Button? {
+    func button(at point: CGPoint, includingDisabledMenuItems: Bool = false, excluding: Set<CGWindowID> = []) -> Button? {
         if pid == ProcessInfo.processInfo.processIdentifier && !Thread.isMainThread {
-            return Self.onMainRunLoop { self.button(at: point) }
+            return Self.onMainRunLoop { self.button(at: point, includingDisabledMenuItems: includingDisabledMenuItems, excluding: excluding) }
         }
         let deadline = ProcessInfo.processInfo.systemUptime + 0.05
-        guard let frame, frame.contains(point), let hit = element(at: point, deadline: deadline) else { traceInput("lookup no-hit point=\(point)"); return nil }
-        let result = button(climbingFrom: hit, at: point, deadline: deadline) ?? button(inHitSheet: hit, at: point, deadline: deadline)
-        traceInput("lookup done found=\(result != nil) elapsedMs=\((ProcessInfo.processInfo.systemUptime - deadline + 0.05) * 1000)")
-        return result
+        guard let frame, frame.contains(point), let hit = element(at: point, deadline: deadline) else { return nil }
+        return button(climbingFrom: hit, at: point, deadline: deadline, includingDisabledMenuItems: includingDisabledMenuItems, excluding: excluding) ??
+            button(inHitSheet: hit, at: point, deadline: deadline)
     }
     /// Save panels bridge a separate process. Their app-scoped hit test can stop
     /// at the sheet, and their proxy buttons omit AXTopLevelUIElement entirely.
@@ -383,31 +376,76 @@ struct WindowInputTarget: Equatable {
         var hit: AXUIElement?
         return AXUIElementCopyElementAtPosition(app, Float(point.x), Float(point.y), &hit) == .success ? hit : nil
     }
+    /// AppKit's menu items can retain their parent document's AX window ID
+    /// after WindowServer creates a separate menu window. Accept only the hit
+    /// menu's exact geometry and process, never another overlapping window.
+    private func ownsMenuItem(_ item: AXUIElement, at point: CGPoint, deadline: TimeInterval, excluding: Set<CGWindowID>) -> Bool {
+        // A supplied/stale AX item cannot authorize a different window that now
+        // covers the menu, even if that window has the same owner and bounds.
+        guard var hit = element(at: point, deadline: deadline) else { return false }
+        for _ in 0..<4 {
+            if CFEqual(hit, item) { break }
+            guard let parent = Self.axValues(hit, [kAXParentAttribute], deadline: deadline)?.first,
+                  CFGetTypeID(parent) == AXUIElementGetTypeID() else { return false }
+            hit = parent as! AXUIElement
+        }
+        guard CFEqual(hit, item) else { return false }
+        var element = item
+        for _ in 0..<4 {
+            guard let values = Self.axValues(element, [kAXRoleAttribute, kAXPositionAttribute, kAXSizeAttribute, kAXParentAttribute], deadline: deadline) else { return false }
+            if values[0] as? String == kAXMenuRole {
+                var owner: pid_t = 0
+                guard AXUIElementGetPid(element, &owner) == .success, owner == pid,
+                      let menuFrame = Self.rect(values[1], values[2]), menuFrame.contains(point),
+                      frame == menuFrame, ProcessInfo.processInfo.systemUptime < deadline else { return false }
+                return DesktopInputTarget.target(at: point, excluding: excluding) == self
+            }
+            guard CFGetTypeID(values[3]) == AXUIElementGetTypeID() else { return false }
+            element = values[3] as! AXUIElement
+        }
+        return false
+    }
     /// The hit may be a title or image inside a button or menu item. Climb a few
     /// parents to an enabled control of this window; otherwise use ordinary events.
-    func button(climbingFrom hit: AXUIElement, at point: CGPoint, deadline: TimeInterval = ProcessInfo.processInfo.systemUptime + 0.05) -> Button? {
+    func button(climbingFrom hit: AXUIElement, at point: CGPoint, deadline: TimeInterval = ProcessInfo.processInfo.systemUptime + 0.05,
+                includingDisabledMenuItems: Bool = false, excluding: Set<CGWindowID> = []) -> Button? {
         let names = [kAXRoleAttribute, kAXPositionAttribute, kAXSizeAttribute, kAXEnabledAttribute, kAXTopLevelUIElementAttribute, kAXParentAttribute]
         var element = hit
         for _ in 0...3 {
-            guard let values = Self.axValues(element, names, deadline: deadline) else { traceInput("lookup attrs-failed remaining=\(deadline - ProcessInfo.processInfo.systemUptime)"); return nil }
-            traceInput("lookup role=\(values[0]) enabled=\(values[3]) bounds=\(String(describing: Self.rect(values[1], values[2]))) point=\(point)")
+            guard let values = Self.axValues(element, names, deadline: deadline) else { return nil }
             // AXWindow deliberately returns a sheet's parent document. The top
             // level element preserves the sheet's own WindowServer address.
-            if [kAXButtonRole, kAXMenuItemRole].contains(values[0] as? String ?? ""), values[3] as? Bool == true, let bounds = Self.rect(values[1], values[2]),
-               bounds.contains(point) {
+            let isMenuItem = values[0] as? String == kAXMenuItemRole
+            let enabled = values[3] as? Bool == true
+            if [kAXButtonRole, kAXMenuItemRole].contains(values[0] as? String ?? ""),
+               enabled || isMenuItem && includingDisabledMenuItems,
+               let bounds = Self.rect(values[1], values[2]), bounds.contains(point) {
                 var actions: CFArray?
-                guard ownsButton(element, topLevel: values[4], deadline: deadline) else { return nil }
+                guard ownsButton(element, topLevel: values[4], deadline: deadline) ||
+                        values[0] as? String == kAXMenuItemRole && ownsMenuItem(element, at: point, deadline: deadline, excluding: excluding) else { return nil }
                 let remaining = deadline - ProcessInfo.processInfo.systemUptime
                 guard remaining > 0 else { return nil }
                 AXUIElementSetMessagingTimeout(element, Float(remaining))
-                guard AXUIElementCopyActionNames(element, &actions) == .success,
-                      (actions as? [String])?.contains(kAXPressAction) == true else { return nil }
+                if enabled {
+                    guard AXUIElementCopyActionNames(element, &actions) == .success,
+                          (actions as? [String])?.contains(kAXPressAction) == true else { return nil }
+                }
                 let pressed = element
-                return Button(frame: bounds, requiresMainThread: pid == ProcessInfo.processInfo.processIdentifier, action: {
+                var menuDocumentWindowID: CGWindowID?
+                if isMenuItem, CFGetTypeID(values[4]) == AXUIElementGetTypeID() {
+                    let topLevel = values[4] as! AXUIElement
+                    var owner: pid_t = 0
+                    if AXUIElementGetPid(topLevel, &owner) == .success, owner == pid {
+                        menuDocumentWindowID = Self.axWindowID(topLevel, deadline: deadline)
+                    }
+                }
+                return Button(frame: bounds, requiresMainThread: pid == ProcessInfo.processInfo.processIdentifier,
+                              isMenuItem: isMenuItem, menuDocumentWindowID: menuDocumentWindowID, action: {
+                    // Disabled menu taps keep their document provenance but must
+                    // never issue AXPress or fall through to pointer delivery.
+                    guard enabled else { return false }
                     AXUIElementSetMessagingTimeout(pressed, 0.25)
-                    traceInput("Press begin")
                     let result = AXUIElementPerformAction(pressed, kAXPressAction as CFString)
-                    traceInput("Press end result=\(result.rawValue)")
                     // Closing an XPC save panel can tear down its reply channel.
                     // The action was submitted; never replay a pointer click.
                     return result == .success || result == .cannotComplete

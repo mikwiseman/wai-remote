@@ -178,7 +178,7 @@ private final class InjectedEvents {
                     return
                 }
             }
-            let activating = independentPointer && action == "down" && buttons.isEmpty && windowButton == nil
+            var activating = independentPointer && action == "down" && buttons.isEmpty && windowButton == nil
             if action == "down", buttons.isEmpty, windowButton == nil {
                 buttonDestination = destination
                 if lastClickDestination != destination { clickSequence.reset() }
@@ -192,7 +192,13 @@ private final class InjectedEvents {
             if action == "down", b == 0 {
                 let eligible = keys.isEmpty && buttons.isEmpty && (m.modifiers ?? []).isEmpty
                 let lookupStarted = ProcessInfo.processInfo.systemUptime
-                let pressed = eligible ? destination.window?.button(at: p) : nil
+                let control = eligible || independentPointer ?
+                    destination.window?.button(at: p, includingDisabledMenuItems: true, excluding: excludedWindows) : nil
+                let pressed = eligible ? control : nil
+                if independentPointer, let control, control.isMenuItem {
+                    desktop.preserveKeyboardTargetForMenu(documentWindowID: control.menuDocumentWindowID)
+                    activating = false
+                }
                 if PerformanceLog.enabled {
                     PerformanceLog.record("input-button-lookup", ["eligible": eligible, "found": pressed != nil,
                         "heldKeys": keys.count, "heldButtons": buttons.count, "modifiers": (m.modifiers ?? []).count,

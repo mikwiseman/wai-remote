@@ -85,4 +85,43 @@ final class DesktopInputTests: XCTestCase {
         routing.reset()
         XCTAssertNil(routing.keyboardTarget)
     }
+
+    func testMenuSelectionPreservesItsProvenDocumentWhileItsGestureStaysPinned() {
+        var routing = DesktopInputTarget()
+        let menu = WindowInputTarget(pid: first.pid, windowID: 33)
+        _ = routing.pointer(action: "down", button: 0, at: point, hitTest: { _ in self.first })
+        _ = routing.pointer(action: "up", button: 0, at: point, hitTest: { _ in self.first })
+        _ = routing.pointer(action: "down", button: 0, at: point, hitTest: { _ in menu })
+        routing.preserveKeyboardTargetForMenu(documentWindowID: first.windowID)
+        XCTAssertEqual(routing.keyboardTarget, first)
+        XCTAssertEqual(routing.pointer(action: "move", button: 0, at: point, hitTest: { _ in self.second }), menu)
+        XCTAssertEqual(routing.pointer(action: "up", button: 0, at: point, hitTest: { _ in self.second }), menu)
+        XCTAssertEqual(routing.keyboardTarget, first, "Closing the menu must not strand subsequent typing on its transient window.")
+    }
+
+    func testMenuCannotReuseAnUnrelatedOrUnprovenKeyboardTarget() {
+        let cases: [(pid_t, CGWindowID?)] = [(first.pid, 99), (second.pid, first.windowID), (first.pid, nil)]
+        for (owner, document) in cases {
+            var routing = DesktopInputTarget()
+            _ = routing.pointer(action: "down", button: 0, at: point, hitTest: { _ in self.first })
+            _ = routing.pointer(action: "up", button: 0, at: point, hitTest: { _ in self.first })
+            _ = routing.pointer(action: "down", button: 0, at: point, hitTest: { _ in WindowInputTarget(pid: owner, windowID: 33) })
+            routing.preserveKeyboardTargetForMenu(documentWindowID: document)
+            XCTAssertNil(routing.keyboardTarget, "A same-app different document, foreign app, or missing parent proof cannot redirect typing.")
+        }
+    }
+
+    func testMenuOnlySessionAndResetCannotInventADocumentTarget() {
+        var routing = DesktopInputTarget()
+        let menu = WindowInputTarget(pid: first.pid, windowID: 33)
+        _ = routing.pointer(action: "down", button: 0, at: point, hitTest: { _ in menu })
+        routing.preserveKeyboardTargetForMenu(documentWindowID: first.windowID)
+        XCTAssertNil(routing.keyboardTarget)
+        _ = routing.pointer(action: "up", button: 0, at: point, hitTest: { _ in menu })
+        _ = routing.pointer(action: "down", button: 0, at: point, hitTest: { _ in self.first })
+        routing.reset()
+        _ = routing.pointer(action: "down", button: 0, at: point, hitTest: { _ in menu })
+        routing.preserveKeyboardTargetForMenu(documentWindowID: first.windowID)
+        XCTAssertNil(routing.keyboardTarget)
+    }
 }

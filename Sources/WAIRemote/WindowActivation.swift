@@ -11,9 +11,7 @@ extension WindowInputTarget {
         guard current(), frame != nil else { return false }
         // Re-raising an active window can dismiss its tracking menu before the
         // clicked item receives input. It already has the intended activation.
-        let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier
-        traceInput("activate frontmost=\(frontmost ?? 0) ownActive=\(NSApp.isActive)")
-        if frontmost == pid, isTransient(at: point) { traceInput("activate skipped-transient"); return current() }
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid, isTransient(at: point) { return current() }
         let deadline = ProcessInfo.processInfo.systemUptime + 0.05
         let app = AXUIElementCreateApplication(pid)
         guard let windows = Self.axValues(app, [kAXWindowsAttribute], deadline: deadline)?.first as? [AXUIElement] else { return false }
@@ -27,14 +25,12 @@ extension WindowInputTarget {
                 AXUIElementSetMessagingTimeout(window, 0.05)
                 _ = AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
                 guard current(), frame != nil else { return false }
-                traceInput("activate requested")
                 let activated = application.activate(options: [])
                 guard current(), frame != nil else { return false }
                 _ = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
                 if pid == ProcessInfo.processInfo.processIdentifier, current(), frame != nil {
                     NSApp.windows.first { CGWindowID($0.windowNumber) == windowID }?.orderFrontRegardless()
                 }
-                traceInput("activate raised result=\(activated)")
                 return activated
             }
             guard let children = Self.axValues(element, [kAXChildrenAttribute], deadline: deadline)?.first as? [AXUIElement] else { continue }
