@@ -86,8 +86,8 @@ struct WindowInputTarget: Equatable {
         return unsafeBitCast(symbol, to: FocusRecord.self)
     }()
     static var isSupported: Bool { setWindowLocation != nil && postPointer != nil && processNumber != nil && focusRecord != nil }
-    /// Follow only a sheet attached to this window. App-wide focus can point at
-    /// an unrelated document, so it is never a keyboard-routing fallback.
+    /// Follow this window's attached sheet or directly linked remote view.
+    /// App-wide focus can point at an unrelated document and is never a fallback.
     func keyboardDestination(budget: TimeInterval = 0.01) -> WindowInputTarget? {
         if pid == ProcessInfo.processInfo.processIdentifier && !Thread.isMainThread {
             return Self.onMainRunLoop { self.keyboardDestination(budget: budget) }
@@ -126,7 +126,7 @@ struct WindowInputTarget: Equatable {
             guard let children = value(current, kAXChildrenAttribute) as? [AXUIElement] else { return destination }
             let sheets = children.filter { value($0, kAXRoleAttribute) as? String == kAXSheetRole }
             if sheets.isEmpty {
-                if value(current, kAXRoleAttribute) as? String == kAXSheetRole {
+                if [kAXSheetRole, kAXWindowRole].contains(value(current, kAXRoleAttribute) as? String ?? "") {
                     destination.keyboardReceiver = destination.remoteKeyboardReceiver(children: children, deadline: deadline)
                 }
                 return destination
@@ -141,7 +141,7 @@ struct WindowInputTarget: Equatable {
         }
         return nil
     }
-    /// A SavePanel's outer sheet belongs to its app, but keyboard events belong
+    /// A SavePanel's outer sheet/window belongs to its app, but keyboard events belong
     /// to the linked remote view service. Its virtual window is not listed by
     /// CGWindowList, but WindowServer still knows its owner. Keep geometry and
     /// validation on the outer sheet and resolve only its linked child window.
