@@ -6,6 +6,38 @@ import XCTest
 
 @MainActor
 final class SignalingTests: XCTestCase {
+    func testGatewayReportsSendFailureWhileActive() throws {
+        try checkCancelledGatewaySend(stopping: false)
+    }
+    func testGatewayDoesNotReportPendingSendFailureAfterStop() throws {
+        try checkCancelledGatewaySend(stopping: true)
+    }
+    private func checkCancelledGatewaySend(stopping: Bool) throws {
+        let gateway = try TestGateway()
+        defer { gateway.stop() }
+        let signal = Signaling(identity: DeviceIdentity())
+        defer { signal.close() }
+        let ready = expectation(description: "Gateway connection is ready")
+        signal.onReady = { _ in ready.fulfill() }
+        signal.onFailure = { XCTFail($0) }
+        signal.connect(url: try start(gateway))
+        wait(for: [ready], timeout: 2)
+        let connection = try XCTUnwrap(gateway.connections.first)
+        var failures: [String] = []
+        gateway.onFailure = { failures.append($0) }
+        let completed = expectation(description: "Canceled send completion arrived")
+        // Completion is delivered on the main queue. Stop synchronously before
+        // pumping it, reproducing a pending callback outliving fixture teardown.
+        connection.cancel()
+        gateway.send(["type": "pong"], to: connection) { error in
+            XCTAssertNotNil(error, "The regression must exercise a real failed send")
+            completed.fulfill()
+        }
+        if stopping { gateway.stop() }
+        wait(for: [completed], timeout: 2)
+        XCTAssertEqual(failures.count, stopping ? 0 : 1)
+    }
+
     func testSilentHalfOpenSocketIsReplacedWithoutWaitingForTheTCPTimeout() throws {
         let gateway = try TestGateway()
         defer { gateway.stop() }
@@ -62,9 +94,9 @@ final class SignalingTests: XCTestCase {
     func testExpiredGatewayRegistrationCanBeRetried() throws {
         let gateway = try TestGateway()
         defer { gateway.stop() }
-        gateway.onHello = { connection, number in
-            if number == 1 { TestGateway.reject("identity already connected or capacity reached", connection: connection) }
-            else { TestGateway.send(["type": "ready"], to: connection) }
+        gateway.onHello = { [weak gateway] connection, number in
+            if number == 1 { gateway?.reject("identity already connected or capacity reached", connection: connection) }
+            else { gateway?.send(["type": "ready"], to: connection) }
         }
         let signal = Signaling(identity: DeviceIdentity())
         defer { signal.close() }
@@ -136,17 +168,19 @@ final class SignalingTests: XCTestCase {
     }
 
     func testAuthenticationFailureIsTerminal() throws {
-        try assertTerminalFailure { TestGateway.reject("authentication failed", connection: $0) }
+        try assertTerminalFailure { $0.reject("authentication failed", connection: $1) }
     }
 
     func testInvalidRelayConfigurationIsTerminal() throws {
-        try assertTerminalFailure { TestGateway.send(["type": "ready", "ice": ["expiresAt": 0]], to: $0) }
+        try assertTerminalFailure { $0.send(["type": "ready", "ice": ["expiresAt": 0]], to: $1) }
     }
 
-    private func assertTerminalFailure(_ reject: @escaping (NWConnection) -> Void) throws {
+    private func assertTerminalFailure(_ reject: @escaping (TestGateway, NWConnection) -> Void) throws {
         let gateway = try TestGateway()
         defer { gateway.stop() }
-        gateway.onHello = { connection, _ in reject(connection) }
+        gateway.onHello = { [weak gateway] connection, _ in
+            if let gateway { reject(gateway, connection) }
+        }
         let signal = Signaling(identity: DeviceIdentity())
         defer { signal.close() }
         let failed = expectation(description: "Invalid protocol data closes access")
@@ -180,9 +214,11 @@ private final class TestGateway {
     private let lock = NSLock()
     private var opened: [NWConnection] = []
     private var replies = 0
+    private var stopped = false
     var connections: [NWConnection] { lock.withLock { opened } }
     var pongs: Int { lock.withLock { replies } }
     var onHello: ((NWConnection, Int) -> Void)?
+    var onFailure: (String) -> Void = { XCTFail($0) }
 
     init(queue: DispatchQueue = .main, repliesToPings: Bool = false) throws {
         self.queue = queue
@@ -197,7 +233,7 @@ private final class TestGateway {
             let number = self.lock.withLock { self.opened.append(connection); return self.opened.count }
             connection.stateUpdateHandler = { [weak self, weak connection] state in
                 guard case .ready = state, let self, let connection else { return }
-                Self.send(["type": "challenge", "nonce": "test-challenge"], to: connection)
+                self.send(["type": "challenge", "nonce": "test-challenge"], to: connection)
                 connection.receiveMessage { [weak self, weak connection] data, _, _, error in
                     guard let self, let connection, let data else { XCTFail("Missing host hello: \(String(describing: error))"); return }
                     let hello = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
@@ -207,7 +243,7 @@ private final class TestGateway {
                         data: Data("host\n\(host)\n\(host)\ntest-challenge".utf8),
                         domain: "wai-remote/signal/v1", publicKey: hello?["publicKey"] as? String ?? ""))
                     if let onHello = self.onHello { onHello(connection, number) }
-                    else { Self.send(["type": "ready"], to: connection) }
+                    else { self.send(["type": "ready"], to: connection) }
                     if repliesToPings { self.receivePing(connection) }
                 }
             }
@@ -221,30 +257,40 @@ private final class TestGateway {
             let message = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
             if message?["type"] as? String == "ping" {
                 self.lock.withLock { self.replies += 1 }
-                Self.send(["type": "pong"], to: connection)
+                self.send(["type": "pong"], to: connection)
             }
             self.receivePing(connection)
         }
     }
 
-    static func send(_ object: [String: Any], to connection: NWConnection) {
+    func send(_ object: [String: Any], to connection: NWConnection, completion: ((NWError?) -> Void)? = nil) {
         let metadata = NWProtocolWebSocket.Metadata(opcode: .text)
         let context = NWConnection.ContentContext(identifier: "test-message", metadata: [metadata])
         connection.send(content: try! JSONSerialization.data(withJSONObject: object), contentContext: context,
-            isComplete: true, completion: .contentProcessed { error in
-                if let error { XCTFail("Gateway send failed: \(error)") }
+            isComplete: true, completion: .contentProcessed { [weak self] error in
+                if let error { self?.report("Gateway send failed: \(error)") }
+                completion?(error)
             })
     }
 
-    static func reject(_ reason: String, connection: NWConnection) {
+    func reject(_ reason: String, connection: NWConnection) {
         let metadata = NWProtocolWebSocket.Metadata(opcode: .close)
         metadata.closeCode = .protocolCode(.policyViolation)
         let context = NWConnection.ContentContext(identifier: "test-close", metadata: [metadata])
         connection.send(content: Data(reason.utf8), contentContext: context, isComplete: true,
-            completion: .contentProcessed { error in
-                if let error { XCTFail("Gateway close failed: \(error)") }
+            completion: .contentProcessed { [weak self] error in
+                if let error { self?.report("Gateway close failed: \(error)") }
             })
     }
 
-    func stop() { listener.cancel(); connections.forEach { $0.cancel() } }
+    private func report(_ message: String) {
+        // Canceling the fixture can finish an already submitted send with
+        // ECANCELED. Active-connection errors must still fail the owning test.
+        guard lock.withLock({ !stopped }) else { return }
+        onFailure(message)
+    }
+    func stop() {
+        lock.withLock { stopped = true }
+        listener.cancel(); connections.forEach { $0.cancel() }
+    }
 }
