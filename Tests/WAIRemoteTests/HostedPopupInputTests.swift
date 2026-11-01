@@ -33,16 +33,13 @@ final class HostedPopupInputTests: XCTestCase {
         }
         return nil
     }
-    private func axFrame(_ element: AXUIElement) -> CGRect? {
+    private func center(_ element: AXUIElement) -> CGPoint? {
         guard let position = value(element, kAXPositionAttribute), let size = value(element, kAXSizeAttribute),
               CFGetTypeID(position) == AXValueGetTypeID(), CFGetTypeID(size) == AXValueGetTypeID() else { return nil }
         var origin = CGPoint.zero, extent = CGSize.zero
         guard AXValueGetValue(position as! AXValue, .cgPoint, &origin),
               AXValueGetValue(size as! AXValue, .cgSize, &extent), extent.width > 0, extent.height > 0 else { return nil }
-        return CGRect(origin: origin, size: extent)
-    }
-    private func center(_ element: AXUIElement) -> CGPoint? {
-        axFrame(element).map { CGPoint(x: $0.midX, y: $0.midY) }
+        return CGPoint(x: origin.x + extent.width / 2, y: origin.y + extent.height / 2)
     }
     private func windowID(_ element: AXUIElement) -> CGWindowID? {
         WindowInputTarget.axWindowID(element, deadline: ProcessInfo.processInfo.systemUptime + 0.03)
@@ -85,22 +82,13 @@ final class HostedPopupInputTests: XCTestCase {
         XCTAssertEqual(target.post(event, permitted: { true }, delivery: delivery), .frameGone)
         XCTAssertEqual(delivered, 0, "A stale menu key must never reach its former service or another window")
     }
-    private func diagnoseActionFailure(popup: AXUIElement, item: AXUIElement, menu: WindowInputTarget,
-                                       at point: CGPoint, state: [String: NSNumber]) {
-        let popupFrame = axFrame(popup), itemFrame = axFrame(item)
-        let hit = DesktopInputTarget.target(at: point, excluding: [])
-        let values = WindowInputTarget.axValues(item, [kAXSelectedAttribute, kAXEnabledAttribute, kAXParentAttribute],
-                                               deadline: ProcessInfo.processInfo.systemUptime + 0.1)
-        var parentID: CGWindowID?
-        if let values, CFGetTypeID(values[2]) == AXUIElementGetTypeID() {
-            parentID = windowID(values[2] as! AXUIElement)
-        }
-        print("HOSTED_POPUP_FAILED_STATE uptime=\(ProcessInfo.processInfo.systemUptime) popupFrame=\(String(describing: popupFrame)) itemFrame=\(String(describing: itemFrame)) itemSelected=\(String(describing: values?.first as? Bool)) itemEnabled=\(String(describing: values?[1] as? Bool)) parentWindow=\(parentID ?? 0) menuFrame=\(String(describing: menu.frame)) hit=\(String(describing: hit)) state=\(state)")
-    }
     func testHostedFormatPopupSelectsItsSecondItem() throws { try interact(select: true) }
     func testEscapeDismissesHostedFormatMenuWithoutClosingThePanel() throws { try interact(select: false) }
     func testEscapeDismissesStandaloneHostedFormatMenuWithoutClosingThePanel() throws {
-        try interact(select: false, standalone: true)
+        for trial in 1...3 {
+            print("HOSTED_POPUP_COLD_TRIAL \(trial)")
+            try interact(select: false, standalone: true)
+        }
     }
 
     func testStandaloneHostedMenuCannotBorrowAnUnrelatedWindow() throws {
@@ -109,12 +97,6 @@ final class HostedPopupInputTests: XCTestCase {
 
     private func interact(select: Bool, standalone: Bool = false, inspectScope: Bool = false) throws {
         try XCTSkipUnless(CGPreflightPostEventAccess() && AXIsProcessTrusted(), "Requires existing native input permissions; never requests access")
-        let previousTrace = getenv("WAI_HOSTED_MENU_TRACE").map { String(cString: $0) }
-        setenv("WAI_HOSTED_MENU_TRACE", "1", 1)
-        defer {
-            if let previousTrace { setenv("WAI_HOSTED_MENU_TRACE", previousTrace, 1) }
-            else { unsetenv("WAI_HOSTED_MENU_TRACE") }
-        }
         let initialFailures = testRun?.failureCount ?? 0
         let app = NSApplication.shared, previousPolicy = NSApplication.shared.activationPolicy()
         let previous = NSWorkspace.shared.frontmostApplication
@@ -196,8 +178,7 @@ final class HostedPopupInputTests: XCTestCase {
             XCTAssertEqual(value(outer, kAXRoleAttribute) as? String, kAXWindowRole,
                            "The standalone case must exercise a host window, not an attached AXSheet")
         }
-        let popupFrame = try XCTUnwrap(axFrame(popup)), virtualID = try XCTUnwrap(windowID(popup))
-        let point = CGPoint(x: popupFrame.midX, y: popupFrame.midY)
+        let point = try XCTUnwrap(center(popup)), virtualID = try XCTUnwrap(windowID(popup))
         var proxyPID: pid_t = 0; AXUIElementGetPid(popup, &proxyPID)
         let remotePID = try XCTUnwrap(owner(virtualID))
         print("HOSTED_POPUP_TOPOLOGY standalone=\(standalone) outer=\(target.pid):\(target.windowID) proxy=\(proxyPID):\(virtualID) actualOwner=\(remotePID)")
@@ -211,7 +192,6 @@ final class HostedPopupInputTests: XCTestCase {
         let pointer = try XCTUnwrap(CGEvent(source: nil)).location
         let injector = InputInjector(); injector.setIndependentPointer(true)
         defer { injector.resetSession() }
-        print("HOSTED_POPUP_OPEN_ATTEMPT uptime=\(ProcessInfo.processInfo.systemUptime) standalone=\(standalone) inspectScope=\(inspectScope) popupWindow=\(virtualID) frame=\(popupFrame) point=\(point) hit=\(String(describing: actualTarget))")
         click(point, injector: injector)
         let opened = Date().addingTimeInterval(2)
         var item: AXUIElement?, menuTarget: WindowInputTarget?
@@ -226,12 +206,13 @@ final class HostedPopupInputTests: XCTestCase {
             }
         } while menuTarget == nil && Date() < opened
         let menu = try XCTUnwrap(menuTarget, "One production click must open the real remote popup menu")
-        let second = try XCTUnwrap(item), itemFrame = try XCTUnwrap(axFrame(second))
-        let secondPoint = CGPoint(x: itemFrame.midX, y: itemFrame.midY), itemWindow = windowID(second)
-        print("HOSTED_POPUP_MENU target=\(menu.pid):\(menu.windowID) itemWindow=\(itemWindow ?? 0) itemFrame=\(itemFrame) point=\(secondPoint)")
+        let second = try XCTUnwrap(item), secondPoint = try XCTUnwrap(center(second))
+        print("HOSTED_POPUP_MENU target=\(menu.pid):\(menu.windowID) itemWindow=\(windowID(second) ?? 0)")
         XCTAssertEqual(menu.pid, remotePID)
         var retainedMenuDestination: WindowInputTarget?
         if inspectScope {
+            let nativeItem = try XCTUnwrap(menu.button(at: secondPoint), "The exact hosted menu item must expose its native action")
+            XCTAssertTrue(nativeItem.isMenuItem)
             let documentID = try XCTUnwrap(state()["document"]).uint32Value
             XCTAssertNotEqual(documentID, target.windowID)
             XCTAssertEqual(state()["attached"]?.intValue, 0, "The unrelated document has no attached sheet")
@@ -252,7 +233,6 @@ final class HostedPopupInputTests: XCTestCase {
             changedGeometry.keyboardReceiver?.windowFrame = menuFrame.offsetBy(dx: 1, dy: 0)
             try assertStaleReceiverRejectsKeyUp(changedGeometry)
         }
-        print("HOSTED_POPUP_ACTION_ATTEMPT uptime=\(ProcessInfo.processInfo.systemUptime) select=\(select) menu=\(menu.pid):\(menu.windowID) itemWindow=\(itemWindow ?? 0) itemFrame=\(itemFrame) point=\(secondPoint)")
         if select { click(secondPoint, injector: injector) }
         else {
             for action in ["down", "up"] {
@@ -269,9 +249,6 @@ final class HostedPopupInputTests: XCTestCase {
         XCTAssertEqual(state()["writes"]?.intValue, 0, "The test never saves a document")
         XCTAssertEqual(try XCTUnwrap(CGEvent(source: nil)).location, pointer)
         print("HOSTED_POPUP_RESULT select=\(select) value=\(selected ?? "nil") menuClosed=\(menu.frame == nil) panelAlive=\(target.frame != nil)")
-        if menu.frame != nil || selected != (select ? "Second owned format" : "First owned format") {
-            diagnoseActionFailure(popup: popup, item: second, menu: menu, at: secondPoint, state: state())
-        }
         if menu.frame == nil {
             if let retainedMenuDestination { try assertStaleReceiverRejectsKeyUp(retainedMenuDestination) }
             let receiver = try XCTUnwrap(target.keyboardDestination()?.keyboardReceiver)
