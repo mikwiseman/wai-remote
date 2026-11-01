@@ -13,12 +13,19 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
         _ = NSApplication.shared
         ScreenVideoPolicy.initializeWebRTC()
         RTCInitializeSSL()
+        let baseline = ProcessInfo.processInfo.environment["WAI_BANDWIDTH_MODE"] == "baseline"
         let desktop = SyntheticDesktop()
+        let scenes = try BudgetSceneSource(desktop)
         let directory = URL(fileURLWithPath: ProcessInfo.processInfo.environment["WAI_BANDWIDTH_OUTPUT"] ?? ".runtime/bandwidth-experiment")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        for (name, preference) in [("preserve-both", RTCDegradationPreference.maintainFramerateAndResolution),
-                                   ("maintain-framerate", RTCDegradationPreference.maintainFramerate)] {
-            let result = try await run(name, preference, desktop: desktop)
+        let profile = try scenes.profile()
+        try JSONSerialization.data(withJSONObject: profile, options: [.prettyPrinted, .sortedKeys])
+            .write(to: directory.appendingPathComponent("source-profile.json"))
+        let policies: [(String, RTCDegradationPreference)] = baseline
+            ? [("baseline", .maintainFramerateAndResolution)]
+            : [("preserve-both", .maintainFramerateAndResolution), ("maintain-framerate", .maintainFramerate)]
+        for (name, preference) in policies {
+            let result = try await run(name, preference, scenes: scenes, baseline: baseline, directory: directory)
             let data = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
             try data.write(to: directory.appendingPathComponent(name + ".json"), options: .atomic)
             print("BANDWIDTH_STEP \(name) \(String(data: try JSONSerialization.data(withJSONObject: result["summary"]!), encoding: .utf8)!)")
@@ -33,14 +40,18 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
         }
     }
 
-    private func run(_ name: String, _ preference: RTCDegradationPreference, desktop: SyntheticDesktop) async throws -> [String: Any] {
+    private func run(_ name: String, _ preference: RTCDegradationPreference, scenes: BudgetSceneSource,
+                     baseline: Bool, directory: URL) async throws -> [String: Any] {
+        let duration = baseline ? 30.0 : 86.0
+        let frameCount = Int(duration * 60)
         let trace = BudgetTrace()
+        let samples = BudgetSamples(phase: baseline ? "baseline" : "initial")
         let factory = RTCPeerConnectionFactory(encoderFactory: BudgetEncoderFactory(trace), decoderFactory: ScreenVideoDecoderFactory())
         let source = factory.videoSource(forScreenCast: true)
         let capturer = RTCVideoCapturer(delegate: source)
         let host = PeerTransport(factory: factory, source: source, ice: .local)
         let viewer = ViewerTransport(ice: .local)
-        let sink = BudgetRenderer(trace)
+        let sink = BudgetRenderer(trace, samples: samples, maximumIndex: frameCount)
         var track: RTCVideoTrack?
         viewer.onVideo = { track = $0; $0.add(sink) }
         defer { trace.stopFeeding(); track?.remove(sink); host.close(); viewer.close() }
@@ -79,38 +90,39 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
         }
         // Reapply/read back after SDP has negotiated the real sender.
         try cap(4_000_000)
-        let pool = try XCTUnwrap(SyntheticDesktop.pool())
         let start = ProcessInfo.processInfo.systemUptime + 0.2
-        let finished = expectation(description: "35-second synthetic desktop")
+        let finished = expectation(description: "\(duration)-second synthetic desktop")
         let feeder = Thread {
-            for index in 0..<2100 {
+            for index in 0..<frameCount {
                 if trace.feedingStopped { break }
                 let deadline = start + Double(index) / 60
-                let wait = deadline - ProcessInfo.processInfo.systemUptime
+                let beforeSleep = ProcessInfo.processInfo.systemUptime
+                let wait = max(0, deadline - beforeSleep)
                 if wait > 0 { Thread.sleep(forTimeInterval: wait) }
-                // Never manufacture a burst of catch-up frames on a slow runner.
-                guard ProcessInfo.processInfo.systemUptime - deadline < 1.0 / 60 else {
-                    trace.add("source-missed", ["index": index]); continue
+                let woke = ProcessInfo.processInfo.systemUptime
+                // Never manufacture catch-up bursts or reuse a buffer still owned by the encoder.
+                guard woke - deadline < 1.0 / 60 else {
+                    trace.add("source-missed", ["index": index, "requestedSleepMs": wait * 1000,
+                                               "actualSleepMs": (woke - beforeSleep) * 1000, "wakeLateMs": (woke - deadline) * 1000])
+                    continue
                 }
                 autoreleasepool {
-                    guard let pixel = SyntheticDesktop.buffer(pool: pool) else { trace.add("source-allocation-failed"); return }
-                    // Identical continuous scrolling with a full scene change every five seconds.
-                    var state = SyntheticDesktop.State()
-                    state.window = (index / 300) % 2
-                    state.offsets = [(index * 4) % 1400, (index * 4) % 1400]
-                    state.typed = (index / 8) % 90
-                    CVPixelBufferLockBaseAddress(pixel, [])
-                    desktop.draw(state, index: index,
-                        y: CVPixelBufferGetBaseAddressOfPlane(pixel, 0)!.assumingMemoryBound(to: UInt8.self),
-                        yStride: CVPixelBufferGetBytesPerRowOfPlane(pixel, 0),
-                        uv: CVPixelBufferGetBaseAddressOfPlane(pixel, 1)!.assumingMemoryBound(to: UInt8.self),
-                        uvStride: CVPixelBufferGetBytesPerRowOfPlane(pixel, 1))
-                    CVPixelBufferUnlockBaseAddress(pixel, [])
-                    let now = ProcessInfo.processInfo.systemUptime
-                    let frame = RTCVideoFrame(buffer: RTCCVPixelBuffer(pixelBuffer: pixel), rotation: ._0,
-                                             timeStampNs: Int64(now * 1_000_000_000))
-                    trace.add("source", ["index": index, "ns": frame.timeStampNs, "scheduleLateMs": (now - deadline) * 1000])
-                    source.capturer(capturer, didCapture: frame)
+                    do {
+                        let generated = try scenes.frame(index)
+                        let pushedAt = ProcessInfo.processInfo.systemUptime
+                        let frame = RTCVideoFrame(buffer: RTCCVPixelBuffer(pixelBuffer: generated.pixels), rotation: ._0,
+                                                 timeStampNs: Int64(pushedAt * 1_000_000_000))
+                        source.capturer(capturer, didCapture: frame)
+                        let returnedAt = ProcessInfo.processInfo.systemUptime
+                        trace.add("source", ["index": index, "ns": frame.timeStampNs,
+                                             "requestedSleepMs": wait * 1000, "actualSleepMs": (woke - beforeSleep) * 1000,
+                                             "wakeLateMs": (woke - deadline) * 1000, "allocationMs": generated.allocationMs,
+                                             "copyMs": generated.copyMs, "overlayMs": generated.overlayMs,
+                                             "generationMs": (pushedAt - woke) * 1000, "pushMs": (returnedAt - pushedAt) * 1000,
+                                             "scheduleLateMs": (pushedAt - deadline) * 1000], at: pushedAt)
+                    } catch BudgetSceneSource.Failure.allocation(let code) {
+                        trace.add("source-allocation-failed", ["index": index, "status": code])
+                    } catch { trace.add("source-geometry-failed", ["index": index]) }
                 }
             }
             finished.fulfill()
@@ -124,11 +136,13 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
         statistics()
         let timer = Timer.connectionTimer(withTimeInterval: 1, repeats: true) { _ in statistics() }
         defer { timer.invalidate() }
-        try await Task.sleep(for: .seconds(10.2))
-        try cap(250_000)
-        try await Task.sleep(for: .seconds(15))
-        try cap(4_000_000)
-        await fulfillment(of: [finished], timeout: 15)
+        if !baseline {
+            try await Task.sleep(for: .seconds(10.2))
+            try cap(250_000); samples.setPhase("limited")
+            try await Task.sleep(for: .seconds(15))
+            try cap(4_000_000); samples.setPhase("recovery")
+        }
+        await fulfillment(of: [finished], timeout: baseline ? 35 : 66)
         try await Task.sleep(for: .seconds(1))
         statistics()
         try await Task.sleep(for: .seconds(0.3))
@@ -137,6 +151,7 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
         host.close(); viewer.close()
         trace.add("closed", ["hostReady": host.isReady])
         try await Task.sleep(for: .seconds(0.5))
+        let detail = try samples.write(source: scenes, directory: directory, prefix: name, start: start)
         let rows = trace.snapshot().map { row -> [String: Any] in
             var row = row; row["t"] = (row.removeValue(forKey: "time") as! Double) - start; return row
         }
@@ -147,7 +162,10 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
         let allGaps = zip(allDecoded, allDecoded.dropFirst()).map { before, after in
             (end: after["t"] as! Double, ms: ((after["t"] as! Double) - (before["t"] as! Double)) * 1000)
         }
-        let summaries: [[String: Any]] = [("initial", 0.0, limitedAt), ("limited", limitedAt, recoveryAt), ("recovery", recoveryAt, 35.0)].map { label, begin, end in
+        if !baseline { XCTAssertGreaterThanOrEqual(duration - recoveryAt, 60, "Recovery observation must be at least 60 seconds") }
+        let phases: [(String, Double, Double)] = baseline ? [("baseline", 0, duration)]
+            : [("initial", 0, limitedAt), ("limited", limitedAt, recoveryAt), ("recovery", recoveryAt, duration)]
+        let summaries: [[String: Any]] = phases.map { label, begin, end in
             let selected = rows.filter { ($0["t"] as! Double) >= begin && ($0["t"] as! Double) < end }
             let decoded = selected.filter { $0["stage"] as? String == "decoded" }
             // Attribute a crossing gap to its ending frame, retaining budget-transition stalls.
@@ -163,13 +181,13 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
                     "readableStamps": decoded.filter { ($0["index"] as? Int ?? -1) >= 0 }.count]
         }
         return ["policy": name, "sourceRevision": ProcessInfo.processInfo.environment["GITHUB_SHA"] ?? "unknown",
-                "baseRevision": "b799faefe011d254eac491769231bb38e1087bc0", "durationSeconds": 35,
+                "baseRevision": "b799faefe011d254eac491769231bb38e1087bc0", "durationSeconds": duration, "baselineOnly": baseline,
                 "sourceSize": [3840, 2160], "requestedSourceFPS": 60,
-                "method": "Local ICE, production transports and H264 factory. Per-encoding maxBitrate cap 4Mbps/10s, 250kbps/15s, 4Mbps/10s. This is not network shaping or optical latency. Continuous synthetic scrolling; scene changes every 5s. Policies run sequentially, preserve-both first. No screen capture or input injection.",
+                "method": "Local ICE and production transports/factories. Baseline: 30s at 4Mbps. Comparison mode: 4Mbps for 10s, 250kbps for 15s, 4Mbps for at least 60s. Sender cap is not network shaping or optical latency. Two pre-rendered text scenes alternate every 5s with a moving bar and unique frame stamp; this is not scrolling and must not be compared directly with the prior workload. Hard pool limit 8. PNG/detail work happens after measurement and peer closure.",
                 "sourceFrames": rows.filter { $0["stage"] as? String == "source" }.count,
                 "decodedFrames": rows.filter { $0["stage"] as? String == "decoded" }.count,
                 "readableStamps": rows.filter { $0["stage"] as? String == "decoded" && ($0["index"] as? Int ?? -1) >= 0 }.count,
-                "summary": summaries, "rows": rows]
+                "detail": detail, "summary": summaries, "rows": rows]
     }
     private func child<T>(_ object: Any, _ label: String) -> T? {
         Mirror(reflecting: object).children.first { $0.label == label }?.value as? T
@@ -184,17 +202,25 @@ private final class BudgetTrace {
     private var stopped = false
     var feedingStopped: Bool { lock.lock(); defer { lock.unlock() }; return stopped }
     func stopFeeding() { lock.lock(); stopped = true; lock.unlock() }
-    func add(_ stage: String, _ values: [String: Any] = [:]) {
-        var row = values; row["stage"] = stage; row["time"] = ProcessInfo.processInfo.systemUptime
+    func add(_ stage: String, _ values: [String: Any] = [:], at time: Double? = nil) {
+        var row = values; row["stage"] = stage; row["time"] = time ?? ProcessInfo.processInfo.systemUptime
         lock.lock(); rows.append(row); lock.unlock()
     }
     func snapshot() -> [[String: Any]] { lock.lock(); defer { lock.unlock() }; return rows.sorted { ($0["time"] as! Double) < ($1["time"] as! Double) } }
     func statistics(_ report: RTCStatisticsReport, stage: String, type: String, counter: String) {
         let fields: Set<String> = ["framesEncoded", "framesSent", "framesDecoded", "framesReceived", "framesDropped",
             "frameWidth", "frameHeight", "framesPerSecond", "bytesSent", "totalEncodeTime", "totalDecodeTime",
-            "qpSum", "targetBitrate", "freezeCount", "totalFreezesDuration", "keyFramesEncoded", "keyFramesDecoded"]
+            "qpSum", "targetBitrate", "freezeCount", "totalFreezesDuration", "keyFramesEncoded", "keyFramesDecoded", "qualityLimitationResolutionChanges"]
         for stat in report.statistics.values where stat.type == type && stat.values["kind"] as? String == "video" && stat.values[counter] != nil {
-            add(stage, stat.values.filter { fields.contains($0.key) && $0.value is NSNumber })
+            var values: [String: Any] = stat.values.filter { fields.contains($0.key) && $0.value is NSNumber }
+            for key in ["encoderImplementation", "decoderImplementation", "powerEfficientEncoder", "powerEfficientDecoder", "qualityLimitationReason"] {
+                values[key] = stat.values[key] ?? NSNull()
+            }
+            let codec = (stat.values["codecId"] as? String).flatMap { report.statistics[$0] }
+            values["mimeType"] = codec?.values["mimeType"] ?? NSNull()
+            let durations = stat.values["qualityLimitationDurations"] as? [String: Any]
+            values["qualityLimitationDurations"] = durations?.filter { ["none", "cpu", "bandwidth", "other"].contains($0.key) && $0.value is NSNumber } ?? [:]
+            add(stage, values)
         }
     }
 }
@@ -221,7 +247,8 @@ private final class BudgetEncoder: NSObject, RTCVideoEncoder {
     var supportsNativeHandle: Bool { base.supportsNativeHandle }
     func startEncode(with settings: RTCVideoEncoderSettings, numberOfCores cores: Int32) -> Int {
         trace.add("encoder-start", ["width": settings.width, "height": settings.height, "fps": settings.maxFramerate,
-                                    "startKbps": settings.startBitrate, "implementation": base.implementationName()])
+                                    "startKbps": settings.startBitrate, "codec": settings.name, "implementation": base.implementationName(),
+                                    "qpLow": base.scalingSettings()?.low ?? -1, "qpHigh": base.scalingSettings()?.high ?? -1])
         return base.startEncode(with: settings, numberOfCores: cores)
     }
     func release() -> Int { base.release() }
@@ -249,7 +276,11 @@ private final class BudgetEncoder: NSObject, RTCVideoEncoder {
 
 private final class BudgetRenderer: NSObject, RTCVideoRenderer {
     private let trace: BudgetTrace
-    init(_ trace: BudgetTrace) { self.trace = trace }
+    private let samples: BudgetSamples
+    private let maximumIndex: Int
+    init(_ trace: BudgetTrace, samples: BudgetSamples, maximumIndex: Int) {
+        self.trace = trace; self.samples = samples; self.maximumIndex = maximumIndex
+    }
     func setSize(_ size: CGSize) {}
     func renderFrame(_ frame: RTCVideoFrame?) {
         guard let frame else { return }
@@ -267,7 +298,9 @@ private final class BudgetRenderer: NSObject, RTCVideoRenderer {
             let i420 = frame.buffer.toI420()
             index = Self.stamp(i420.dataY, stride: Int(i420.strideY), width: Int(i420.width), height: Int(i420.height))
         }
-        trace.add("decoded", ["index": index, "width": frame.width, "height": frame.height, "ns": frame.timeStampNs])
+        let validatedIndex = index < maximumIndex ? index : -1
+        trace.add("decoded", ["index": validatedIndex, "width": frame.width, "height": frame.height, "ns": frame.timeStampNs])
+        samples.capture(frame, index: validatedIndex)
     }
     private static func stamp(_ y: UnsafePointer<UInt8>, stride: Int, width: Int, height: Int) -> Int {
         var value = 0
@@ -281,6 +314,6 @@ private final class BudgetRenderer: NSObject, RTCVideoRenderer {
             if sum / 9 > 126 { value |= 1 << bit }
         }
         let index = value & 0xffff, checksum = (value >> 16) & 0xff
-        return index < 2100 && checksum == ((index ^ (index >> 8) ^ 0x5A) & 0xff) ? index : -1
+        return checksum == ((index ^ (index >> 8) ^ 0x5A) & 0xff) ? index : -1
     }
 }

@@ -1,4 +1,4 @@
-name: Bounded encoder budget experiment
+name: Bounded encoder source baseline
 on:
   push:
     branches: [codex/encoder-budget-experiment]
@@ -12,9 +12,10 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - name: Record environment and run one comparison
+      - name: Profile source and run one 30s baseline
         env:
           WAI_BANDWIDTH_STEP: '1'
+          WAI_BANDWIDTH_MODE: baseline
           WAI_BANDWIDTH_OUTPUT: .runtime/bandwidth-experiment
         run: |
           mkdir -p .runtime/bandwidth-experiment
@@ -29,7 +30,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: bandwidth-step-results
+          name: bandwidth-baseline-results
           path: .runtime/bandwidth-experiment/
           include-hidden-files: true
           retention-days: 7
