@@ -1,4 +1,4 @@
-name: Bounded encoder source baseline
+name: Bounded encoder policy comparison
 on:
   push:
     branches: [codex/encoder-budget-experiment]
@@ -12,10 +12,10 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - name: Profile both pacers, then conditionally run one 30s baseline
+      - name: Compare two policies with bounded warm-up and 60s recovery
         env:
           WAI_BANDWIDTH_STEP: '1'
-          WAI_BANDWIDTH_MODE: baseline
+          WAI_BANDWIDTH_MODE: comparison
           WAI_BANDWIDTH_OUTPUT: .runtime/bandwidth-experiment
         run: |
           mkdir -p .runtime/bandwidth-experiment
@@ -30,7 +30,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: bandwidth-baseline-results
+          name: bandwidth-comparison-results
           path: .runtime/bandwidth-experiment/
           include-hidden-files: true
           retention-days: 7

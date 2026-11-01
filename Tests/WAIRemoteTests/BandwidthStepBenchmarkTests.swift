@@ -35,6 +35,8 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
             XCTAssertGreaterThan(result["readableStamps"] as? Int ?? 0, 0, "No synthetic pixel stamp survived")
             for phase in result["summary"] as! [[String: Any]] {
                 XCTAssertGreaterThan(phase["decoded"] as! Int, 0, "No actual decoded frames during measured phase")
+                let gaps = phase["sourceGapsMs"] as! [String: Double]
+                XCTAssertGreaterThanOrEqual(gaps["min"] ?? 0, 1000.0 / 120, "Source submissions must not bunch in any phase")
                 XCTAssertGreaterThanOrEqual(Double(phase["source"] as! Int) / (phase["durationSeconds"] as! Double), 55,
                                             "CI source below 55 fps; this phase is not a valid sustained-source comparison")
             }
@@ -120,7 +122,7 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
                                      "submittedFrames": startupRows.filter { $0["stage"] as? String == "startup-source" }.count,
                                      "allocationFailures": startupRows.filter { $0["stage"] as? String == "startup-source-allocation-failed" }.count,
                                      "skippedAttempts": startupRows.filter { $0["stage"] as? String == "startup-source-skipped" }.count,
-                                     "method": "Actual negotiated media path; bounded 12Hz warm-up with separate stamps 60000-60059. Hard 8-buffer limit; allocation pressure skips a paced attempt. Stop after first decoded frame, then begin measured 30s. Unused slots in the maximum 5s window are not observed dropped frames.",
+                                     "method": "Actual negotiated media path; bounded 12Hz warm-up with separate stamps 60000-60059. Hard 8-buffer limit; allocation pressure skips a paced attempt. Stop after first decoded frame, then begin the measured phase. Unused slots in the maximum 5s window are not observed dropped frames.",
                                      "rows": startupRows]
         try JSONSerialization.data(withJSONObject: startup, options: [.prettyPrinted, .sortedKeys])
             .write(to: directory.appendingPathComponent(name + "-startup.json"))
@@ -167,6 +169,11 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
         let caps = rows.filter { $0["stage"] as? String == "cap" && ($0["t"] as! Double) >= 0 }
         let limitedAt = caps.first?["t"] as? Double ?? 10
         let recoveryAt = caps.last?["t"] as? Double ?? 25
+        let allSource = rows.filter { $0["stage"] as? String == "source" }
+        let sourceTimes = Dictionary(uniqueKeysWithValues: allSource.map { ($0["index"] as! Int, $0["t"] as! Double) })
+        let sourceGaps = zip(allSource, allSource.dropFirst()).map { before, after in
+            (end: after["t"] as! Double, ms: ((after["t"] as! Double) - (before["t"] as! Double)) * 1000)
+        }
         let allDecoded = rows.filter { $0["stage"] as? String == "decoded" }
         let allGaps = zip(allDecoded, allDecoded.dropFirst()).map { before, after in
             (end: after["t"] as! Double, ms: ((after["t"] as! Double) - (before["t"] as! Double)) * 1000)
@@ -179,12 +186,22 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
             let decoded = selected.filter { $0["stage"] as? String == "decoded" }
             // Attribute a crossing gap to its ending frame, retaining budget-transition stalls.
             let gaps = allGaps.filter { $0.end >= begin && $0.end < end }.map(\.ms)
+            let phaseSourceGaps = sourceGaps.filter { $0.end >= begin && $0.end < end }.map(\.ms)
+            let ages: [Double] = decoded.compactMap { row in
+                guard let index = row["index"] as? Int, let sent = sourceTimes[index] else { return nil }
+                return ((row["t"] as! Double) - sent) * 1000
+            }
+            let qp = selected.filter { $0["stage"] as? String == "encode-output" }.compactMap { ($0["qp"] as? NSNumber)?.doubleValue }
+            let reasons = Set(selected.filter { $0["stage"] as? String == "host-rtc" }.compactMap { $0["qualityLimitationReason"] as? String }).sorted()
             let lastBeforeEnd = allDecoded.last { ($0["t"] as! Double) < end }?["t"] as? Double ?? begin
             let sizes = Set(decoded.map { "\($0["width"]!)x\($0["height"]!)" }).sorted()
             let count: (String) -> Int = { stage in selected.filter { $0["stage"] as? String == stage }.count }
             return ["phase": label, "startSeconds": begin, "durationSeconds": end - begin, "source": count("source"),
                     "encoderInputs": count("encode-input"), "encoderOutputs": count("encode-output"),
                     "decoded": decoded.count, "sizes": sizes,
+                    "sourceGapsMs": distribution(phaseSourceGaps), "sourceToDecodeAgeMs": distribution(ages),
+                    "encodedQP": distribution(qp), "qualityLimitationReasons": reasons,
+                    "sourceAllocationFailures": count("source-allocation-failed"), "sourceSkippedAttempts": count("source-skipped"),
                     "decodeGapMaxMs": gaps.max() ?? 0, "decodeGapsOver200Ms": gaps.filter { $0 > 200 }.count,
                     "decodeTailSilenceMs": max(0, end - max(begin, lastBeforeEnd)) * 1000,
                     "readableStamps": decoded.filter { ($0["index"] as? Int ?? -1) >= 0 }.count]
@@ -230,7 +247,10 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
         return strictValid
     }
     private func gapSummary(_ times: [Double]) -> [String: Double] {
-        let gaps = zip(times, times.dropFirst()).map { ($1 - $0) * 1000 }.sorted()
+        distribution(zip(times, times.dropFirst()).map { ($1 - $0) * 1000 })
+    }
+    private func distribution(_ values: [Double]) -> [String: Double] {
+        let gaps = values.sorted()
         guard !gaps.isEmpty else { return ["count": 0] }
         func percentile(_ fraction: Double) -> Double {
             let position = Double(gaps.count - 1) * fraction
