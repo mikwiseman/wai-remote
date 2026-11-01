@@ -409,6 +409,7 @@ extension PhoneModel {
     /// The demo session's stand-in for a Mac's first state message; see `startDemo`.
     func acceptDemo(_ state: HostState) { _ = try? session.accept(state) }
     func prepareConnectionForTesting(invitation: String, nonce: String) throws {
+        identity = DeviceIdentity()
         currentInvite = try RemoteInvite(invitation); self.invitation = invitation; self.nonce = nonce
         connecting = true
     }
