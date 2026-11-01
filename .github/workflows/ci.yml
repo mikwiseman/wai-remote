@@ -1,4 +1,4 @@
-name: Bounded encoder policy comparison
+name: Bounded encoder diagnostics
 on:
   push:
     branches: [codex/encoder-budget-experiment]
@@ -12,10 +12,12 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - name: Compare two policies with bounded warm-up and 60s recovery
+      - name: Verify numeric diagnostic export
+        run: python3 scripts/test-collect-bandwidth-diagnostics.py
+      - name: Measure unchanged adaptive scenario once
         env:
           WAI_BANDWIDTH_STEP: '1'
-          WAI_BANDWIDTH_MODE: comparison
+          WAI_BANDWIDTH_MODE: diagnostic
           WAI_BANDWIDTH_OUTPUT: .runtime/bandwidth-experiment
         run: |
           mkdir -p .runtime/bandwidth-experiment
@@ -27,10 +29,18 @@ jobs:
           } > .runtime/bandwidth-experiment/environment.txt
           set -o pipefail
           swift test --jobs 2 --filter BandwidthStepBenchmarkTests 2>&1 | tee .runtime/bandwidth-experiment/test.log
+      - name: Export numeric diagnostics only
+        if: always()
+        run: python3 scripts/collect-bandwidth-diagnostics.py .runtime/bandwidth-experiment
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: bandwidth-comparison-results
-          path: .runtime/bandwidth-experiment/
+          name: bandwidth-diagnostic-results
+          path: |
+            .runtime/bandwidth-experiment/*.json
+            .runtime/bandwidth-experiment/*.png
+            .runtime/bandwidth-experiment/test.log
+            .runtime/bandwidth-experiment/environment.txt
+            !.runtime/bandwidth-experiment/diagnostic-inputs.json
           include-hidden-files: true
           retention-days: 7

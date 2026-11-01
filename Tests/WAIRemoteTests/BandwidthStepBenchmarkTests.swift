@@ -8,33 +8,87 @@ import XCTest
 /// Experiment only: a sender budget cap, not a shaped network or optical latency test.
 @MainActor
 final class BandwidthStepBenchmarkTests: XCTestCase {
+    func testNativeDropTotalsParserRequiresCompleteTeardown() {
+        // Pinned M153 send_statistics_proxy.cc: the BadTimestamp separator is absent.
+        let message = """
+        (send_statistics_proxy.cc:821): Frames encoded 4286
+        WebRTC.Video.Screenshare.DroppedFrames.Capturer 1
+        WebRTC.Video.Screenshare.DroppedFrames.BadTimestamp2
+        WebRTC.Video.Screenshare.DroppedFrames.EncoderQueue 3
+        WebRTC.Video.Screenshare.DroppedFrames.Encoder 4
+        WebRTC.Video.Screenshare.DroppedFrames.Ratelimiter 5001
+        WebRTC.Video.Screenshare.DroppedFrames.CongestionWindow 6
+        """
+        XCTAssertEqual(BudgetDropTotals.parse(message), ["Capturer": 1, "BadTimestamp": 2,
+            "EncoderQueue": 3, "Encoder": 4, "Ratelimiter": 5001, "CongestionWindow": 6])
+        XCTAssertEqual(BudgetDropTotals.parse(message.replacingOccurrences(of: "BadTimestamp2", with: "BadTimestamp0"))?["BadTimestamp"], 0)
+        XCTAssertEqual(BudgetDropTotals.parse(message.replacingOccurrences(of: "BadTimestamp2", with: "BadTimestamp 2"))?["BadTimestamp"], 2)
+        XCTAssertNil(BudgetDropTotals.parse(message.replacingOccurrences(of: "WebRTC.Video.Screenshare.DroppedFrames.BadTimestamp2\n", with: "")))
+        XCTAssertNil(BudgetDropTotals.parse(message.replacingOccurrences(of: "send_statistics_proxy.cc", with: "unrelated.cc")))
+        XCTAssertNil(BudgetDropTotals.parse("WebRTC.Video.Screenshare.DroppedFrames.EncoderQueue 3"))
+        XCTAssertNil(BudgetDropTotals.parse(message + "\nWebRTC.Video.Screenshare.DroppedFrames.Capturer 99"))
+    }
+
     func testCompareResolutionPoliciesAtSteppedBudget() async throws {
         try XCTSkipUnless(ProcessInfo.processInfo.environment["WAI_BANDWIDTH_STEP"] == "1")
+        let mode = ProcessInfo.processInfo.environment["WAI_BANDWIDTH_MODE"]
+        let diagnostic = mode == "diagnostic", baseline = mode == "baseline"
+        let defaults = UserDefaults.standard
+        let diagnosticKeys = ["performanceDiagnostics", "performanceNetworkTrace"]
+        let previousDefaults = diagnosticKeys.map { defaults.object(forKey: $0) }
+        defer {
+            if diagnostic {
+                for (key, value) in zip(diagnosticKeys, previousDefaults) {
+                    if let value { defaults.set(value, forKey: key) } else { defaults.removeObject(forKey: key) }
+                }
+            }
+        }
+        if diagnostic {
+            for key in diagnosticKeys { defaults.set(true, forKey: key) }
+            // The INFO callback is separate from console logging. Never emit native logs to test.log.
+            RTCSetMinDebugLogLevel(.none)
+            // PerformanceLog.enabled is cached: this mode must run in a fresh test process.
+            guard PerformanceLog.enabled else { throw BudgetFailure.diagnosticsInitializedDisabled }
+        }
         _ = NSApplication.shared
         ScreenVideoPolicy.initializeWebRTC()
         RTCInitializeSSL()
-        let baseline = ProcessInfo.processInfo.environment["WAI_BANDWIDTH_MODE"] == "baseline"
         let desktop = SyntheticDesktop()
         let scenes = try BudgetSceneSource(desktop)
         let directory = URL(fileURLWithPath: ProcessInfo.processInfo.environment["WAI_BANDWIDTH_OUTPUT"] ?? ".runtime/bandwidth-experiment")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        if diagnostic {
+            let temporary = FileManager.default.temporaryDirectory
+            let pid = ProcessInfo.processInfo.processIdentifier
+            let paths = ["performanceLog": temporary.appendingPathComponent("wai-remote-performance-\(pid).jsonl").path,
+                         "hostNetworkTrace": temporary.appendingPathComponent("wai-remote-network-\(pid)-host.rtc").path,
+                         "viewerNetworkTrace": temporary.appendingPathComponent("wai-remote-network-\(pid)-viewer.rtc").path]
+            // Transient collector input: the workflow must exclude or remove this manifest before artifact upload.
+            try JSONSerialization.data(withJSONObject: paths, options: [.sortedKeys])
+                .write(to: directory.appendingPathComponent("diagnostic-inputs.json"), options: .atomic)
+        }
         let profile = try scenes.profile()
         try JSONSerialization.data(withJSONObject: profile, options: [.prettyPrinted, .sortedKeys])
             .write(to: directory.appendingPathComponent("source-profile.json"))
         let pacing = try await pacingProfiles(scenes: scenes, directory: directory)
         guard pacing else { return }
-        let policies: [(String, RTCDegradationPreference)] = baseline
+        let policies: [(String, RTCDegradationPreference)] = diagnostic
+            ? [("diagnostic", .maintainFramerate)] : baseline
             ? [("baseline", .maintainFramerateAndResolution)]
             : [("preserve-both", .maintainFramerateAndResolution), ("maintain-framerate", .maintainFramerate)]
         for (name, preference) in policies {
-            let result = try await run(name, preference, scenes: scenes, baseline: baseline, directory: directory)
+            let result = try await run(name, preference, scenes: scenes, baseline: baseline, diagnostic: diagnostic, directory: directory)
             let data = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
             try data.write(to: directory.appendingPathComponent(name + ".json"), options: .atomic)
             print("BANDWIDTH_STEP \(name) \(String(data: try JSONSerialization.data(withJSONObject: result["summary"]!), encoding: .utf8)!)")
-            XCTAssertGreaterThan(result["decodedFrames"] as? Int ?? 0, 0, "No actual decoded video")
+            XCTAssertGreaterThan(result["rendererFrames"] as? Int ?? 0, 0, "No actual rendered video")
             XCTAssertGreaterThan(result["readableStamps"] as? Int ?? 0, 0, "No synthetic pixel stamp survived")
+            if diagnostic {
+                let instrumentation = try XCTUnwrap(result["diagnosticInstrumentation"] as? [String: Any])
+                XCTAssertEqual(instrumentation["valid"] as? Bool, true, "Diagnostic instrumentation incomplete; missing data is not zero")
+            }
             for phase in result["summary"] as! [[String: Any]] {
-                XCTAssertGreaterThan(phase["decoded"] as! Int, 0, "No actual decoded frames during measured phase")
+                XCTAssertGreaterThan(phase["renderer"] as! Int, 0, "No renderer callbacks during measured phase")
                 let gaps = phase["sourceGapsMs"] as! [String: Double]
                 XCTAssertGreaterThanOrEqual(gaps["min"] ?? 0, 1000.0 / 120, "Source submissions must not bunch in any phase")
                 XCTAssertGreaterThanOrEqual(Double(phase["source"] as! Int) / (phase["durationSeconds"] as! Double), 55,
@@ -48,7 +102,7 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
     }
 
     private func run(_ name: String, _ preference: RTCDegradationPreference, scenes: BudgetSceneSource,
-                     baseline: Bool, directory: URL) async throws -> [String: Any] {
+                     baseline: Bool, diagnostic: Bool, directory: URL) async throws -> [String: Any] {
         let duration = baseline ? 30.0 : 86.0
         let frameCount = Int(duration * 60)
         let trace = BudgetTrace()
@@ -58,8 +112,8 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
         let capturer = RTCVideoCapturer(delegate: source)
         let host = PeerTransport(factory: factory, source: source, ice: .local)
         let viewer = ViewerTransport(ice: .local)
-        let firstDecoded = expectation(description: "Negotiated encoder and decoder startup")
-        let sink = BudgetRenderer(trace, samples: samples, maximumIndex: frameCount) { firstDecoded.fulfill() }
+        let firstRendered = expectation(description: "Negotiated encoder and decoder startup")
+        let sink = BudgetRenderer(trace, samples: samples, maximumIndex: frameCount) { firstRendered.fulfill() }
         var track: RTCVideoTrack?
         viewer.onVideo = { track = $0; $0.add(sink) }
         defer { track?.remove(sink); host.close(); viewer.close() }
@@ -109,26 +163,28 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
             return submittedAt
         }, record: { trace.add("startup-" + $0, $1, at: $2) }, completed: { startupStopped.fulfill() })
         warmup.startFeeding()
-        await fulfillment(of: [firstDecoded], timeout: 7)
+        await fulfillment(of: [firstRendered], timeout: 7)
         warmup.stop()
         await fulfillment(of: [startupStopped], timeout: 1)
         let startupRows = trace.snapshot().map { row -> [String: Any] in
             var row = row; row["t"] = (row.removeValue(forKey: "time") as! Double) - startupStart; return row
         }
-        let decodedAt = startupRows.first { ["decoded", "startup-decoded"].contains($0["stage"] as? String ?? "") }?["t"] as? Double
+        let renderedAt = startupRows.first { ["renderer", "startup-renderer"].contains($0["stage"] as? String ?? "") }?["t"] as? Double
         let startup: [String: Any] = ["sourceRevision": ProcessInfo.processInfo.environment["GITHUB_SHA"] ?? "unknown",
-                                     "firstDecodedSeconds": decodedAt.map { $0 as Any } ?? NSNull(), "maximumRepeatFPS": 12,
-                                     "maximumSourceSeconds": 5, "decodeTimeoutSeconds": 7,
+                                     "firstRenderedSeconds": renderedAt.map { $0 as Any } ?? NSNull(), "maximumRepeatFPS": 12,
+                                     "maximumSourceSeconds": 5, "rendererTimeoutSeconds": 7,
                                      "submittedFrames": startupRows.filter { $0["stage"] as? String == "startup-source" }.count,
                                      "allocationFailures": startupRows.filter { $0["stage"] as? String == "startup-source-allocation-failed" }.count,
                                      "skippedAttempts": startupRows.filter { $0["stage"] as? String == "startup-source-skipped" }.count,
-                                     "method": "Actual negotiated media path; bounded 12Hz warm-up with separate stamps 60000-60059. Hard 8-buffer limit; allocation pressure skips a paced attempt. Stop after first decoded frame, then begin the measured phase. Unused slots in the maximum 5s window are not observed dropped frames.",
+                                     "method": "Actual negotiated media path; bounded 12Hz warm-up with separate stamps 60000-60059. Hard 8-buffer limit; allocation pressure skips a paced attempt. Stop after first renderer callback, then begin the measured phase. Unused slots in the maximum 5s window are not observed dropped frames.",
                                      "rows": startupRows]
         try JSONSerialization.data(withJSONObject: startup, options: [.prettyPrinted, .sortedKeys])
             .write(to: directory.appendingPathComponent(name + "-startup.json"))
-        guard decodedAt != nil else { throw BudgetFailure.noWarmFrame }
+        guard renderedAt != nil else { throw BudgetFailure.noWarmFrame }
         samples.setPhase(baseline ? "baseline" : "initial")
         let start = ProcessInfo.processInfo.systemUptime + 0.2
+        let clockAnchor = ["uptimeSeconds": start,
+                           "utcSeconds": Date().timeIntervalSince1970 - (ProcessInfo.processInfo.systemUptime - start)]
         let finished = expectation(description: "\(duration)-second synthetic desktop")
         let feeder = BudgetFeeder(source: scenes, clock: .strictTimer, start: start, duration: duration,
                                   emit: { generated, _, pushedAt in
@@ -141,7 +197,10 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
         feeder.startFeeding()
         defer { feeder.stop() }
         func statistics() {
-            pc.statistics { trace.statistics($0, stage: "host-rtc", type: "outbound-rtp", counter: "framesEncoded") }
+            pc.statistics {
+                trace.statistics($0, stage: "host-rtc", type: "outbound-rtp", counter: "framesEncoded")
+                if diagnostic { trace.selectedTransport($0) }
+            }
             remote.statistics { trace.statistics($0, stage: "viewer-rtc", type: "inbound-rtp", counter: "framesDecoded") }
         }
         statistics()
@@ -159,13 +218,27 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
         try await Task.sleep(for: .seconds(0.3))
         timer.invalidate()
         track?.remove(sink)
+        // No verbose callback during source observation or drain. Only the numeric teardown
+        // footer is retained; synchronous close flushes the event log and destroys the send stream.
+        let dropTotals = BudgetDropTotals()
+        let logger: RTCCallbackLogger? = diagnostic ? RTCCallbackLogger() : nil
+        logger?.severity = .info
+        logger?.start { dropTotals.capture($0) }
+        defer { logger?.stop() }
         host.close(); viewer.close()
         trace.add("closed", ["hostReady": host.isReady])
         try await Task.sleep(for: .seconds(0.5))
+        logger?.stop()
+        let nativeDrops = dropTotals.snapshot()
+        for row in nativeDrops.rows { trace.add("native-drop-totals", row.totals, at: row.time) }
         let detail = try samples.write(source: scenes, directory: directory, prefix: name, start: start)
         let rows = trace.snapshot().map { row -> [String: Any] in
             var row = row; row["t"] = (row.removeValue(forKey: "time") as! Double) - start; return row
         }
+        let selectedPairs = rows.filter { $0["stage"] as? String == "host-selected-pair" }
+        let pairBudgetSamples = selectedPairs.filter {
+            $0["availableOutgoingBitrate"] is NSNumber && $0["currentRoundTripTime"] is NSNumber
+        }.count
         let caps = rows.filter { $0["stage"] as? String == "cap" && ($0["t"] as! Double) >= 0 }
         let limitedAt = caps.first?["t"] as? Double ?? 10
         let recoveryAt = caps.last?["t"] as? Double ?? 25
@@ -174,8 +247,8 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
         let sourceGaps = zip(allSource, allSource.dropFirst()).map { before, after in
             (end: after["t"] as! Double, ms: ((after["t"] as! Double) - (before["t"] as! Double)) * 1000)
         }
-        let allDecoded = rows.filter { $0["stage"] as? String == "decoded" }
-        let allGaps = zip(allDecoded, allDecoded.dropFirst()).map { before, after in
+        let allRendered = rows.filter { $0["stage"] as? String == "renderer" }
+        let allGaps = zip(allRendered, allRendered.dropFirst()).map { before, after in
             (end: after["t"] as! Double, ms: ((after["t"] as! Double) - (before["t"] as! Double)) * 1000)
         }
         if !baseline { XCTAssertGreaterThanOrEqual(duration - recoveryAt, 60, "Recovery observation must be at least 60 seconds") }
@@ -183,39 +256,57 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
             : [("initial", 0, limitedAt), ("limited", limitedAt, recoveryAt), ("recovery", recoveryAt, duration)]
         let summaries: [[String: Any]] = phases.map { label, begin, end in
             let selected = rows.filter { ($0["t"] as! Double) >= begin && ($0["t"] as! Double) < end }
-            let decoded = selected.filter { $0["stage"] as? String == "decoded" }
+            let rendered = selected.filter { $0["stage"] as? String == "renderer" }
             // Attribute a crossing gap to its ending frame, retaining budget-transition stalls.
             let gaps = allGaps.filter { $0.end >= begin && $0.end < end }.map(\.ms)
             let phaseSourceGaps = sourceGaps.filter { $0.end >= begin && $0.end < end }.map(\.ms)
-            let ages: [Double] = decoded.compactMap { row in
+            let ages: [Double] = rendered.compactMap { row in
                 guard let index = row["index"] as? Int, let sent = sourceTimes[index] else { return nil }
                 return ((row["t"] as! Double) - sent) * 1000
             }
             let qp = selected.filter { $0["stage"] as? String == "encode-output" }.compactMap { ($0["qp"] as? NSNumber)?.doubleValue }
             let reasons = Set(selected.filter { $0["stage"] as? String == "host-rtc" }.compactMap { $0["qualityLimitationReason"] as? String }).sorted()
-            let lastBeforeEnd = allDecoded.last { ($0["t"] as! Double) < end }?["t"] as? Double ?? begin
-            let sizes = Set(decoded.map { "\($0["width"]!)x\($0["height"]!)" }).sorted()
+            let lastBeforeEnd = allRendered.last { ($0["t"] as! Double) < end }?["t"] as? Double ?? begin
+            let sizes = Set(rendered.map { "\($0["width"]!)x\($0["height"]!)" }).sorted()
+            let pairSamples = selected.filter { $0["stage"] as? String == "host-selected-pair" && $0["resolved"] as? Int == 1
+                && $0["availableOutgoingBitrate"] is NSNumber && $0["currentRoundTripTime"] is NSNumber }.count
             let count: (String) -> Int = { stage in selected.filter { $0["stage"] as? String == stage }.count }
             return ["phase": label, "startSeconds": begin, "durationSeconds": end - begin, "source": count("source"),
                     "encoderInputs": count("encode-input"), "encoderOutputs": count("encode-output"),
-                    "decoded": decoded.count, "sizes": sizes,
-                    "sourceGapsMs": distribution(phaseSourceGaps), "sourceToDecodeAgeMs": distribution(ages),
+                    "selectedPairBudgetSamples": pairSamples,
+                    "renderer": rendered.count, "sizes": sizes,
+                    "sourceGapsMs": distribution(phaseSourceGaps), "sourceToRendererAgeMs": distribution(ages),
                     "encodedQP": distribution(qp), "qualityLimitationReasons": reasons,
                     "sourceAllocationFailures": count("source-allocation-failed"), "sourceSkippedAttempts": count("source-skipped"),
-                    "decodeGapMaxMs": gaps.max() ?? 0, "decodeGapsOver200Ms": gaps.filter { $0 > 200 }.count,
-                    "decodeTailSilenceMs": max(0, end - max(begin, lastBeforeEnd)) * 1000,
-                    "readableStamps": decoded.filter { ($0["index"] as? Int ?? -1) >= 0 }.count]
+                    "rendererGapMaxMs": gaps.max() ?? 0, "rendererGapsOver200Ms": gaps.filter { $0 > 200 }.count,
+                    "rendererTailSilenceMs": max(0, end - max(begin, lastBeforeEnd)) * 1000,
+                    "readableStamps": rendered.filter { ($0["index"] as? Int ?? -1) >= 0 }.count]
         }
+        let instrumentation: [String: Any] = [
+            "enabled": diagnostic, "valid": diagnostic && PerformanceLog.enabled && nativeDrops.valid && summaries.allSatisfy { ($0["selectedPairBudgetSamples"] as? Int ?? 0) > 0 },
+            "performanceLogEnabled": PerformanceLog.enabled, "nativeSummaryCount": nativeDrops.rows.count,
+            "nativeSummaryRejectedCount": nativeDrops.rejected, "nativeSummaryOverflowCount": nativeDrops.overflow,
+            "selectedPairSamples": selectedPairs.count, "selectedPairBudgetSamples": pairBudgetSamples,
+            "selectedPairBudgetSamplesByPhase": Dictionary(uniqueKeysWithValues: summaries.map { ($0["phase"] as! String, $0["selectedPairBudgetSamples"] as! Int) }),
+            "networkTraceValidation": "Required separately by the offline collector: both trace start records and complete BeginLog/EndLog coverage.",
+            "dropTotalsScope": "Exact whole send-stream lifetime, including warm-up and drain; not per-phase drop counts.",
+            "eligibleForRelease": false]
         return ["policy": name, "sourceRevision": ProcessInfo.processInfo.environment["GITHUB_SHA"] ?? "unknown",
                 "baseRevision": "b799faefe011d254eac491769231bb38e1087bc0", "durationSeconds": duration, "baselineOnly": baseline,
+                "schemaVersion": 2, "diagnosticOnly": diagnostic, "eligibleForRelease": false,
+                "clockAnchor": clockAnchor, "diagnosticInstrumentation": instrumentation,
+                "schemaSemantics": ["renderer": "BudgetRenderer callback after pixel-stamp extraction, not decoder output or display presentation.",
+                                    "sourceToRendererAgeMs": "Source submission to that renderer callback; not optical latency.",
+                                    "framesDecoded": "Native RTC cumulative decoder counter, separate from renderer callback counts.",
+                                    "native-drop-totals": "M153 SendStatisticsProxy exact unclamped lifetime counters, collected only during teardown."],
                 "sourceSize": [3840, 2160], "requestedSourceFPS": 60,
                 "method": "Local ICE and production transports/factories. Baseline: 30s at 4Mbps. Comparison mode: 4Mbps for 10s, 250kbps for 15s, 4Mbps for at least 60s. Sender cap is not network shaping or optical latency. Two pre-rendered text scenes alternate every 300 emitted frames with a moving bar and unique sequential frame stamp; this is not scrolling and must not be compared directly with the prior workload. Stamps count emitted frames, not planned 60Hz slots. Strict one-shot timer prepares before waiting and rebases on actual previous emission; missed slots are never replayed. Hard pool limit 8; allocation pressure skips a paced attempt and reduces actual source cadence. Encoder/decoder startup uses separately recorded bounded 12Hz repeats before the full measured phase. PNG/detail work happens after measurement and peer closure.",
                 "sourceGapsMs": gapSummary(rows.filter { $0["stage"] as? String == "source" }.map { $0["t"] as! Double }),
                 "sourceFrames": rows.filter { $0["stage"] as? String == "source" }.count,
                 "sourceAllocationFailures": rows.filter { $0["stage"] as? String == "source-allocation-failed" }.count,
                 "sourceSkippedAttempts": rows.filter { $0["stage"] as? String == "source-skipped" }.count,
-                "decodedFrames": rows.filter { $0["stage"] as? String == "decoded" }.count,
-                "readableStamps": rows.filter { $0["stage"] as? String == "decoded" && ($0["index"] as? Int ?? -1) >= 0 }.count,
+                "rendererFrames": rows.filter { $0["stage"] as? String == "renderer" }.count,
+                "readableStamps": rows.filter { $0["stage"] as? String == "renderer" && ($0["index"] as? Int ?? -1) >= 0 }.count,
                 "startup": startup, "detail": detail, "summary": summaries, "rows": rows]
     }
     private func pacingProfiles(scenes: BudgetSceneSource, directory: URL) async throws -> Bool {
@@ -264,7 +355,57 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
     }
 }
 
-private enum BudgetFailure: Error { case noLocalConnection, noWarmFrame }
+private enum BudgetFailure: Error { case noLocalConnection, noWarmFrame, diagnosticsInitializedDisabled }
+
+/// Only six exact numeric footer fields cross the native logging boundary; no raw log is saved.
+private final class BudgetDropTotals {
+    private static let prefix = "WebRTC.Video.Screenshare.DroppedFrames."
+    private static let fields = ["Capturer", "BadTimestamp", "EncoderQueue", "Encoder", "Ratelimiter", "CongestionWindow"]
+    private let lock = NSLock()
+    private var messages: [(time: Double, lines: [String])] = []
+    private var overflow = 0
+
+    func capture(_ message: String) {
+        guard Self.isTeardown(message) else { return }
+        // Called under WebRTC's logging lock: no RTC calls, dispatch, disk I/O or full-log retention.
+        let lines = message.split(separator: "\n").filter { $0.hasPrefix(Self.prefix) }
+        let bounded = lines.count <= 8 && lines.allSatisfy { $0.utf8.count <= 128 }
+            ? lines.map(String.init) : []
+        let time = ProcessInfo.processInfo.systemUptime
+        lock.lock(); defer { lock.unlock() }
+        if messages.count < 4 { messages.append((time, bounded)) } else { overflow += 1 }
+    }
+
+    func snapshot() -> (rows: [(time: Double, totals: [String: Int])], rejected: Int, overflow: Int, valid: Bool) {
+        lock.lock(); let messages = self.messages, overflow = self.overflow; lock.unlock()
+        let rows = messages.compactMap { message -> (time: Double, totals: [String: Int])? in
+            Self.parseLines(message.lines).map { (message.time, $0) }
+        }
+        let rejected = messages.count - rows.count
+        return (rows, rejected, overflow, rows.count == 1 && rejected == 0 && overflow == 0)
+    }
+
+    static func parse(_ message: String) -> [String: Int]? {
+        guard isTeardown(message) else { return nil }
+        return parseLines(message.split(separator: "\n").filter { $0.hasPrefix(prefix) }.map(String.init))
+    }
+    private static func isTeardown(_ message: String) -> Bool {
+        message.range(of: #"\(send_statistics_proxy\.cc:[0-9]+\):"#, options: .regularExpression) != nil
+            && message.contains(prefix)
+    }
+    private static func parseLines(_ lines: [String]) -> [String: Int]? {
+        guard lines.count == fields.count else { return nil }
+        var totals: [String: Int] = [:]
+        for line in lines {
+            guard let field = fields.first(where: { line.hasPrefix(prefix + $0 + ($0 == "BadTimestamp" ? "" : " ")) }) else { return nil }
+            let number = line.dropFirst(prefix.count + field.count + (field == "BadTimestamp" ? 0 : 1))
+                .drop(while: { $0 == " " })
+            guard !number.isEmpty, number.utf8.allSatisfy({ (48...57).contains($0) }),
+                  let value = Int(number), totals.updateValue(value, forKey: field) == nil else { return nil }
+        }
+        return totals.count == fields.count ? totals : nil
+    }
+}
 
 private final class BudgetTrace {
     private let lock = NSLock()
@@ -289,6 +430,23 @@ private final class BudgetTrace {
             values["qualityLimitationDurations"] = durations?.filter { ["none", "cpu", "bandwidth", "other"].contains($0.key) && $0.value is NSNumber } ?? [:]
             add(stage, values)
         }
+    }
+    func selectedTransport(_ report: RTCStatisticsReport) {
+        let stats = report.statistics
+        let video = stats.values.first { $0.type == "outbound-rtp" && $0.values["kind"] as? String == "video" && $0.values["framesEncoded"] != nil }
+        let transport = (video?.values["transportId"] as? String).flatMap { stats[$0] }
+        let pair = (transport?.values["selectedCandidatePairId"] as? String).flatMap { stats[$0] }
+        let resolved = transport?.type == "transport" && pair?.type == "candidate-pair"
+        let fields = ["availableOutgoingBitrate", "currentRoundTripTime", "totalRoundTripTime",
+                      "bytesSent", "bytesReceived", "packetsSent", "packetsReceived",
+                      "requestsSent", "responsesReceived", "consentRequestsSent",
+                      "packetsDiscardedOnSend", "bytesDiscardedOnSend"]
+        var values: [String: Any] = ["resolved": resolved ? 1 : 0]
+        for field in fields {
+            // IDs are used only for this lookup. No candidate identifiers, addresses or strings survive.
+            values[field] = resolved ? (pair?.values[field] as? NSNumber).map { $0 as Any } ?? NSNull() : NSNull()
+        }
+        add("host-selected-pair", values)
     }
 }
 
@@ -375,7 +533,7 @@ private final class BudgetRenderer: NSObject, RTCVideoRenderer {
         if validatedIndex >= 0 { measuredFrameSeen = true }
         let startupFrame = index >= 60_000 || (index < 0 && !measuredFrameSeen)
         firstFrameLock.unlock()
-        trace.add(startupFrame ? "startup-decoded" : "decoded",
+        trace.add(startupFrame ? "startup-renderer" : "renderer",
                   ["index": validatedIndex, "stampIndex": index, "width": frame.width, "height": frame.height, "ns": frame.timeStampNs])
         samples.capture(frame, index: validatedIndex)
         if first { firstFrame() }
