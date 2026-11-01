@@ -1,6 +1,10 @@
 import AppKit
 
 extension WindowInputTarget {
+    static func ownWindow(matching id: CGWindowID, in windows: [NSWindow]) -> NSWindow? {
+        windows.first { $0.windowNumber == Int(id) }
+    }
+
     /// Full-desktop clicks behave like ordinary Mac clicks, while event delivery
     /// retains the independent cursor and the selected window. Window grants do
     /// not call this path and keep their background input behavior.
@@ -33,7 +37,7 @@ extension WindowInputTarget {
                 guard current(), frame != nil else { return false }
                 _ = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
                 if pid == ProcessInfo.processInfo.processIdentifier, current(), frame != nil {
-                    NSApp.windows.first { CGWindowID($0.windowNumber) == windowID }?.orderFrontRegardless()
+                    Self.ownWindow(matching: windowID, in: NSApp.windows)?.orderFrontRegardless()
                 }
                 return activated
             }
