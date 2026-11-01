@@ -4,6 +4,11 @@ import Darwin
 /// Window addressing follows KWWKComputerUseCore and cua-driver (MIT).
 /// See licenses/KWWK.txt and licenses/cua-driver.txt. No global-input fallback.
 struct WindowInputTarget: Equatable {
+    private static func traceHostedMenu(_ message: @autoclosure () -> String) {
+        #if DEBUG
+        if getenv("WAI_HOSTED_MENU_TRACE") != nil { print("HOSTED_MENU_TRACE \(message())") }
+        #endif
+    }
     let pid: pid_t
     let windowID: CGWindowID
     struct KeyboardReceiver: Equatable {
@@ -98,6 +103,11 @@ struct WindowInputTarget: Equatable {
         }
         guard let windowNumber = Self.windowNumber else { return self }
         let deadline = ProcessInfo.processInfo.systemUptime + budget
+        #if DEBUG
+        let traceStarted = ProcessInfo.processInfo.systemUptime
+        var traceDestination: WindowInputTarget?
+        defer { Self.traceHostedMenu("lookup outer=\(pid):\(windowID) elapsedMs=\((ProcessInfo.processInfo.systemUptime - traceStarted) * 1000) expired=\(ProcessInfo.processInfo.systemUptime >= deadline) destination=\(String(describing: traceDestination))") }
+        #endif
         func value(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
             let remaining = deadline - ProcessInfo.processInfo.systemUptime
             guard remaining > 0 else { return nil }
@@ -136,6 +146,9 @@ struct WindowInputTarget: Equatable {
                         destination.keyboardReceiver = menu
                     }
                 }
+                #if DEBUG
+                traceDestination = destination
+                #endif
                 return destination
             }
             guard sheets.count == 1, let sheet = sheets.first else { return nil }
@@ -169,6 +182,11 @@ struct WindowInputTarget: Equatable {
     /// through this outer window's linked remote root; a service PID alone can
     /// also own menus from unrelated documents.
     private func remoteMenuKeyboardReceiver(in root: AXUIElement, deadline: TimeInterval) -> KeyboardReceiver? {
+        #if DEBUG
+        let traceStarted = ProcessInfo.processInfo.systemUptime
+        var traceNode = "window-list"
+        defer { Self.traceHostedMenu("menu-lookup outer=\(pid):\(windowID) elapsedMs=\((ProcessInfo.processInfo.systemUptime - traceStarted) * 1000) expired=\(ProcessInfo.processInfo.systemUptime >= deadline) last=\(traceNode)") }
+        #endif
         guard let windows = CGWindowListCopyWindowInfo(.optionOnScreenOnly, 0) as? [[String: Any]] else { return nil }
         let menus = windows.filter { (($0[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0) > 0 }
         guard !menus.isEmpty else { return nil }
@@ -177,8 +195,14 @@ struct WindowInputTarget: Equatable {
         var visited = 0, result: KeyboardReceiver?
         while let (element, parent, depth, inherited, popupChild) = pending.popLast(), visited < 64 {
             visited += 1
+            #if DEBUG
+            traceNode = "node=\(visited) depth=\(depth)"
+            #endif
             guard let values = Self.axValues(element, [kAXRoleAttribute, kAXChildrenAttribute], deadline: deadline),
                   let role = values[0] as? String else { return nil }
+            #if DEBUG
+            traceNode += " role=\(role)"
+            #endif
             guard depth == 0 || containers.contains(role) || role == kAXMenuRole else { continue }
             guard let id = Self.axWindowID(element, deadline: deadline) else { return nil }
             var remote = inherited
@@ -287,7 +311,10 @@ struct WindowInputTarget: Equatable {
         // An active app needs no synthetic activation. An open menu or popover is
         // already tracking, and an off-window primer would dismiss it first.
         let backgroundDown = down && delivery.frontmostPID() != pid
-        if backgroundDown { delivery.prepare(self) }
+        if backgroundDown {
+            Self.traceHostedMenu("prepare outer=\(pid):\(windowID) point=\(event.location)")
+            delivery.prepare(self)
+        }
         if down && delivery.frontmostPID() != pid && !delivery.transient(self, event.location) {
             primed = true
             // Chromium also requires a complete background activation gesture.
@@ -338,6 +365,7 @@ struct WindowInputTarget: Equatable {
                 event.setIntegerValueField(.eventTargetUnixProcessID, value: Int64(receiver.pid))
                 event.setIntegerValueField(CGEventField(rawValue: 51)!, value: Int64(receiver.windowID))
                 delivery.key(receiver.pid, event)
+                Self.traceHostedMenu("key type=\(event.type.rawValue) outer=\(pid):\(windowID) receiver=\(receiver)")
             } else { delivery.key(pid, event) }
         default:
             // The public PID path misses Chromium's background mouse handler.
@@ -366,9 +394,14 @@ struct WindowInputTarget: Equatable {
             return Self.onMainRunLoop { self.button(at: point, includingDisabledMenuItems: includingDisabledMenuItems, excluding: excluding) }
         }
         let deadline = ProcessInfo.processInfo.systemUptime + 0.05
-        guard let frame, frame.contains(point), let hit = element(at: point, deadline: deadline) else { return nil }
-        return button(climbingFrom: hit, at: point, deadline: deadline, includingDisabledMenuItems: includingDisabledMenuItems, excluding: excluding) ??
+        guard let frame, frame.contains(point), let hit = element(at: point, deadline: deadline) else {
+            Self.traceHostedMenu("button-hit-miss outer=\(pid):\(windowID) point=\(point) elapsedMs=\((0.05 - deadline + ProcessInfo.processInfo.systemUptime) * 1000)")
+            return nil
+        }
+        let result = button(climbingFrom: hit, at: point, deadline: deadline, includingDisabledMenuItems: includingDisabledMenuItems, excluding: excluding) ??
             button(inHitContainer: hit, at: point, deadline: deadline)
+        Self.traceHostedMenu("button outer=\(pid):\(windowID) point=\(point) found=\(result != nil) menuItem=\(result?.isMenuItem ?? false) frame=\(String(describing: result?.frame)) elapsedMs=\((0.05 - deadline + ProcessInfo.processInfo.systemUptime) * 1000)")
+        return result
     }
     /// Save panels bridge a separate process. Their app-scoped hit test can stop
     /// at the sheet, and their proxy buttons omit AXTopLevelUIElement entirely.
@@ -550,6 +583,7 @@ struct WindowInputTarget: Equatable {
                     guard enabled else { return false }
                     AXUIElementSetMessagingTimeout(pressed, 0.25)
                     let result = AXUIElementPerformAction(pressed, kAXPressAction as CFString)
+                    Self.traceHostedMenu("press outer=\(self.pid):\(self.windowID) menuItem=\(isMenuItem) result=\(result.rawValue)")
                     // Closing an XPC save panel can tear down its reply channel.
                     // The action was submitted; never replay a pointer click.
                     return result == .success || result == .cannotComplete
