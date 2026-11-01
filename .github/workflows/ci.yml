@@ -1,4 +1,4 @@
-name: Bounded encoder diagnostics
+name: Bounded resolution recovery correction
 on:
   push:
     branches: [codex/encoder-budget-experiment]
@@ -14,33 +14,56 @@ jobs:
           persist-credentials: false
       - name: Verify numeric diagnostic export
         run: python3 scripts/test-collect-bandwidth-diagnostics.py
-      - name: Measure unchanged adaptive scenario once
+      - name: Reproduce adaptive recovery failure
         env:
           WAI_BANDWIDTH_STEP: '1'
           WAI_BANDWIDTH_MODE: diagnostic
-          WAI_BANDWIDTH_OUTPUT: .runtime/bandwidth-experiment
+          WAI_BANDWIDTH_OUTPUT: .runtime/bandwidth-experiment/control
         run: |
-          mkdir -p .runtime/bandwidth-experiment
+          mkdir -p .runtime/bandwidth-experiment/control
           {
             git rev-parse HEAD
             sw_vers
             uname -m
             swift --version
-          } > .runtime/bandwidth-experiment/environment.txt
+          } > .runtime/bandwidth-experiment/control/environment.txt
           set -o pipefail
-          swift test --jobs 2 --filter BandwidthStepBenchmarkTests 2>&1 | tee .runtime/bandwidth-experiment/test.log
-      - name: Export numeric diagnostics only
+          swift test --jobs 2 --filter BandwidthStepBenchmarkTests 2>&1 | tee .runtime/bandwidth-experiment/control/test.log
+      - name: Export control diagnostics
         if: always()
-        run: python3 scripts/collect-bandwidth-diagnostics.py .runtime/bandwidth-experiment
+        run: python3 scripts/collect-bandwidth-diagnostics.py .runtime/bandwidth-experiment/control
+      - name: Test allocation-gated resolution recovery once
+        if: always()
+        env:
+          WAI_BANDWIDTH_STEP: '1'
+          WAI_BANDWIDTH_MODE: budget-resolution
+          WAI_BANDWIDTH_OUTPUT: .runtime/bandwidth-experiment/candidate
+        run: |
+          mkdir -p .runtime/bandwidth-experiment/candidate
+          {
+            git rev-parse HEAD
+            sw_vers
+            uname -m
+            swift --version
+          } > .runtime/bandwidth-experiment/candidate/environment.txt
+          set -o pipefail
+          swift test --jobs 2 --filter BandwidthStepBenchmarkTests 2>&1 | tee .runtime/bandwidth-experiment/candidate/test.log
+      - name: Export candidate diagnostics
+        if: always()
+        run: python3 scripts/collect-bandwidth-diagnostics.py .runtime/bandwidth-experiment/candidate
+      - name: Enforce paired cadence, detail and recovery acceptance
+        if: always()
+        run: python3 scripts/accept-bandwidth-correction.py .runtime/bandwidth-experiment/candidate/diagnostic.json --control .runtime/bandwidth-experiment/control/diagnostic.json > .runtime/bandwidth-experiment/acceptance.json
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: bandwidth-diagnostic-results
+          name: bandwidth-correction-results
           path: |
-            .runtime/bandwidth-experiment/*.json
-            .runtime/bandwidth-experiment/*.png
-            .runtime/bandwidth-experiment/test.log
-            .runtime/bandwidth-experiment/environment.txt
-            !.runtime/bandwidth-experiment/diagnostic-inputs.json
+            .runtime/bandwidth-experiment/*/*.json
+            .runtime/bandwidth-experiment/*/*.png
+            .runtime/bandwidth-experiment/*/test.log
+            .runtime/bandwidth-experiment/*/environment.txt
+            .runtime/bandwidth-experiment/acceptance.json
+            !.runtime/bandwidth-experiment/*/diagnostic-inputs.json
           include-hidden-files: true
           retention-days: 7

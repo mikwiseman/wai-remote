@@ -8,6 +8,19 @@ import XCTest
 /// Experiment only: a sender budget cap, not a shaped network or optical latency test.
 @MainActor
 final class BandwidthStepBenchmarkTests: XCTestCase {
+    func testBudgetResolutionRecoveryRestoresOnlyOnceAfterArming() {
+        var recovery = BudgetResolutionRecovery()
+        XCTAssertFalse(recovery.observe(allocationBps: 4_000_000))
+        XCTAssertFalse(recovery.observe(allocationBps: 250_000))
+        recovery.arm()
+        XCTAssertFalse(recovery.observe(allocationBps: 3_999_999))
+        XCTAssertTrue(recovery.observe(allocationBps: 4_000_000))
+        XCTAssertFalse(recovery.observe(allocationBps: 4_000_000))
+        XCTAssertFalse(recovery.observe(allocationBps: 3_333_333))
+        recovery.arm()
+        XCTAssertFalse(recovery.observe(allocationBps: 4_000_000))
+    }
+
     func testNativeDropTotalsParserRequiresCompleteTeardown() {
         // Pinned M153 send_statistics_proxy.cc: the BadTimestamp separator is absent.
         let message = """
@@ -32,7 +45,8 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
     func testCompareResolutionPoliciesAtSteppedBudget() async throws {
         try XCTSkipUnless(ProcessInfo.processInfo.environment["WAI_BANDWIDTH_STEP"] == "1")
         let mode = ProcessInfo.processInfo.environment["WAI_BANDWIDTH_MODE"]
-        let diagnostic = mode == "diagnostic", baseline = mode == "baseline"
+        let candidate = mode == "budget-resolution"
+        let diagnostic = mode == "diagnostic" || candidate, baseline = mode == "baseline"
         let defaults = UserDefaults.standard
         let diagnosticKeys = ["performanceDiagnostics", "performanceNetworkTrace"]
         let previousDefaults = diagnosticKeys.map { defaults.object(forKey: $0) }
@@ -73,11 +87,12 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
         let pacing = try await pacingProfiles(scenes: scenes, directory: directory)
         guard pacing else { return }
         let policies: [(String, RTCDegradationPreference)] = diagnostic
-            ? [("diagnostic", .maintainFramerate)] : baseline
+            ? [("diagnostic", candidate ? .maintainFramerateAndResolution : .maintainFramerate)] : baseline
             ? [("baseline", .maintainFramerateAndResolution)]
             : [("preserve-both", .maintainFramerateAndResolution), ("maintain-framerate", .maintainFramerate)]
         for (name, preference) in policies {
-            let result = try await run(name, preference, scenes: scenes, baseline: baseline, diagnostic: diagnostic, directory: directory)
+            let result = try await run(name, preference, scenes: scenes, baseline: baseline,
+                                       diagnostic: diagnostic, candidate: candidate, directory: directory)
             let data = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
             try data.write(to: directory.appendingPathComponent(name + ".json"), options: .atomic)
             print("BANDWIDTH_STEP \(name) \(String(data: try JSONSerialization.data(withJSONObject: result["summary"]!), encoding: .utf8)!)")
@@ -86,6 +101,23 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
             if diagnostic {
                 let instrumentation = try XCTUnwrap(result["diagnosticInstrumentation"] as? [String: Any])
                 XCTAssertEqual(instrumentation["valid"] as? Bool, true, "Diagnostic instrumentation incomplete; missing data is not zero")
+            }
+            if candidate {
+                let acceptance = try XCTUnwrap(result["candidateAcceptance"] as? [String: Any])
+                XCTAssertEqual(acceptance["initialMediaBudgetObserved"] as? Bool, true, "Initial media allocation never reached 4Mbps")
+                XCTAssertEqual(acceptance["restoreCount"] as? Int, 1, "Resolution must restore exactly once after allocation recovery")
+                XCTAssertLessThanOrEqual(acceptance["maximumRendererGapMs"] as? Double ?? .infinity, 200,
+                                         "Every renderer gap, including transitions and endpoint silence, must be <=200ms")
+                XCTAssertLessThanOrEqual(acceptance["firstNativeRendererAfterTriggerMs"] as? Double ?? .infinity, 2000,
+                                         "Full native detail must return within 2s of observed allocation recovery")
+                XCTAssertLessThanOrEqual(acceptance["firstNativeRendererAfterAllocationMs"] as? Double ?? .infinity, 2000,
+                                         "A 1Hz observation delay must not extend the 2s native allocation recovery deadline")
+                XCTAssertGreaterThanOrEqual(acceptance["firstNativeRendererAfterAllocationMs"] as? Double ?? -.infinity, 0)
+                XCTAssertEqual(acceptance["allocationPrecedesTrigger"] as? Bool, true)
+                XCTAssertEqual(acceptance["staysNativeUntilEnd"] as? Bool, true)
+                XCTAssertEqual(acceptance["matchedNativeRecoverySample"] as? Bool, true)
+                XCTAssertEqual(acceptance["limitedEncodedScaleObserved"] as? Bool, true)
+                XCTAssertEqual(acceptance["limitedRendererScaleObserved"] as? Bool, true)
             }
             for phase in result["summary"] as! [[String: Any]] {
                 XCTAssertGreaterThan(phase["renderer"] as! Int, 0, "No renderer callbacks during measured phase")
@@ -102,7 +134,7 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
     }
 
     private func run(_ name: String, _ preference: RTCDegradationPreference, scenes: BudgetSceneSource,
-                     baseline: Bool, diagnostic: Bool, directory: URL) async throws -> [String: Any] {
+                     baseline: Bool, diagnostic: Bool, candidate: Bool, directory: URL) async throws -> [String: Any] {
         let duration = baseline ? 30.0 : 86.0
         let frameCount = Int(duration * 60)
         let trace = BudgetTrace()
@@ -120,19 +152,30 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
         let pc: RTCPeerConnection = try XCTUnwrap(child(host, "pc"))
         let remote: RTCPeerConnection = try XCTUnwrap(child(viewer, "peer"))
         let sender = try XCTUnwrap(pc.senders.first)
-        func cap(_ bitrate: Int) throws {
+        func cap(_ bitrate: Int, scale: Double? = nil, stage: String = "cap") throws {
+            let requestedAt = ProcessInfo.processInfo.systemUptime
             let parameters = sender.parameters
             parameters.degradationPreference = NSNumber(value: preference.rawValue)
-            for encoding in parameters.encodings { encoding.maxBitrateBps = NSNumber(value: bitrate) }
+            for encoding in parameters.encodings {
+                encoding.maxBitrateBps = NSNumber(value: bitrate)
+                if let scale { encoding.scaleResolutionDownBy = NSNumber(value: scale) }
+            }
             sender.parameters = parameters
             let readback = sender.parameters
             let actual = try XCTUnwrap(readback.encodings.first?.maxBitrateBps?.intValue)
             XCTAssertEqual(actual, bitrate)
             XCTAssertEqual(readback.degradationPreference?.intValue, preference.rawValue)
-            trace.add("cap", ["requestedBps": bitrate, "readbackBps": actual,
-                              "preference": readback.degradationPreference?.intValue ?? -1])
+            var values: [String: Any] = ["requestedBps": bitrate, "readbackBps": actual,
+                                        "requestedAtUptimeSeconds": requestedAt,
+                                        "preference": readback.degradationPreference?.intValue ?? -1]
+            if let scale {
+                let actualScale = try XCTUnwrap(readback.encodings.first?.scaleResolutionDownBy?.doubleValue)
+                XCTAssertEqual(actualScale, scale)
+                values["requestedScale"] = scale; values["readbackScale"] = actualScale
+            }
+            trace.add(stage, values)
         }
-        try cap(4_000_000)
+        try cap(4_000_000, scale: candidate ? 1 : nil)
         let ready = expectation(description: "Local production peer channel: \(name)")
         ready.assertForOverFulfill = false
         host.onOpen = { ready.fulfill() }
@@ -151,7 +194,7 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
             throw BudgetFailure.noLocalConnection
         }
         // Reapply/read back after SDP has negotiated the real sender.
-        try cap(4_000_000)
+        try cap(4_000_000, scale: candidate ? 1 : nil)
         let startupStart = ProcessInfo.processInfo.systemUptime + 0.2
         let startupStopped = expectation(description: "Warm-up source stopped")
         let warmup = BudgetFeeder(source: scenes, clock: .strictTimer, start: startupStart, duration: 5,
@@ -185,6 +228,11 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
         let start = ProcessInfo.processInfo.systemUptime + 0.2
         let clockAnchor = ["uptimeSeconds": start,
                            "utcSeconds": Date().timeIntervalSince1970 - (ProcessInfo.processInfo.systemUptime - start)]
+        var recovery = BudgetResolutionRecovery()
+        var budgetPhase = "initial"
+        var feedbackOpen = true
+        var initialBudgetObserved = false
+        defer { feedbackOpen = false }
         let finished = expectation(description: "\(duration)-second synthetic desktop")
         let feeder = BudgetFeeder(source: scenes, clock: .strictTimer, start: start, duration: duration,
                                   emit: { generated, _, pushedAt in
@@ -197,9 +245,32 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
         feeder.startFeeding()
         defer { feeder.stop() }
         func statistics() {
-            pc.statistics {
-                trace.statistics($0, stage: "host-rtc", type: "outbound-rtp", counter: "framesEncoded")
-                if diagnostic { trace.selectedTransport($0) }
+            let requestedPhase = budgetPhase
+            pc.statistics { report in
+                let observedAt = ProcessInfo.processInfo.systemUptime
+                trace.statistics(report, stage: "host-rtc", type: "outbound-rtp", counter: "framesEncoded")
+                if diagnostic { trace.selectedTransport(report) }
+                if candidate, let allocation = report.statistics.values.first(where: {
+                    $0.type == "outbound-rtp" && $0.values["kind"] as? String == "video" && $0.values["framesEncoded"] != nil
+                })?.values["targetBitrate"] as? NSNumber {
+                    let bitrate = allocation.intValue
+                    Task { @MainActor in
+                        guard feedbackOpen, requestedPhase == budgetPhase, observedAt >= start,
+                              observedAt < start + duration, ProcessInfo.processInfo.systemUptime < start + duration,
+                              host.isReady else { return }
+                        if budgetPhase == "initial", bitrate >= 4_000_000, !initialBudgetObserved {
+                            initialBudgetObserved = true
+                            trace.add("initial-media-budget", ["observedAllocationBps": bitrate], at: observedAt)
+                        }
+                        if budgetPhase == "recovery", recovery.observe(allocationBps: bitrate) {
+                            trace.add("resolution-trigger", ["observedAllocationBps": bitrate,
+                                "observedUptimeSeconds": observedAt,
+                                "restoreRequestedUptimeSeconds": ProcessInfo.processInfo.systemUptime], at: observedAt)
+                            do { try cap(4_000_000, scale: 1, stage: "resolution-restore") }
+                            catch { XCTFail("Resolution restore failed: \(error)") }
+                        }
+                    }
+                }
             }
             remote.statistics { trace.statistics($0, stage: "viewer-rtc", type: "inbound-rtp", counter: "framesDecoded") }
         }
@@ -208,11 +279,18 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
         defer { timer.invalidate() }
         if !baseline {
             try await Task.sleep(for: .seconds(10.2))
-            try cap(250_000); samples.setPhase("limited")
+            try cap(250_000, scale: candidate ? 4 : nil)
+            budgetPhase = "limited"; samples.setPhase("limited")
             try await Task.sleep(for: .seconds(15))
-            try cap(4_000_000); samples.setPhase("recovery")
+            try cap(4_000_000, scale: candidate ? 4 : nil)
+            budgetPhase = "recovery"; samples.setPhase("recovery")
+            if candidate {
+                recovery.arm()
+                trace.add("resolution-armed", ["requiredAllocationBps": 4_000_000])
+            }
         }
         await fulfillment(of: [finished], timeout: baseline ? 35 : 66)
+        feedbackOpen = false
         try await Task.sleep(for: .seconds(1))
         statistics()
         try await Task.sleep(for: .seconds(0.3))
@@ -242,6 +320,7 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
         let caps = rows.filter { $0["stage"] as? String == "cap" && ($0["t"] as! Double) >= 0 }
         let limitedAt = caps.first?["t"] as? Double ?? 10
         let recoveryAt = caps.last?["t"] as? Double ?? 25
+        let recoveryRequestAt = (caps.last?["requestedAtUptimeSeconds"] as? Double).map { $0 - start } ?? recoveryAt
         let allSource = rows.filter { $0["stage"] as? String == "source" }
         let sourceTimes = Dictionary(uniqueKeysWithValues: allSource.map { ($0["index"] as! Int, $0["t"] as! Double) })
         let sourceGaps = zip(allSource, allSource.dropFirst()).map { before, after in
@@ -251,6 +330,53 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
         let allGaps = zip(allRendered, allRendered.dropFirst()).map { before, after in
             (end: after["t"] as! Double, ms: ((after["t"] as! Double) - (before["t"] as! Double)) * 1000)
         }
+        let triggers = rows.filter { $0["stage"] as? String == "resolution-trigger" }
+        let triggerTime = triggers.first?["t"] as? Double
+        let measuredRendered = allRendered.filter { ($0["t"] as! Double) >= 0 && ($0["t"] as! Double) < duration }
+        let firstNative = triggerTime.flatMap { trigger in measuredRendered.first { row in
+            let index = row["index"] as? Int ?? -1
+            return (row["t"] as! Double) >= trigger && (sourceTimes[index] ?? -.infinity) >= trigger
+                && (row["width"] as? NSNumber)?.intValue == 3840 && (row["height"] as? NSNumber)?.intValue == 2160
+        } }
+        let firstNativeTime = firstNative?["t"] as? Double
+        let nativeLatency = triggerTime.flatMap { trigger in firstNativeTime.map { ($0 - trigger) * 1000 } }
+        let allocationRecoveryTime = rows.first { row in
+            row["stage"] as? String == "encoder-rate" && (row["t"] as! Double) >= recoveryRequestAt
+                && ((row["kbps"] as? NSNumber)?.intValue ?? 0) >= 4000
+        }?["t"] as? Double
+        let allocationLatency = allocationRecoveryTime.flatMap { allocated in firstNativeTime.map { ($0 - allocated) * 1000 } }
+        let allocationPrecedesTrigger = allocationRecoveryTime.flatMap { allocated in triggerTime.map { allocated <= $0 } } ?? false
+        let staysNative = firstNativeTime.map { first in measuredRendered.filter { ($0["t"] as! Double) >= first }
+            .allSatisfy { ($0["width"] as? NSNumber)?.intValue == 3840 && ($0["height"] as? NSNumber)?.intValue == 2160 } } ?? false
+        let recoveryDetail = detail.first { $0["phase"] as? String == "recovery" }
+        let matchedRecovery = recoveryDetail.map { sample in
+            sample["missing"] == nil && sourceTimes[sample["index"] as? Int ?? -1] != nil
+                && sample["width"] as? Int == 3840 && sample["height"] as? Int == 2160
+                && (sample["textROIPsnr"] as? Double ?? -1) > 0
+                && (sample["textEdgeMeanAbsoluteError"] as? Double ?? -1) >= 0
+                && (sample["textEdgePixels"] as? Int ?? 0) > 0
+        } ?? false
+        let maximumGap = max(allGaps.map(\.ms).max() ?? 0,
+                             max(0, measuredRendered.first?["t"] as? Double ?? duration) * 1000,
+                             max(0, duration - (measuredRendered.last?["t"] as? Double ?? 0)) * 1000)
+        let limitedScaled = rows.filter { row in
+            (row["t"] as! Double) >= limitedAt && (row["t"] as! Double) < recoveryAt
+                && (row["width"] as? NSNumber)?.intValue == 960 && (row["height"] as? NSNumber)?.intValue == 540
+        }
+        let candidateAcceptance: [String: Any] = [
+            "initialMediaBudgetObserved": initialBudgetObserved, "triggerCount": triggers.count,
+            "restoreCount": rows.filter { $0["stage"] as? String == "resolution-restore" }.count,
+            "maximumRendererGapMs": maximumGap,
+            "firstNativeRendererAfterTriggerMs": nativeLatency.map { $0 as Any } ?? NSNull(),
+            "firstNativeRendererAfterAllocationMs": allocationLatency.map { $0 as Any } ?? NSNull(),
+            "allocationPrecedesTrigger": allocationPrecedesTrigger,
+            "staysNativeUntilEnd": staysNative, "matchedNativeRecoverySample": matchedRecovery,
+            "limitedEncodedScaleObserved": limitedScaled.contains { $0["stage"] as? String == "encode-output" },
+            "limitedRendererScaleObserved": limitedScaled.contains { $0["stage"] as? String == "renderer" },
+            "allocationRecoverySeconds": allocationRecoveryTime.map { $0 as Any } ?? NSNull(),
+            "triggerSeconds": triggerTime.map { $0 as Any } ?? NSNull(),
+            "firstNativeRendererSeconds": firstNativeTime.map { $0 as Any } ?? NSNull(),
+            "recoveryDetail": recoveryDetail ?? [:]]
         if !baseline { XCTAssertGreaterThanOrEqual(duration - recoveryAt, 60, "Recovery observation must be at least 60 seconds") }
         let phases: [(String, Double, Double)] = baseline ? [("baseline", 0, duration)]
             : [("initial", 0, limitedAt), ("limited", limitedAt, recoveryAt), ("recovery", recoveryAt, duration)]
@@ -294,6 +420,8 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
         return ["policy": name, "sourceRevision": ProcessInfo.processInfo.environment["GITHUB_SHA"] ?? "unknown",
                 "baseRevision": "b799faefe011d254eac491769231bb38e1087bc0", "durationSeconds": duration, "baselineOnly": baseline,
                 "schemaVersion": 2, "diagnosticOnly": diagnostic, "eligibleForRelease": false,
+                "correctionCandidate": candidate, "candidateAcceptance": candidateAcceptance,
+                "candidateMethod": candidate ? "Preserve-both preference throughout; initial scale1, atomic250kbps+scale4, restore4Mbps cap retaining scale4, then one scale1 restore after a measured adjusted encoder allocation reaches4Mbps. No QP/min-rate/limiter override. Source and native encoder input may stay4K; encoded/renderer dimensions establish scaling. Transition gaps are included." : "none",
                 "clockAnchor": clockAnchor, "diagnosticInstrumentation": instrumentation,
                 "schemaSemantics": ["renderer": "BudgetRenderer callback after pixel-stamp extraction, not decoder output or display presentation.",
                                     "sourceToRendererAgeMs": "Source submission to that renderer callback; not optical latency.",
@@ -352,6 +480,18 @@ final class BandwidthStepBenchmarkTests: XCTestCase {
     }
     private func child<T>(_ object: Any, _ label: String) -> T? {
         Mirror(reflecting: object).children.first { $0.label == label }?.value as? T
+    }
+}
+
+/// Experiment-only latch; not a production bandwidth controller.
+private struct BudgetResolutionRecovery {
+    private var armed = false
+    private var restored = false
+    mutating func arm() { armed = true }
+    mutating func observe(allocationBps: Int) -> Bool {
+        guard armed, !restored, allocationBps >= 4_000_000 else { return false }
+        restored = true
+        return true
     }
 }
 
