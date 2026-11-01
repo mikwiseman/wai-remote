@@ -19,13 +19,17 @@ extension WindowInputTarget {
         while let (element, window) = pending.popLast(), visited < 64 {
             visited += 1
             if Self.axWindowID(element, deadline: deadline) == windowID {
-                guard current(), frame != nil, let application = NSRunningApplication(processIdentifier: pid) else { return false }
+                guard current(), frame != nil else { return false }
                 // Choose the clicked document before activation. No "all windows"
                 // option: other documents are not deliberately brought forward.
                 AXUIElementSetMessagingTimeout(window, 0.05)
                 _ = AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
                 guard current(), frame != nil else { return false }
-                let activated = application.activate(options: [])
+                // A background regular app's NSRunningApplication activation
+                // request can be denied even while AXRaise brings a window up.
+                // This explicit remote click activates only its proven owner.
+                AXUIElementSetMessagingTimeout(app, 0.05)
+                let activated = AXUIElementSetAttributeValue(app, kAXFrontmostAttribute as CFString, kCFBooleanTrue) == .success
                 guard current(), frame != nil else { return false }
                 _ = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
                 if pid == ProcessInfo.processInfo.processIdentifier, current(), frame != nil {

@@ -19,16 +19,39 @@ final class WindowActivationTests: XCTestCase {
     func testDesktopAXButtonClickActivatesOnlyItsSelectedForeignWindow() throws { try clickForeignWindow(viewMode: false) }
     func testDesktopPointerClickActivatesOnlyItsSelectedForeignWindow() throws { try clickForeignWindow(viewMode: true) }
 
+    func testBackgroundCallerActivatesForeignAXButtonOwnerOnFirstClick() throws {
+        try clickForeignWindow(viewMode: false, backgroundCaller: true)
+    }
+    func testBackgroundCallerActivatesForeignPointerOwnerOnFirstClick() throws {
+        try clickForeignWindow(viewMode: true, backgroundCaller: true)
+    }
+    func testBackgroundCallerSingleWindowGrantKeepsItsForeignAppInBackground() throws {
+        try clickForeignWindow(viewMode: false, scoped: true, backgroundCaller: true)
+    }
+
     func testSingleWindowGrantKeepsItsForeignAppInBackground() throws { try clickForeignWindow(viewMode: false, scoped: true) }
 
-    private func clickForeignWindow(viewMode: Bool, scoped: Bool = false) throws {
+    private func clickForeignWindow(viewMode: Bool, scoped: Bool = false, backgroundCaller: Bool = false) throws {
         try XCTSkipUnless(CGPreflightPostEventAccess() && AXIsProcessTrusted(), "Native input requires existing permissions; this test never requests them.")
-        NSApplication.shared.setActivationPolicy(.accessory)
+        let previousPolicy = NSApplication.shared.activationPolicy()
+        defer { NSApplication.shared.setActivationPolicy(previousPolicy) }
+        NSApplication.shared.setActivationPolicy(backgroundCaller ? .regular : .accessory)
         let previous = NSWorkspace.shared.frontmostApplication
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("wai-activation-\(UUID())")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
-        let source = directory.appendingPathComponent("fixture.swift"), binary = directory.appendingPathComponent("fixture")
+        func bundle(_ name: String) throws -> URL {
+            let application = directory.appendingPathComponent(name + ".app")
+            let contents = application.appendingPathComponent("Contents")
+            try FileManager.default.createDirectory(at: contents.appendingPathComponent("MacOS"), withIntermediateDirectories: true)
+            let info: [String: Any] = ["CFBundleIdentifier": "is.wai.remote.activation.\(name).\(UUID().uuidString)",
+                                      "CFBundleExecutable": "fixture", "CFBundleName": name, "CFBundlePackageType": "APPL"]
+            try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
+                .write(to: contents.appendingPathComponent("Info.plist"))
+            return contents.appendingPathComponent("MacOS/fixture")
+        }
+        let source = directory.appendingPathComponent("fixture.swift")
+        let binary = backgroundCaller ? try bundle("Target") : directory.appendingPathComponent("fixture")
         try Self.fixture.write(to: source, atomically: true, encoding: .utf8)
         let compiler = Process(), compilerOutput = Pipe()
         compiler.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
@@ -40,10 +63,14 @@ final class WindowActivationTests: XCTestCase {
         XCTAssertEqual(compiler.terminationStatus, 0, String(decoding: diagnostics, as: UTF8.self))
         let metadata = directory.appendingPathComponent("state.json")
         let process = Process()
-        process.executableURL = binary; process.arguments = [metadata.path, viewMode ? "view" : "button"]
+        process.executableURL = binary
+        process.arguments = [metadata.path, viewMode ? "view" : "button"] + (backgroundCaller ? ["regular"] : [])
         try process.run()
+        var foreground: Process?
         defer {
-            let active = NSWorkspace.shared.frontmostApplication?.processIdentifier == process.processIdentifier
+            let activePID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+            let active = activePID == process.processIdentifier || activePID == foreground?.processIdentifier
+            if let foreground { if foreground.isRunning { foreground.terminate() }; foreground.waitUntilExit() }
             if process.isRunning { process.terminate() }; process.waitUntilExit()
             if active { _ = previous?.activate(options: []) }
         }
@@ -61,6 +88,36 @@ final class WindowActivationTests: XCTestCase {
         let visible = Date().addingTimeInterval(3)
         while order() != [front, rear], Date() < visible { runApplication(for: 0.05) }
         XCTAssertEqual(order(), [front, rear])
+        if backgroundCaller {
+            let foregroundBinary = try bundle("Foreground")
+            try FileManager.default.copyItem(at: binary, to: foregroundBinary)
+            let owner = Process()
+            owner.executableURL = foregroundBinary
+            owner.arguments = [directory.appendingPathComponent("foreground.json").path, "foreground"]
+            try owner.run(); foreground = owner
+            let activated = Date().addingTimeInterval(3)
+            while NSWorkspace.shared.frontmostApplication?.processIdentifier != owner.processIdentifier, Date() < activated {
+                runApplication(for: 0.05)
+            }
+            guard NSWorkspace.shared.frontmostApplication?.processIdentifier == owner.processIdentifier else {
+                XCTFail("A third owned process must hold activation before testing a background caller")
+                return
+            }
+            XCTAssertFalse(NSApp.isActive)
+            XCTAssertNotEqual(owner.processIdentifier, getpid())
+            XCTAssertNotEqual(owner.processIdentifier, process.processIdentifier)
+            let foregroundID = try XCTUnwrap(NSRunningApplication(processIdentifier: owner.processIdentifier)?.bundleIdentifier)
+            let targetID = try XCTUnwrap(NSRunningApplication(processIdentifier: process.processIdentifier)?.bundleIdentifier)
+            XCTAssertNotEqual(foregroundID, targetID, "Activation must cross real application identities, not two instances of one executable")
+            XCTAssertNotEqual(targetID, NSRunningApplication.current.bundleIdentifier)
+            if !viewMode && !scoped {
+                // The host may have been idle behind another app for a long
+                // time. Do not rely on activation immediately after launch.
+                runApplication(for: 10)
+                XCTAssertEqual(NSWorkspace.shared.frontmostApplication?.processIdentifier, owner.processIdentifier)
+                XCTAssertFalse(NSApp.isActive)
+            }
+        }
         XCTAssertNotEqual(NSWorkspace.shared.frontmostApplication?.processIdentifier, process.processIdentifier)
         let point = CGPoint(x: try XCTUnwrap(initial["x"]).doubleValue, y: try XCTUnwrap(initial["y"]).doubleValue)
         XCTAssertEqual(DesktopInputTarget.target(at: point, excluding: [])?.windowID, rear)
@@ -107,7 +164,7 @@ final class WindowActivationTests: XCTestCase {
         XCTAssertGreaterThan(samples.count, 2)
         XCTAssertTrue(samples.allSatisfy { $0.1 == pointer }, "Activation must not move the owner's physical pointer.")
         let gap = zip(samples, samples.dropFirst()).map { $1.0 - $0.0 }.max() ?? 0
-        print("ACTIVATION_PROOF scoped=\(scoped) axButton=\(!viewMode) pointerSamples=\(samples.count) maximumSampleGapMs=\(gap * 1000)")
+        print("ACTIVATION_PROOF scoped=\(scoped) axButton=\(!viewMode) backgroundCaller=\(backgroundCaller) pointerSamples=\(samples.count) maximumSampleGapMs=\(gap * 1000)")
     }
 
     private static let fixture = #"""
@@ -116,7 +173,16 @@ import Darwin
 let metadata = URL(fileURLWithPath: CommandLine.arguments[1])
 let viewMode = CommandLine.arguments[2] == "view"
 let app = NSApplication.shared
-app.setActivationPolicy(.accessory)
+if CommandLine.arguments[2] == "foreground" {
+    app.setActivationPolicy(.regular); app.finishLaunching()
+    let window = NSWindow(contentRect: CGRect(x: 700, y: 80, width: 260, height: 140), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+    window.title = "WAI Remote owned foreground fixture"; window.isReleasedWhenClosed = false
+    window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+    window.makeKeyAndOrderFront(nil); app.activate(ignoringOtherApps: true)
+    let timer = Timer(timeInterval: 30, repeats: false) { _ in app.terminate(nil) }
+    RunLoop.main.add(timer, forMode: .common); app.run(); exit(0)
+}
+app.setActivationPolicy(CommandLine.arguments.contains("regular") ? .regular : .accessory)
 app.finishLaunching()
 func make(_ x: CGFloat) -> NSWindow {
     let window = NSWindow(contentRect: CGRect(x: x, y: 120, width: 340, height: 240), styleMask: [.titled, .closable], backing: .buffered, defer: false)
@@ -155,7 +221,7 @@ func record() {
 }
 presses.changed = record
 record()
-let timer = Timer(timeInterval: 15, repeats: false) { _ in app.terminate(nil) }
+let timer = Timer(timeInterval: 30, repeats: false) { _ in app.terminate(nil) }
 RunLoop.main.add(timer, forMode: .common)
 app.run()
 """#
