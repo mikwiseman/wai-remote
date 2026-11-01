@@ -1,8 +1,12 @@
 # Responsiveness verification
 
+## Commands during WAI menu tracking, 1 November 2026
+
+Mac 71 removes a reproduced delay in own-process accessibility actions during nested menu tracking. Common-mode run-loop scheduling keeps those actions on the main thread while the menu is open; input order and cancellation remain intact. The regression failed before the fix and passed afterward, along with a cancelled-session test and 31 other focused input tests. Sparkle 70→71 was verified on the local Mac. See [release verification](releases/0.3.7-71.md). This does not establish the separate cause of menu hit-target failures or physical iPhone latency on waiMini.
+
 ## Occupied connections, 1 November 2026
 
-Build 70 is available in the existing internal TestFlight group and the normal Mac Sparkle feed; the local Mac completed its 69→70 update. The iPhone no longer retries a busy Mac forever. An explicitly requested switch is limited to an existing control grant and the exact active session, preserving owner pauses and stored permissions. The leftover MacBook QA viewer was disconnected. See [release verification](releases/0.3.7-70.md). Physical iPhone→waiMini handoff and input-to-visible-text latency remain unverified.
+iPhone 70 is available in the existing internal TestFlight group; Mac 71 includes the same handoff change in the normal Sparkle feed. The iPhone no longer retries a busy Mac forever. An explicitly requested switch is limited to an existing control grant and the exact active session, preserving owner pauses and stored permissions. The leftover MacBook QA viewer was disconnected. See [release verification](releases/0.3.7-70.md). Physical iPhone→waiMini handoff and input-to-visible-text latency remain unverified.
 
 ## iPhone touch and input corrections, 1 November 2026
 
