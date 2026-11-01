@@ -83,7 +83,8 @@ final class PopupInputTests: XCTestCase {
         let pointer = try XCTUnwrap(CGEvent(source: nil)).location
         let injector = InputInjector(); injector.setIndependentPointer(true)
         let remotePointer = RemotePointer()
-        injector.excludedWindows = [remotePointer.windowID]
+        let pointerWindowID = remotePointer.windowID
+        injector.excludedWindows = [pointerWindowID]
         defer { remotePointer.hide(); injector.resetSession() }
         state.onSelect = {
             var text = WireMessage(type: "text", state: SessionMachine(surface: .init(id: "popup-test", width: 800, height: 600)).state)
@@ -128,7 +129,7 @@ final class PopupInputTests: XCTestCase {
                 if freshTarget == unrelatedTarget { return }
                 target = freshTarget
                 if target != menuTarget {
-                    print("POPUP_TARGET_MISMATCH hit=\(target) expected=\(String(describing: menuTarget)) comparison=\(unrelatedTarget) document=\(window.windowNumber) pointer=\(remotePointer.windowID)")
+                    print("POPUP_TARGET_MISMATCH hit=\(target) expected=\(String(describing: menuTarget)) comparison=\(unrelatedTarget) document=\(window.windowNumber) pointer=\(pointerWindowID)")
                 }
                 XCTAssertEqual(target, menuTarget)
                 guard target == menuTarget else { selected = true; return }
