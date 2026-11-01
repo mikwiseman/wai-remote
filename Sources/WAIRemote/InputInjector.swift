@@ -254,6 +254,9 @@ private final class InjectedEvents {
             guard destination != .unavailable else { return }
             let event = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: down)
             event?.flags = Self.flags(m.modifiers ?? [])
+            // A private-state event can omit Escape's character in a background
+            // app. Native key equivalents (including XPC SavePanel) need it.
+            if code == 53 { event?.keyboardSetUnicodeString(stringLength: 1, unicodeString: [0x1b]) }
             if down { keys[code] = destination } else { keys[code] = nil }
             post(event)
             // A pressed menu item consumed the shortcut; its key-up has no key-down.

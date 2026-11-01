@@ -6,6 +6,8 @@ import Darwin
 struct WindowInputTarget: Equatable {
     let pid: pid_t
     let windowID: CGWindowID
+    struct KeyboardReceiver: Equatable { let pid: pid_t; let windowID: CGWindowID }
+    var keyboardReceiver: KeyboardReceiver? = nil
     private static func onMainRunLoop<Output>(_ perform: @escaping () -> Output) -> Output {
         if Thread.isMainThread { return perform() }
         let finished = DispatchSemaphore(value: 0)
@@ -86,13 +88,28 @@ struct WindowInputTarget: Equatable {
             return windowNumber(element, &id) == .success && id > 0 ? id : nil
         }
         let app = AXUIElementCreateApplication(pid)
-        guard let windows = value(app, kAXWindowsAttribute) as? [AXUIElement],
-              var current = windows.first(where: { number($0) == windowID }) else { return self }
+        guard let windows = value(app, kAXWindowsAttribute) as? [AXUIElement] else { return self }
+        var selected = windows.first(where: { number($0) == windowID })
+        // AXWindows contains documents, not their attached sheets. A pointer
+        // click may already have selected a sheet's WindowServer address.
+        var pending = windows, visited = 0
+        while selected == nil, let window = pending.popLast(), visited < 64 {
+            visited += 1
+            let sheets = ((value(window, kAXChildrenAttribute) as? [AXUIElement]) ?? [])
+                .filter { value($0, kAXRoleAttribute) as? String == kAXSheetRole }
+            selected = sheets.first(where: { number($0) == windowID }); pending += sheets
+        }
+        guard var current = selected else { return self }
         var destination = self
         for _ in 0..<4 {
             guard let children = value(current, kAXChildrenAttribute) as? [AXUIElement] else { return destination }
             let sheets = children.filter { value($0, kAXRoleAttribute) as? String == kAXSheetRole }
-            guard !sheets.isEmpty else { return destination }
+            if sheets.isEmpty {
+                if value(current, kAXRoleAttribute) as? String == kAXSheetRole {
+                    destination.keyboardReceiver = destination.remoteKeyboardReceiver(children: children, deadline: deadline)
+                }
+                return destination
+            }
             guard sheets.count == 1, let sheet = sheets.first else { return nil }
             // A remote view may be hosted by another process. The AX parent-child
             // relationship proves scope; WindowServer supplies its actual owner.
@@ -100,6 +117,39 @@ struct WindowInputTarget: Equatable {
                   let windows = CGWindowListCopyWindowInfo(.optionIncludingWindow, id) as? [[String: Any]],
                   let target = DesktopInputTarget.target(windowID: id, windows: windows) else { return nil }
             destination = target; current = sheet
+        }
+        return nil
+    }
+    /// A SavePanel's outer sheet belongs to its app, but keyboard events belong
+    /// to the linked remote view service. Its virtual window is not listed by
+    /// CGWindowList. Keep validation/geometry on the outer sheet and address only
+    /// keys to the receiver proven by that sheet's accessibility child chain.
+    private func remoteKeyboardReceiver(children: [AXUIElement], deadline: TimeInterval) -> KeyboardReceiver? {
+        var roots: [(AXUIElement, CGWindowID)] = []
+        for child in children {
+            guard let role = Self.axValues(child, [kAXRoleAttribute], deadline: deadline)?.first as? String else { return nil }
+            if role == kAXSplitGroupRole, let id = Self.axWindowID(child, deadline: deadline), id != windowID { roots.append((child, id)) }
+        }
+        guard roots.count == 1, let (root, remoteID) = roots.first else { return nil }
+        var pending = [(root, 0)], visited = 0
+        while let (element, depth) = pending.popLast(), visited < 64 {
+            visited += 1
+            guard let values = Self.axValues(element, [kAXRoleAttribute, kAXChildrenAttribute, kAXTopLevelUIElementAttribute], deadline: deadline),
+                  ![kAXSheetRole, kAXWindowRole].contains(values[0] as? String ?? "") else { return nil }
+            var owner: pid_t = 0
+            if AXUIElementGetPid(element, &owner) == .success, owner > 0, owner != pid,
+               CFGetTypeID(values[2]) == AXUIElementGetTypeID() {
+                let top = values[2] as! AXUIElement
+                // AppKit may wrap the top-level remote window in a host-owned
+                // proxy. The actual foreign descendant supplies the receiver PID.
+                var topOwner: pid_t = 0
+                guard AXUIElementGetPid(top, &topOwner) == .success, topOwner == owner || topOwner == pid,
+                      Self.axWindowID(top, deadline: deadline) == remoteID,
+                      Self.axWindowID(element, deadline: deadline) == remoteID else { return nil }
+                return KeyboardReceiver(pid: owner, windowID: remoteID)
+            }
+            guard depth < 8 else { return nil }
+            pending += ((values[1] as? [AXUIElement]) ?? []).map { ($0, depth + 1) }
         }
         return nil
     }
@@ -216,7 +266,11 @@ struct WindowInputTarget: Equatable {
                 if withoutActuallyEscaping(permitted, do: { item.press(if: $0) }) { return .menu }
                 guard permitted() else { return .cancelled }
             }
-            delivery.key(pid, event)
+            if let receiver = keyboardReceiver {
+                event.setIntegerValueField(.eventTargetUnixProcessID, value: Int64(receiver.pid))
+                event.setIntegerValueField(CGEventField(rawValue: 51)!, value: Int64(receiver.windowID))
+                delivery.key(receiver.pid, event)
+            } else { delivery.key(pid, event) }
         default:
             // The public PID path misses Chromium's background mouse handler.
             // Deliver once through SkyLight, never through global HID.
@@ -243,39 +297,100 @@ struct WindowInputTarget: Equatable {
         if pid == ProcessInfo.processInfo.processIdentifier && !Thread.isMainThread {
             return Self.onMainRunLoop { self.button(at: point) }
         }
-        guard let frame, frame.contains(point), let hit = element(at: point) else { return nil }
-        return button(climbingFrom: hit, at: point)
+        let deadline = ProcessInfo.processInfo.systemUptime + 0.05
+        guard let frame, frame.contains(point), let hit = element(at: point, deadline: deadline) else { return nil }
+        return button(climbingFrom: hit, at: point, deadline: deadline) ?? button(inHitSheet: hit, at: point, deadline: deadline)
+    }
+    /// Save panels bridge a separate process. Their app-scoped hit test can stop
+    /// at the sheet, and their proxy buttons omit AXTopLevelUIElement entirely.
+    private static func axValues(_ element: AXUIElement, _ names: [String], deadline: TimeInterval) -> [AnyObject]? {
+        let remaining = deadline - ProcessInfo.processInfo.systemUptime
+        guard remaining > 0 else { return nil }
+        AXUIElementSetMessagingTimeout(element, Float(remaining))
+        var raw: CFArray?
+        guard AXUIElementCopyMultipleAttributeValues(element, names as CFArray, [], &raw) == .success,
+              let values = raw as? [AnyObject], values.count == names.count else { return nil }
+        return values
+    }
+    private static func axWindowID(_ element: AXUIElement, deadline: TimeInterval) -> CGWindowID? {
+        let remaining = deadline - ProcessInfo.processInfo.systemUptime
+        guard remaining > 0, let windowNumber else { return nil }
+        AXUIElementSetMessagingTimeout(element, Float(remaining))
+        var id: CGWindowID = 0
+        return windowNumber(element, &id) == .success && id > 0 ? id : nil
+    }
+    private func button(inHitSheet sheet: AXUIElement, at point: CGPoint, deadline: TimeInterval) -> Button? {
+        guard Self.axValues(sheet, [kAXRoleAttribute], deadline: deadline)?.first as? String == kAXSheetRole,
+              Self.axWindowID(sheet, deadline: deadline) == windowID else { return nil }
+        let names = [kAXRoleAttribute, kAXPositionAttribute, kAXSizeAttribute, kAXChildrenAttribute]
+        var pending = [(sheet, 0)], visited = 0, result: Button?
+        while let (element, depth) = pending.popLast(), visited < 64 {
+            visited += 1
+            guard let values = Self.axValues(element, names, deadline: deadline) else { return nil }
+            guard let bounds = Self.rect(values[1], values[2]), bounds.contains(point) else { continue }
+            if values[0] as? String == kAXButtonRole {
+                guard result == nil, let button = button(climbingFrom: element, at: point, deadline: deadline) else { return nil }
+                result = button
+            } else {
+                // An uninspectable containing branch may cover a sibling button.
+                guard depth < 8, depth == 0 || ![kAXSheetRole, kAXWindowRole].contains(values[0] as? String ?? "") else { return nil }
+                pending += ((values[3] as? [AXUIElement]) ?? []).map { ($0, depth + 1) }
+            }
+        }
+        return pending.isEmpty ? result : nil
+    }
+    /// Stop at the nearest sheet/window. A parent document cannot authorize an
+    /// action in a child sheet, even when a remote-view proxy has no top-level ID.
+    private func ownsButton(_ element: AXUIElement, topLevel: AnyObject, deadline: TimeInterval) -> Bool {
+        if CFGetTypeID(topLevel) == AXUIElementGetTypeID() {
+            return Self.axWindowID(topLevel as! AXUIElement, deadline: deadline) == windowID
+        }
+        var current = element
+        for _ in 0..<8 {
+            guard let values = Self.axValues(current, [kAXRoleAttribute, kAXParentAttribute], deadline: deadline) else { return false }
+            if let role = values[0] as? String, [kAXSheetRole, kAXWindowRole].contains(role) {
+                return Self.axWindowID(current, deadline: deadline) == windowID
+            }
+            guard CFGetTypeID(values[1]) == AXUIElementGetTypeID() else { return false }
+            current = values[1] as! AXUIElement
+        }
+        return false
     }
     /// The app's own hit test returns the topmost element, so sheets, overlays and
     /// web modals win over the controls they cover, whatever their tree order.
-    private func element(at point: CGPoint) -> AXUIElement? {
+    private func element(at point: CGPoint, deadline: TimeInterval = ProcessInfo.processInfo.systemUptime + 0.05) -> AXUIElement? {
+        let remaining = deadline - ProcessInfo.processInfo.systemUptime
+        guard remaining > 0 else { return nil }
         let app = AXUIElementCreateApplication(pid)
-        AXUIElementSetMessagingTimeout(app, 0.05)
+        AXUIElementSetMessagingTimeout(app, Float(remaining))
         var hit: AXUIElement?
         return AXUIElementCopyElementAtPosition(app, Float(point.x), Float(point.y), &hit) == .success ? hit : nil
     }
     /// The hit is often a title or image inside the button. Climb a few parents
     /// to an enabled button of this window; anything else gets ordinary events.
-    func button(climbingFrom hit: AXUIElement, at point: CGPoint) -> Button? {
-        guard let windowNumber = Self.windowNumber else { return nil }
-        let names = [kAXRoleAttribute, kAXPositionAttribute, kAXSizeAttribute, kAXEnabledAttribute, kAXTopLevelUIElementAttribute, kAXParentAttribute] as CFArray
+    func button(climbingFrom hit: AXUIElement, at point: CGPoint, deadline: TimeInterval = ProcessInfo.processInfo.systemUptime + 0.05) -> Button? {
+        let names = [kAXRoleAttribute, kAXPositionAttribute, kAXSizeAttribute, kAXEnabledAttribute, kAXTopLevelUIElementAttribute, kAXParentAttribute]
         var element = hit
         for _ in 0...3 {
-            AXUIElementSetMessagingTimeout(element, 0.05)
-            var raw: CFArray?
-            guard AXUIElementCopyMultipleAttributeValues(element, names, [], &raw) == .success,
-                  let values = raw as? [AnyObject], values.count == 6 else { return nil }
+            guard let values = Self.axValues(element, names, deadline: deadline) else { return nil }
             // AXWindow deliberately returns a sheet's parent document. The top
             // level element preserves the sheet's own WindowServer address.
             if values[0] as? String == kAXButtonRole, values[3] as? Bool == true, let bounds = Self.rect(values[1], values[2]),
-               bounds.contains(point), CFGetTypeID(values[4]) == AXUIElementGetTypeID() {
-                var id: CGWindowID = 0, actions: CFArray?
-                guard windowNumber(values[4] as! AXUIElement, &id) == .success, id == windowID,
-                      AXUIElementCopyActionNames(element, &actions) == .success,
+               bounds.contains(point) {
+                var actions: CFArray?
+                guard ownsButton(element, topLevel: values[4], deadline: deadline) else { return nil }
+                let remaining = deadline - ProcessInfo.processInfo.systemUptime
+                guard remaining > 0 else { return nil }
+                AXUIElementSetMessagingTimeout(element, Float(remaining))
+                guard AXUIElementCopyActionNames(element, &actions) == .success,
                       (actions as? [String])?.contains(kAXPressAction) == true else { return nil }
                 let pressed = element
                 return Button(frame: bounds, requiresMainThread: pid == ProcessInfo.processInfo.processIdentifier, action: {
-                    AXUIElementPerformAction(pressed, kAXPressAction as CFString) == .success
+                    AXUIElementSetMessagingTimeout(pressed, 0.25)
+                    let result = AXUIElementPerformAction(pressed, kAXPressAction as CFString)
+                    // Closing an XPC save panel can tear down its reply channel.
+                    // The action was submitted; never replay a pointer click.
+                    return result == .success || result == .cannotComplete
                 })
             }
             guard CFGetTypeID(values[5]) == AXUIElementGetTypeID() else { return nil }

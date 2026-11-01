@@ -1,5 +1,6 @@
 import AppKit
 import Darwin
+import RemoteCore
 import XCTest
 @testable import WAIRemote
 
@@ -90,5 +91,159 @@ final class ModalInputTests: XCTestCase {
         fixture.window.endSheet(fixture.alert.window, returnCode: .cancel)
         RunLoop.main.run(until: Date().addingTimeInterval(0.05))
         XCTAssertEqual(fixture.target.keyboardDestination(), fixture.target)
+    }
+
+    private func runApplication(for duration: TimeInterval) {
+        let stop = Timer(timeInterval: duration, repeats: false) { _ in
+            NSApp.stop(nil)
+            NSApp.postEvent(NSEvent.otherEvent(with: .applicationDefined, location: .zero, modifierFlags: [],
+                timestamp: 0, windowNumber: 0, context: nil, subtype: 0, data1: 0, data2: 0)!, atStart: false)
+        }
+        RunLoop.main.add(stop, forMode: .common)
+        NSApp.run(); stop.invalidate()
+    }
+    private func axValue(_ element: AXUIElement, _ attribute: String) -> CFTypeRef? {
+        var value: CFTypeRef?
+        return AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success ? value : nil
+    }
+    @MainActor private final class SaveResponse: NSObject {
+        var response: NSApplication.ModalResponse?
+        var completions = 0
+        var coveredPresses = 0
+        @objc func coveredPress() { coveredPresses += 1 }
+    }
+    @MainActor private struct SaveFixture {
+        let window: NSWindow
+        let panel: NSSavePanel
+        let target: WindowInputTarget
+        let cancel: AXUIElement
+        let filename: AXUIElement
+        let response: SaveResponse
+        let previousFrontmost: NSRunningApplication?
+        func close() {
+            if response.response == nil, window.attachedSheet != nil { panel.cancel(nil) }
+            panel.orderOut(nil); window.orderOut(nil); window.close()
+            if NSWorkspace.shared.frontmostApplication?.processIdentifier == getpid(), previousFrontmost?.processIdentifier != getpid() {
+                _ = previousFrontmost?.activate(options: [])
+            }
+        }
+    }
+    private func saveFixture() throws -> SaveFixture {
+        let previous = NSWorkspace.shared.frontmostApplication
+        NSApplication.shared.setActivationPolicy(.regular)
+        if !Self.launched { NSApplication.shared.finishLaunching(); Self.launched = true }
+        let window = NSWindow(contentRect: NSRect(x: -30_000, y: -30_000, width: 700, height: 500),
+                              styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.title = "WAI Remote SavePanel test"
+        window.isReleasedWhenClosed = false; window.animationBehavior = .none
+        let response = SaveResponse()
+        let covered = NSButton(frame: window.contentView!.bounds)
+        covered.title = "Covered document action"; covered.target = response; covered.action = #selector(SaveResponse.coveredPress)
+        window.contentView?.addSubview(covered); window.orderFrontRegardless()
+        let panel = NSSavePanel()
+        panel.directoryURL = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        panel.nameFieldStringValue = "WAI Remote routing fixture.txt"
+        panel.title = "WAI Remote SavePanel test"
+        panel.canCreateDirectories = false; panel.animationBehavior = .none
+        panel.beginSheetModal(for: window) { response.response = $0; response.completions += 1 }
+        runApplication(for: 0.5)
+        panel.orderFrontRegardless()
+        typealias Number = @convention(c) (AXUIElement, UnsafeMutablePointer<CGWindowID>) -> AXError
+        let number = unsafeBitCast(try XCTUnwrap(dlsym(UnsafeMutableRawPointer(bitPattern: -2), "_AXUIElementGetWindow")), to: Number.self)
+        let windows = try XCTUnwrap(axValue(AXUIElementCreateApplication(getpid()), kAXWindowsAttribute) as? [AXUIElement])
+        let parent = try XCTUnwrap(windows.first { var id: CGWindowID = 0; return number($0, &id) == .success && id == CGWindowID(window.windowNumber) })
+        var pending = [parent], cancel: AXUIElement?, filename: AXUIElement?, count = 0
+        while let element = pending.popLast(), count < 128 {
+            count += 1
+            if axValue(element, kAXIdentifierAttribute) as? String == "CancelButton" { cancel = element }
+            if axValue(element, kAXRoleAttribute) as? String == kAXTextFieldRole,
+               (axValue(element, kAXValueAttribute) as? String)?.contains("WAI Remote routing fixture") == true { filename = element }
+            pending += (axValue(element, kAXChildrenAttribute) as? [AXUIElement]) ?? []
+        }
+        guard let cancel, let filename else {
+            panel.cancel(nil); panel.orderOut(nil); window.orderOut(nil); window.close()
+            throw NSError(domain: "SavePanelFixture", code: 1)
+        }
+        return SaveFixture(window: window, panel: panel,
+                           target: WindowInputTarget(pid: getpid(), windowID: CGWindowID(panel.windowNumber)),
+                           cancel: cancel, filename: filename, response: response, previousFrontmost: previous)
+    }
+    private func message(_ type: String) -> WireMessage {
+        WireMessage(type: type, state: SessionMachine(surface: .init(id: "fixture", width: 700, height: 500)).state)
+    }
+    private func click(_ element: AXUIElement, fixture: SaveFixture, injector: InputInjector) throws {
+        let point = try center(element), frame = try XCTUnwrap(fixture.target.frame)
+        for action in ["down", "up"] {
+            var click = message("pointer"); click.action = action; click.button = 0
+            click.x = (point.x - frame.minX) / max(1, frame.width - 1)
+            click.y = (point.y - frame.minY) / max(1, frame.height - 1)
+            injector.apply(click)
+        }
+        runApplication(for: 0.5)
+    }
+    private func key(_ key: String, injector: InputInjector) {
+        for action in ["down", "up"] { var event = message("key"); event.key = key; event.action = action; injector.apply(event) }
+        runApplication(for: 1.5)
+    }
+    func testActualSavePanelCancelUsesItsWindowServerTarget() throws {
+        try XCTSkipUnless(CGPreflightPostEventAccess(), "Native input requires existing post-event permission; this test never requests it.")
+        let fixture = try saveFixture(); defer { fixture.close() }
+        let point = try center(fixture.cancel)
+        XCTAssertEqual(DesktopInputTarget.target(at: point, excluding: []), fixture.target)
+        let parent = WindowInputTarget(pid: getpid(), windowID: CGWindowID(fixture.window.windowNumber))
+        XCTAssertNil(parent.button(climbingFrom: fixture.cancel, at: point))
+        let injector = InputInjector(); injector.setWindowTarget(fixture.target)
+        defer { injector.resetSession() }
+        try click(fixture.cancel, fixture: fixture, injector: injector)
+        XCTAssertEqual(fixture.response.response, .cancel)
+        XCTAssertEqual(fixture.response.completions, 1)
+        XCTAssertEqual(fixture.response.coveredPresses, 0)
+    }
+    func testActualSavePanelEscapeUsesItsLinkedKeyboardReceiver() throws {
+        try XCTSkipUnless(CGPreflightPostEventAccess(), "Native input requires existing post-event permission; this test never requests it.")
+        let fixture = try saveFixture(); defer { fixture.close() }
+        let resolved = try XCTUnwrap(fixture.target.keyboardDestination())
+        let receiver = try XCTUnwrap(resolved.keyboardReceiver)
+        XCTAssertEqual(resolved.pid, fixture.target.pid)
+        XCTAssertEqual(resolved.windowID, fixture.target.windowID)
+        XCTAssertEqual(resolved.frame, fixture.target.frame)
+        XCTAssertNotEqual(receiver.pid, resolved.pid)
+        XCTAssertNotEqual(receiver.windowID, resolved.windowID)
+        XCTAssertNil(fixture.target.keyboardDestination(budget: 0)?.keyboardReceiver)
+        let injector = InputInjector(); injector.setWindowTarget(fixture.target)
+        defer { injector.resetSession() }
+        key("Escape", injector: injector)
+        XCTAssertEqual(fixture.response.response, .cancel)
+        XCTAssertEqual(fixture.response.completions, 1)
+        XCTAssertEqual(fixture.response.coveredPresses, 0)
+        let unrelated = NSWindow(contentRect: NSRect(x: -30_000, y: -30_000, width: 100, height: 100),
+                                 styleMask: [.borderless], backing: .buffered, defer: false)
+        unrelated.isReleasedWhenClosed = false; unrelated.orderFrontRegardless()
+        defer { unrelated.orderOut(nil); unrelated.close() }
+        XCTAssertNil(WindowInputTarget(pid: getpid(), windowID: CGWindowID(unrelated.windowNumber)).keyboardDestination()?.keyboardReceiver)
+        // The old virtual receiver must not outlive its validated outer sheet.
+        fixture.panel.orderOut(nil); runApplication(for: 0.1)
+        var posts = 0, delivery = WindowInputTarget.Delivery.system
+        delivery.key = { _, _ in posts += 1 }
+        _ = resolved.post(try XCTUnwrap(CGEvent(keyboardEventSource: nil, virtualKey: 7, keyDown: true)), permitted: { true }, delivery: delivery)
+        XCTAssertEqual(posts, 0)
+    }
+    func testActualSavePanelUnicodeAndPhysicalKeyReachItsFilename() throws {
+        try XCTSkipUnless(CGPreflightPostEventAccess(), "Native input requires existing post-event permission; this test never requests it.")
+        let fixture = try saveFixture(); defer { fixture.close() }
+        let injector = InputInjector(); injector.setWindowTarget(fixture.target)
+        defer { injector.resetSession() }
+        try click(fixture.filename, fixture: fixture, injector: injector)
+        let unicode = "Привет é 🦊"
+        var text = message("text"); text.text = unicode; injector.apply(text)
+        runApplication(for: 0.5)
+        let typed = try XCTUnwrap(axValue(fixture.filename, kAXValueAttribute) as? String)
+        XCTAssertTrue(typed.contains(unicode), typed)
+        key("KeyX", injector: injector)
+        let physical = try XCTUnwrap(axValue(fixture.filename, kAXValueAttribute) as? String)
+        XCTAssertNotEqual(physical, typed)
+        XCTAssertTrue(physical.contains(unicode), physical)
+        XCTAssertNil(fixture.response.response)
+        XCTAssertEqual(fixture.response.coveredPresses, 0)
     }
 }
