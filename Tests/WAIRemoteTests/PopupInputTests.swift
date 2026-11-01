@@ -66,10 +66,9 @@ final class PopupInputTests: XCTestCase {
         window.title = "WAI Remote popup test"; window.isReleasedWhenClosed = false; window.animationBehavior = .none
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         #if DEBUG
-        let fixtureWindow = CGWindowID(window.windowNumber)
         WindowInputTarget.inputTrace = { target, message in
-            guard target.pid == getpid(), target.windowID == fixtureWindow else { return }
-            print("popup-fixture \(ProcessInfo.processInfo.systemUptime): \(message)")
+            guard target.pid == getpid() else { return }
+            print("popup-fixture \(ProcessInfo.processInfo.systemUptime): target=\(target.windowID) \(message)")
         }
         defer { WindowInputTarget.inputTrace = nil }
         #endif
