@@ -304,7 +304,8 @@ struct WindowInputTarget: Equatable {
         guard let frame = delivery.frame(self), address(event, frame: frame) else { return .frameGone }
         let down = [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(event.type)
         if activating && down {
-            _ = activateForDesktopClick(at: event.location, if: permitted)
+            let activated = activateForDesktopClick(at: event.location, if: permitted)
+            Self.traceHostedMenu("activated outer=\(pid):\(windowID) result=\(activated) frame=\(String(describing: self.frame))")
             guard permitted() else { return .cancelled }
         }
         var primed = false
@@ -314,6 +315,7 @@ struct WindowInputTarget: Equatable {
         if backgroundDown {
             Self.traceHostedMenu("prepare outer=\(pid):\(windowID) point=\(event.location)")
             delivery.prepare(self)
+            Self.traceHostedMenu("prepared outer=\(pid):\(windowID) frame=\(String(describing: self.frame))")
         }
         if down && delivery.frontmostPID() != pid && !delivery.transient(self, event.location) {
             primed = true
