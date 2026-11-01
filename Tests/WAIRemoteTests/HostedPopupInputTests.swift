@@ -76,6 +76,22 @@ final class HostedPopupInputTests: XCTestCase {
             print("HOSTED_POPUP_OWNED_WINDOW id=\(window[kCGWindowNumber as String] ?? 0) layer=\(window[kCGWindowLayer as String] ?? 0) bounds=\(window[kCGWindowBounds as String] ?? [:])")
         }
     }
+    private func diagnoseDelivery(since started: TimeInterval) {
+        let log = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wai-remote-performance-\(ProcessInfo.processInfo.processIdentifier).jsonl")
+        print("HOSTED_POPUP_DELIVERY_TRACE enabled=\(PerformanceLog.enabled) since=\(started)")
+        guard let data = try? Data(contentsOf: log) else { return }
+        var printed = 0
+        for line in data.split(separator: 10) {
+            guard let row = (try? JSONSerialization.jsonObject(with: Data(line))) as? [String: Any],
+                  let time = row["time"] as? Double, time >= started,
+                  let event = row["event"] as? String,
+                  ["input-button-lookup", "input-delivery"].contains(event) else { continue }
+            print("HOSTED_POPUP_DELIVERY \(String(decoding: line, as: UTF8.self))")
+            printed += 1
+            if printed == 20 { break }
+        }
+    }
     private func assertStaleReceiverRejectsKeyUp(_ target: WindowInputTarget) throws {
         let source = try XCTUnwrap(CGEventSource(stateID: .privateState))
         let event = try XCTUnwrap(CGEvent(keyboardEventSource: source, virtualKey: 53, keyDown: false))
@@ -257,6 +273,7 @@ final class HostedPopupInputTests: XCTestCase {
             guard refreshedTarget == target else { return }
             print("HOSTED_POPUP_SETUP alreadyFocused=\(String(describing: alreadyFocused)) originalPoint=\(originalPoint) clickPoint=\(point) moved=\(point != originalPoint)")
         }
+        let firstClickStarted = Date().timeIntervalSince1970
         click(point, injector: injector)
         let opened = Date().addingTimeInterval(2)
         var item: AXUIElement?, menuTarget: WindowInputTarget?
@@ -271,6 +288,7 @@ final class HostedPopupInputTests: XCTestCase {
             }
         } while menuTarget == nil && Date() < opened
         if menuTarget == nil {
+            diagnoseDelivery(since: firstClickStarted)
             diagnoseOpeningFailure(popup: popup, filename: filename, target: target, point: point,
                                    initialPopupFrame: initialPopupFrame, initialFilenameFrame: initialFilenameFrame, state: state())
         }
@@ -336,7 +354,14 @@ final class HostedPopupInputTests: XCTestCase {
                 XCTAssertEqual(try XCTUnwrap(CGEvent(source: nil)).location, pointer)
             }
             if let retainedMenuDestination { try assertStaleReceiverRejectsKeyUp(retainedMenuDestination) }
-            let receiver = try XCTUnwrap(target.keyboardDestination()?.keyboardReceiver)
+            let routingStarted = ProcessInfo.processInfo.systemUptime
+            let routed = target.keyboardDestination()
+            let routingMs = (ProcessInfo.processInfo.systemUptime - routingStarted) * 1000
+            if routed?.keyboardReceiver == nil {
+                print("HOSTED_POPUP_RECEIVER_FAILED lookupMs=\(routingMs) target=\(target.pid):\(target.windowID) result=\(String(describing: routed)) virtual=\(virtualID) state=\(state())")
+                diagnoseDelivery(since: firstClickStarted)
+            }
+            let receiver = try XCTUnwrap(routed?.keyboardReceiver)
             XCTAssertEqual(receiver.pid, remotePID)
             XCTAssertEqual(receiver.windowID, virtualID, "A dismissed menu cannot remain the keyboard receiver")
             XCTAssertNotEqual(receiver.windowID, menu.windowID)
