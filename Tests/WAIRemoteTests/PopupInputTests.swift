@@ -96,7 +96,7 @@ final class PopupInputTests: XCTestCase {
                 guard state.tracking, !selected,
                       let item = find(in: [element], matching: { value($0, kAXRoleAttribute) as? String == kAXMenuItemRole &&
                           value($0, kAXTitleAttribute) as? String == "Second fixture choice" }), let point = center(item) else { return }
-                guard let target = DesktopInputTarget.target(at: point, excluding: injector.excludedWindows) else {
+                guard var target = DesktopInputTarget.target(at: point, excluding: injector.excludedWindows) else {
                     XCTFail("The menu item must have a window target"); selected = true; return
                 }
                 // menuWillOpen precedes the transient WindowServer window. Wait
@@ -120,7 +120,18 @@ final class PopupInputTests: XCTestCase {
                     return
                 }
                 guard unrelatedTarget.frame?.maxX ?? 0 < 0 else { return }
+                // Moving the comparison window and hit-testing it are separate
+                // WindowServer observations. Wait only for that owned window.
+                guard let freshTarget = DesktopInputTarget.target(at: point, excluding: injector.excludedWindows) else {
+                    XCTFail("The open menu must remain addressable"); selected = true; return
+                }
+                if freshTarget == unrelatedTarget { return }
+                target = freshTarget
+                if target != menuTarget {
+                    print("POPUP_TARGET_MISMATCH hit=\(target) expected=\(String(describing: menuTarget)) comparison=\(unrelatedTarget) document=\(window.windowNumber) pointer=\(remotePointer.windowID)")
+                }
                 XCTAssertEqual(target, menuTarget)
+                guard target == menuTarget else { selected = true; return }
                 if !displayedPointer {
                     displayedPointer = true
                     let cursorX = Double((point.x - injector.bounds.minX) / (injector.bounds.width - 1))
