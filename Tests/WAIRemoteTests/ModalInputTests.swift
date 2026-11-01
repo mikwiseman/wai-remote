@@ -87,7 +87,7 @@ final class ModalInputTests: XCTestCase {
         let started = ProcessInfo.processInfo.systemUptime
         var maximumCall: TimeInterval = 0
         // The default-budget checks above exercise normal routing. Repeated
-        // scope assertions must not turn runner scheduling into a 10 ms gate.
+        // scope assertions must not turn runner scheduling into a production deadline gate.
         for _ in 0..<100 {
             let callStarted = ProcessInfo.processInfo.systemUptime
             let destination = fixture.target.keyboardDestination(budget: 0.1)
