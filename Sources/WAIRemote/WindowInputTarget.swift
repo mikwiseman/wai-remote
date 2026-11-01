@@ -364,14 +364,22 @@ struct WindowInputTarget: Equatable {
             guard AXUIElementGetPid(child, &childPID) == .success, childPID == pid || childPID == owner else { return nil }
             root = child; remoteWindow = id
         }
+        let rootChildren = (values[3] as? [AXUIElement]) ?? []
         var pending = [(root, 0)], visited = 0, result: Button?
         while let (element, depth) = pending.popLast(), visited < 64 {
             visited += 1
             guard let values = Self.axValues(element, names, deadline: deadline) else { return nil }
             guard let bounds = Self.rect(values[1], values[2]), bounds.contains(point) else { continue }
             if let remoteWindow, Self.axWindowID(element, deadline: deadline) != remoteWindow { return nil }
-            if values[0] as? String == kAXButtonRole {
-                guard result == nil, let button = button(climbingFrom: element, at: point, deadline: deadline) else { return nil }
+            var hostedPopup = false
+            if values[0] as? String == kAXPopUpButtonRole {
+                let popupWindow = remoteWindow ?? (role == kAXSheetRole ?
+                    remoteKeyboardReceiver(children: rootChildren, deadline: deadline)?.windowID : nil)
+                hostedPopup = popupWindow != nil && Self.axWindowID(element, deadline: deadline) == popupWindow
+            }
+            if values[0] as? String == kAXButtonRole || hostedPopup {
+                guard result == nil, let button = button(climbingFrom: element, at: point, deadline: deadline,
+                                                        includingHostedPopup: hostedPopup) else { return nil }
                 result = button
             } else {
                 // An uninspectable containing branch may cover a sibling button.
@@ -444,7 +452,7 @@ struct WindowInputTarget: Equatable {
     /// The hit may be a title or image inside a button or menu item. Climb a few
     /// parents to an enabled control of this window; otherwise use ordinary events.
     func button(climbingFrom hit: AXUIElement, at point: CGPoint, deadline: TimeInterval = ProcessInfo.processInfo.systemUptime + 0.05,
-                includingDisabledMenuItems: Bool = false, excluding: Set<CGWindowID> = []) -> Button? {
+                includingDisabledMenuItems: Bool = false, excluding: Set<CGWindowID> = [], includingHostedPopup: Bool = false) -> Button? {
         let names = [kAXRoleAttribute, kAXPositionAttribute, kAXSizeAttribute, kAXEnabledAttribute, kAXTopLevelUIElementAttribute, kAXParentAttribute]
         var element = hit
         for _ in 0...3 {
@@ -453,7 +461,8 @@ struct WindowInputTarget: Equatable {
             // level element preserves the sheet's own WindowServer address.
             let isMenuItem = values[0] as? String == kAXMenuItemRole
             let enabled = values[3] as? Bool == true
-            if [kAXButtonRole, kAXMenuItemRole].contains(values[0] as? String ?? ""),
+            if [kAXButtonRole, kAXMenuItemRole].contains(values[0] as? String ?? "") ||
+                includingHostedPopup && values[0] as? String == kAXPopUpButtonRole,
                enabled || isMenuItem && includingDisabledMenuItems,
                let bounds = Self.rect(values[1], values[2]), bounds.contains(point) {
                 var actions: CFArray?
