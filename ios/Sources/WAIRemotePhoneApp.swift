@@ -42,12 +42,18 @@ struct PhoneView: View {
 #if DEBUG
 extension PhoneModel {
     /// `-WAIDemoSession <screenshot>` opens a session on that picture with no Mac;
-    /// `-WAIDemoState draw|paused|waiting|reconnecting|zoomed|typing` picks the moment. Debug builds only.
+    /// `-WAIDemoState draw|paused|waiting|reconnecting|zoomed|typing` picks the moment.
+    /// `busy|busy-legacy` previews occupied connections without a screenshot. Debug builds only.
     static let demoScreen = UserDefaults.standard.string(forKey: "WAIDemoSession").flatMap(UIImage.init(contentsOfFile:))
     static let demoMoment = UserDefaults.standard.string(forKey: "WAIDemoState") ?? ""
     func startDemo() {
-        guard let image = Self.demoScreen, !connected else { return }
         let moment = Self.demoMoment
+        if moment == "busy" || moment == "busy-legacy" {
+            computerName = "Mac Mini"
+            showBusyForTesting(canSwitch: moment == "busy")
+            return
+        }
+        guard let image = Self.demoScreen, !connected else { return }
         let state: [String: Any] = ["sessionID": "demo", "controllerEpoch": 0, "inputEpoch": 0, "modeGeneration": 0, "layerEpoch": 0, "reason": "",
             "nextSequence": 0, "mode": RemoteMode(rawValue: moment)?.rawValue ?? "control", "permissions": ["control": true, "annotate": true],
             "surface": ["id": "demo", "revision": 1, "width": Int(image.size.width), "height": Int(image.size.height)]]

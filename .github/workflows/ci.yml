@@ -40,7 +40,7 @@ jobs:
             -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO test
           xcrun simctl bootstatus "$simulator" -b
           xcrun simctl install "$simulator" "$RUNNER_TEMP/wai-ios/Build/Products/Debug-iphonesimulator/WAI Remote.app"
-          for state in zoomed typing; do
+          for state in zoomed typing busy busy-legacy; do
             xcrun simctl launch --terminate-running-process "$simulator" is.wai.remote.ios \
               -WAIDemoSession "$GITHUB_WORKSPACE/ios/Tests/Fixtures/desktop.png" -WAIDemoState "$state"
             sleep 5

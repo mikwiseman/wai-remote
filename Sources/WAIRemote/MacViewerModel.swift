@@ -136,7 +136,7 @@ class MacViewerModel: ObservableObject {
             let token = attempt
             let signal = ViewerSignaling(identity: identity, invite: invite); signaling = signal
             signal.onReady = { [weak self] configuration in guard let self, self.attempt == token, !self.offerStarted else { return }; self.offerStarted = true; self.createOffer(invite, token: token, ice: configuration) }
-            signal.onMessage = { [weak self] message in guard let self, self.attempt == token else { return }; self.signal(message, invite: invite, token: token) }
+            signal.onMessage = { [weak self] message in guard let self, self.attempt == token else { return }; self.receiveSignal(message) }
             signal.onFailure = { [weak self] in
                 guard let self, self.attempt == token else { return }
                 if !self.connected { self.recover(message: "Ожидаем Mac…", cause: "signaling-failed") }
@@ -185,7 +185,9 @@ class MacViewerModel: ObservableObject {
             } catch { self.recover(message: "Ищем сетевой маршрут…", cause: "negotiation") }
         }
     }
-    private func signal(_ message: [String: Any], invite: RemoteInvite, token: UUID) {
+    func receiveSignal(_ message: [String: Any]) {
+        guard let invite = currentInvite else { return }
+        let token = attempt
         if message["type"] as? String == "answer" {
             guard !answerAccepted, message["from"] as? String == invite.hostID,
                   let body = message["body"] as? [String: Any], let encoded = body["payload"] as? String,
@@ -207,8 +209,16 @@ class MacViewerModel: ObservableObject {
         } else if message["type"] as? String == "unavailable" { recover(message: "Ожидаем Mac…", cause: "host-unavailable") }
         else if message["type"] as? String == "reject" {
             let reason = (message["body"] as? [String: Any])?["reason"] as? String
-            if reason == "network" || reason == "busy" { recover(message: reason == "busy" ? "Mac занят. Ожидаем освобождения…" : "Восстанавливаем соединение…", cause: reason == "busy" ? "host-busy" : "host-network"); return }
-            disconnect(message: reason == "busy" ? "К Mac уже подключено другое устройство." : reason == "network" ? "Не удалось установить соединение через интернет. Попробуйте подключиться снова." : reason == "new-invite-required" ? "Откройте доступ к экрану Mac и создайте новое приглашение." : "Подключение отклонено на Mac.")
+            if reason == "network" { recover(message: "Восстанавливаем соединение…", cause: "host-network"); return }
+            if reason == "busy" {
+                disconnect(message: "Mac занят")
+                detail = "Отключитесь на другом устройстве и подключитесь снова."
+            } else if reason == "session-replaced" {
+                disconnect(message: "Управление перенесено на другое устройство")
+                detail = "Чтобы вернуться, отключитесь на другом устройстве и подключитесь снова."
+            } else {
+                disconnect(message: reason == "new-invite-required" ? "Откройте доступ к экрану Mac и создайте новое приглашение." : "Подключение отклонено на Mac.")
+            }
         }
     }
     func recover(message: String, cause: String) {

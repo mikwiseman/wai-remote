@@ -18,6 +18,8 @@ final class PhoneModel: ObservableObject {
     @Published var connecting = false
     @Published var connected = false
     @Published var connectionInterrupted = false
+    @Published private(set) var connectionBusy = false
+    @Published private(set) var canSwitchConnection = false
     @Published var receivedFrame = false
     @Published var track: RTCVideoTrack? { didSet { if track !== oldValue { receivedFrame = false } } }
     private(set) var session = ViewerSession()
@@ -39,6 +41,8 @@ final class PhoneModel: ObservableObject {
     private var interruptionTimer: Timer?
     private var retryDelay: TimeInterval = 1
     private var recoveryInvitation: String?
+    private var busyInvite: RemoteInvite?
+    private var busySessionID: String?
     private var heartbeatAcknowledged = false
     private var lastReply = ProcessInfo.processInfo.systemUptime
     private var currentInvite: RemoteInvite?
@@ -54,6 +58,7 @@ final class PhoneModel: ObservableObject {
     private var heldButtons = Set<Int>()
     #if DEBUG
     var onTransmitForTesting: ((WireMessage) -> Void)?
+    var onConnectForTesting: (([String: Any]) -> Void)?
     #endif
     var mode: RemoteMode { session.mode }
     var canControl: Bool { connected && receivedFrame && !connectionInterrupted && !session.invalidated && mode == .control && session.state?.permissions.control == true }
@@ -84,6 +89,7 @@ final class PhoneModel: ObservableObject {
         UserDefaults.standard.set(invitation, forKey: "lastMac")
     }
     func suspend() {
+        guard !connectionBusy else { return }
         let target = connected ? currentInvite?.savedURL.absoluteString : recoveryInvitation
         disconnect(message: "Сеанс приостановлен")
         resumeInvitation = target
@@ -107,7 +113,8 @@ final class PhoneModel: ObservableObject {
         invitation = invite.invitationURL.absoluteString
         // Opening a link prepares the invitation; the visible Connect button starts the session.
     }
-    func connect() {
+    func connect() { connect(replacingSessionID: nil) }
+    private func connect(replacingSessionID: String?) {
         guard !connecting, !connected, let identity else { return }
         do {
             let invite = try RemoteInvite(invitation)
@@ -115,9 +122,15 @@ final class PhoneModel: ObservableObject {
             currentInvite = invite
             computerName = computers.first(where: { $0.id == invite.hostID })?.name ?? "Mac"
             connecting = true; status = "Подключаемся…"; detail = "Подключение через интернет. Ждём ответ Mac."
+            #if DEBUG
+            if let onConnectForTesting {
+                onConnectForTesting(try offerBody(invite, sdp: "test SDP", replacingSessionID: replacingSessionID))
+                return
+            }
+            #endif
             let token = attempt
             let signal = ViewerSignaling(identity: identity, invite: invite); signaling = signal
-            signal.onReady = { [weak self] configuration in guard let self, self.attempt == token, !self.offerStarted else { return }; self.offerStarted = true; self.createOffer(invite, token: token, ice: configuration) }
+            signal.onReady = { [weak self] configuration in guard let self, self.attempt == token, !self.offerStarted else { return }; self.offerStarted = true; self.createOffer(invite, token: token, ice: configuration, replacingSessionID: replacingSessionID) }
             signal.onMessage = { [weak self] message in guard let self, self.attempt == token else { return }; self.signal(message, invite: invite, token: token) }
             signal.onFailure = { [weak self] in
                 guard let self, self.attempt == token else { return }
@@ -129,8 +142,19 @@ final class PhoneModel: ObservableObject {
             signal.connect()
         } catch { status = "Нужно приглашение с Mac"; detail = "Скопируйте ссылку целиком из WAI Remote. Для первого подключения нужна новая ссылка." }
     }
-    private func createOffer(_ invite: RemoteInvite, token: UUID, ice: ICEConfiguration) {
-        guard let identity else { return }
+    func switchConnection() {
+        guard connectionBusy, canSwitchConnection, let invite = busyInvite, let sessionID = busySessionID else { return }
+        disconnect(message: "")
+        invitation = invite.savedURL.absoluteString
+        connect(replacingSessionID: sessionID)
+    }
+    func retryConnection() {
+        guard connectionBusy, let invite = busyInvite else { return }
+        disconnect(message: "")
+        invitation = invite.invitationURL.absoluteString
+        connect()
+    }
+    private func createOffer(_ invite: RemoteInvite, token: UUID, ice: ICEConfiguration, replacingSessionID: String?) {
         let peer = ViewerTransport(ice: ice); transport = peer
         peer.onVideo = { [weak self] track in guard let self, self.attempt == token else { return }; self.track = track }
         peer.onMessage = { [weak self] data in guard let self, self.attempt == token else { return }; self.receive(data) }
@@ -153,18 +177,25 @@ final class PhoneModel: ObservableObject {
             guard let self, self.attempt == token else { return }
             do {
                 let sdp = try result.get()
-                var random = Data(count: 32)
-                guard random.withUnsafeMutableBytes({ SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }) == errSecSuccess else { throw RemoteInvite.Invalid.invitation }
-                self.nonce = random.base64URL
-                let payload = try JSONSerialization.data(withJSONObject: ["hostID": invite.hostID, "peerID": identity.id, "publicKey": identity.publicKey,
-                    "nonce": self.nonce, "expiresAt": (Date().timeIntervalSince1970 + 100) * 1000,
-                    "name": String(UIDevice.current.name.prefix(40)), "sdp": sdp])
-                var body = ["payload": payload.base64URL, "signature": try identity.sign(payload, domain: "wai-remote/offer/v1")]
-                if let secret = invite.secret { body["proof"] = DeviceIdentity.pairingProof(secret: secret, payload: payload) }
+                let body = try self.offerBody(invite, sdp: sdp, replacingSessionID: replacingSessionID)
                 self.signaling?.send(["type": "offer", "body": body])
                 self.status = invite.secret == nil ? "Подключаемся к Mac…" : "Подтвердите на Mac"; self.detail = "Первое подключение требует разрешения владельца Mac."
             } catch { self.recover(message: "Ищем сетевой маршрут…") }
         }
+    }
+    private func offerBody(_ invite: RemoteInvite, sdp: String, replacingSessionID: String?) throws -> [String: String] {
+        guard let identity else { throw RemoteInvite.Invalid.invitation }
+        var random = Data(count: 32)
+        guard random.withUnsafeMutableBytes({ SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }) == errSecSuccess else { throw RemoteInvite.Invalid.invitation }
+        nonce = random.base64URL
+        var object: [String: Any] = ["hostID": invite.hostID, "peerID": identity.id, "publicKey": identity.publicKey,
+            "nonce": nonce, "expiresAt": (Date().timeIntervalSince1970 + 100) * 1000,
+            "name": String(UIDevice.current.name.prefix(40)), "sdp": sdp]
+        if let replacingSessionID { object["replaceSessionID"] = replacingSessionID }
+        let payload = try JSONSerialization.data(withJSONObject: object)
+        var body = ["payload": payload.base64URL, "signature": try identity.sign(payload, domain: "wai-remote/offer/v1")]
+        if let secret = invite.secret { body["proof"] = DeviceIdentity.pairingProof(secret: secret, payload: payload) }
+        return body
     }
     private func signal(_ message: [String: Any], invite: RemoteInvite, token: UUID) {
         if message["type"] as? String == "answer" {
@@ -188,12 +219,37 @@ final class PhoneModel: ObservableObject {
             }
         } else if message["type"] as? String == "unavailable" { recover(message: "Ожидаем Mac…") }
         else if message["type"] as? String == "reject" {
-            let reason = (message["body"] as? [String: Any])?["reason"] as? String
-            if reason == "network" || reason == "busy" { recover(message: reason == "busy" ? "Mac занят. Ожидаем освобождения…" : "Восстанавливаем соединение…"); return }
-            disconnect(message: reason == "busy" ? "К Mac уже подключено другое устройство." : reason == "new-invite-required" ? "Нужно новое приглашение для настоящего экрана Mac." : "Подключение отклонено на Mac.")
+            let body = message["body"] as? [String: Any] ?? [:]
+            let reason = body["reason"] as? String
+            if reason == "busy" {
+                var sessionID: String?
+                if body["payload"] != nil || body["signature"] != nil {
+                    guard message["from"] as? String == invite.hostID,
+                          let encoded = body["payload"] as? String, let data = Data(base64URL: encoded), data.count <= 2048,
+                          let signature = body["signature"] as? String,
+                          DeviceIdentity.verify(signature, data: data, domain: "wai-remote/busy/v1", publicKey: invite.publicKey),
+                          let payload = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                          payload["hostID"] as? String == invite.hostID, payload["peerID"] as? String == identity?.id,
+                          payload["nonce"] as? String == nonce else {
+                        disconnect(message: "Подлинность Mac не подтверждена. Откройте новое приглашение."); return
+                    }
+                    if let offered = payload["sessionID"] as? String, !offered.isEmpty, offered.utf8.count <= 128 { sessionID = offered }
+                }
+                showBusy(invite: invite, sessionID: sessionID)
+                return
+            }
+            if reason == "network" { recover(message: "Восстанавливаем соединение…"); return }
+            disconnect(message: reason == "session-replaced" ? "Подключение продолжено на другом устройстве" : reason == "new-invite-required" ? "Нужно новое приглашение для настоящего экрана Mac." : "Подключение отклонено на Mac.")
         }
     }
+    private func showBusy(invite: RemoteInvite, sessionID: String?) {
+        disconnect(message: "Mac подключён к другому устройству")
+        busyInvite = invite; busySessionID = sessionID
+        connectionBusy = true; canSwitchConnection = sessionID != nil; connecting = true
+        detail = sessionID == nil ? "Отключитесь на другом устройстве и повторите подключение." : "Подключение на другом устройстве завершится."
+    }
     func recover(message: String) {
+        guard !connectionBusy else { return }
         let target = currentInvite.flatMap { invite in
             invite.secret == nil || connected || answerAccepted ? invite.savedURL.absoluteString : nil
         } ?? recoveryInvitation
@@ -219,6 +275,7 @@ final class PhoneModel: ObservableObject {
         attempt = UUID(); heartbeat?.invalidate(); heartbeat = nil; timeout?.invalidate(); timeout = nil
         signaling?.close(); signaling = nil; transport?.close(); transport = nil
         currentInvite = nil
+        busyInvite = nil; busySessionID = nil; connectionBusy = false; canSwitchConnection = false
         connecting = false; connected = false; connectionInterrupted = false; receivedFrame = false; track = nil; session = ViewerSession()
         strokes = []; previews = [:]; snapshot = nil; hiddenIDs = []; erasedIDs = []; activeStroke = nil; selectedID = nil
         answerAccepted = false; offerStarted = false; gestureRevision += 1; heldButtons = []
@@ -351,5 +408,20 @@ final class PhoneModel: ObservableObject {
 extension PhoneModel {
     /// The demo session's stand-in for a Mac's first state message; see `startDemo`.
     func acceptDemo(_ state: HostState) { _ = try? session.accept(state) }
+    func prepareConnectionForTesting(invitation: String, nonce: String) throws {
+        identity = DeviceIdentity()
+        currentInvite = try RemoteInvite(invitation); self.invitation = invitation; self.nonce = nonce
+        connecting = true
+    }
+    func receiveSignalForTesting(_ message: [String: Any]) {
+        guard let invite = currentInvite else { return }
+        signal(message, invite: invite, token: attempt)
+    }
+    func showBusyForTesting(canSwitch: Bool) {
+        identity = DeviceIdentity()
+        let host = DeviceIdentity()
+        guard let invite = try? RemoteInvite("http://127.0.0.1:1/#host=\(host.id)&key=\(host.publicKey)") else { return }
+        showBusy(invite: invite, sessionID: canSwitch ? "demo-session" : nil)
+    }
 }
 #endif

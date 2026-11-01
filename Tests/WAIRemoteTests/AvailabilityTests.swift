@@ -47,6 +47,23 @@ final class AvailabilityTests: XCTestCase {
         XCTAssertFalse(model.connecting)
         XCTAssertFalse(model.connected)
     }
+    func testBusyAndReplacedSessionsStopAutomaticRecovery() throws {
+        for reason in ["busy", "session-replaced"] {
+            let model = viewer()
+            model.invitation = try RemoteInvite(model.invitation).savedURL.absoluteString
+            let hostID = try RemoteInvite(model.invitation).hostID
+            model.begin(); model.connecting = false; model.connected = true
+            let retried = expectation(description: "No automatic retry after \(reason)"); retried.isInverted = true
+            model.onReconnect = { _ in retried.fulfill() }
+            model.receiveSignal(["type": "reject", "from": hostID, "body": ["reason": reason]])
+            XCTAssertFalse(model.connected)
+            XCTAssertFalse(model.connecting, "Busy is a stable state until a deliberate retry.")
+            XCTAssertEqual(model.status, reason == "busy" ? "Mac занят" : "Управление перенесено на другое устройство")
+            XCTAssertFalse(model.detail.isEmpty)
+            wait(for: [retried], timeout: 1.2)
+            model.disconnect()
+        }
+    }
     func testPersistentWindowGrantKeepsItsOriginalProcessIdentity() throws {
         let name = "availability-\(UUID())", defaults = UserDefaults(suiteName: name)!
         defer { defaults.removePersistentDomain(forName: name) }

@@ -15,7 +15,7 @@ settings:
     DEVELOPMENT_TEAM: R4A779QVVY
     CODE_SIGN_STYLE: Automatic
     MARKETING_VERSION: 0.3.7
-    CURRENT_PROJECT_VERSION: 69
+    CURRENT_PROJECT_VERSION: 70
 targets:
   WAIRemotePhone:
     type: application
