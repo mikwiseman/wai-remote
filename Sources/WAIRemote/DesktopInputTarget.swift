@@ -5,6 +5,7 @@ import Darwin
 struct DesktopInputTarget {
     private(set) var keyboardTarget: WindowInputTarget?
     private var gestureTarget: WindowInputTarget?
+    private var keyboardTargetBeforeGesture: WindowInputTarget?
     private var buttons = Set<Int>()
     private var scrollTarget: WindowInputTarget?
     private var scrollPinned = false
@@ -13,13 +14,24 @@ struct DesktopInputTarget {
                           hitTest: (CGPoint) -> WindowInputTarget?) -> WindowInputTarget? {
         let target = buttons.isEmpty ? hitTest(point) : gestureTarget
         if action == "down" {
-            if buttons.isEmpty { gestureTarget = target; keyboardTarget = target }
+            if buttons.isEmpty {
+                gestureTarget = target; keyboardTargetBeforeGesture = keyboardTarget; keyboardTarget = target
+            }
             buttons.insert(button)
         } else if action == "up" {
             buttons.remove(button)
-            if buttons.isEmpty { gestureTarget = nil }
+            if buttons.isEmpty { gestureTarget = nil; keyboardTargetBeforeGesture = nil }
         }
         return target
+    }
+
+    /// An exact-hit menu item may name its owning document. Keep typing there
+    /// only if it is the same document the remote user had already selected.
+    mutating func preserveKeyboardTargetForMenu(document: WindowInputTarget?) {
+        guard !buttons.isEmpty, gestureTarget != nil else { return }
+        guard let previous = keyboardTargetBeforeGesture, let document,
+              previous.pid == document.pid, previous.windowID == document.windowID else { keyboardTarget = nil; return }
+        keyboardTarget = previous
     }
 
     mutating func scroll(at point: CGPoint, phase: String?, momentum: String?,
@@ -40,7 +52,7 @@ struct DesktopInputTarget {
         return target
     }
 
-    mutating func liftHeld() { gestureTarget = nil; buttons.removeAll(); scrollTarget = nil; scrollPinned = false }
+    mutating func liftHeld() { gestureTarget = nil; keyboardTargetBeforeGesture = nil; buttons.removeAll(); scrollTarget = nil; scrollPinned = false }
     mutating func reset() { liftHeld(); keyboardTarget = nil }
 
     // WindowServer hit-testing respects input regions. Bounding-box scans do

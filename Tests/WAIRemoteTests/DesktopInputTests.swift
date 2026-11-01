@@ -85,4 +85,57 @@ final class DesktopInputTests: XCTestCase {
         routing.reset()
         XCTAssertNil(routing.keyboardTarget)
     }
+
+    func testMenuSelectionPreservesItsProvenDocumentWhileItsGestureStaysPinned() {
+        var routing = DesktopInputTarget()
+        let menu = WindowInputTarget(pid: first.pid, windowID: 33)
+        _ = routing.pointer(action: "down", button: 0, at: point, hitTest: { _ in self.first })
+        _ = routing.pointer(action: "up", button: 0, at: point, hitTest: { _ in self.first })
+        _ = routing.pointer(action: "down", button: 0, at: point, hitTest: { _ in menu })
+        routing.preserveKeyboardTargetForMenu(document: first)
+        XCTAssertEqual(routing.keyboardTarget, first)
+        XCTAssertEqual(routing.pointer(action: "move", button: 0, at: point, hitTest: { _ in self.second }), menu)
+        XCTAssertEqual(routing.pointer(action: "up", button: 0, at: point, hitTest: { _ in self.second }), menu)
+        XCTAssertEqual(routing.keyboardTarget, first, "Closing the menu must not strand subsequent typing on its transient window.")
+    }
+
+    func testForeignServiceMenuKeepsTypingInItsProvenOriginalDocument() {
+        var routing = DesktopInputTarget()
+        let serviceMenu = WindowInputTarget(pid: 303, windowID: 33)
+        _ = routing.pointer(action: "down", button: 0, at: point, hitTest: { _ in self.first })
+        _ = routing.pointer(action: "up", button: 0, at: point, hitTest: { _ in self.first })
+        _ = routing.pointer(action: "down", button: 0, at: point, hitTest: { _ in serviceMenu })
+        routing.preserveKeyboardTargetForMenu(document: first)
+        XCTAssertEqual(routing.keyboardTarget, first, "The menu service PID must not replace the proven document owner")
+        XCTAssertEqual(routing.pointer(action: "move", button: 0, at: point, hitTest: { _ in self.second }), serviceMenu)
+        XCTAssertEqual(routing.pointer(action: "up", button: 0, at: point, hitTest: { _ in self.second }), serviceMenu)
+        XCTAssertEqual(routing.keyboardTarget, first)
+    }
+
+    func testMenuCannotReuseAnUnrelatedOrUnprovenKeyboardTarget() {
+        let cases: [WindowInputTarget?] = [WindowInputTarget(pid: first.pid, windowID: 99),
+            WindowInputTarget(pid: second.pid, windowID: first.windowID), nil]
+        for document in cases {
+            var routing = DesktopInputTarget()
+            _ = routing.pointer(action: "down", button: 0, at: point, hitTest: { _ in self.first })
+            _ = routing.pointer(action: "up", button: 0, at: point, hitTest: { _ in self.first })
+            _ = routing.pointer(action: "down", button: 0, at: point, hitTest: { _ in WindowInputTarget(pid: 303, windowID: 33) })
+            routing.preserveKeyboardTargetForMenu(document: document)
+            XCTAssertNil(routing.keyboardTarget, "A same-app different document, foreign app, or missing parent proof cannot redirect typing.")
+        }
+    }
+
+    func testMenuOnlySessionAndResetCannotInventADocumentTarget() {
+        var routing = DesktopInputTarget()
+        let menu = WindowInputTarget(pid: first.pid, windowID: 33)
+        _ = routing.pointer(action: "down", button: 0, at: point, hitTest: { _ in menu })
+        routing.preserveKeyboardTargetForMenu(document: first)
+        XCTAssertNil(routing.keyboardTarget)
+        _ = routing.pointer(action: "up", button: 0, at: point, hitTest: { _ in menu })
+        _ = routing.pointer(action: "down", button: 0, at: point, hitTest: { _ in self.first })
+        routing.reset()
+        _ = routing.pointer(action: "down", button: 0, at: point, hitTest: { _ in menu })
+        routing.preserveKeyboardTargetForMenu(document: first)
+        XCTAssertNil(routing.keyboardTarget)
+    }
 }

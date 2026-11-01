@@ -136,12 +136,12 @@ private final class InjectedEvents {
     var excludedWindows = Set<CGWindowID>()
     var isCurrent: () -> Bool = { true }
     var allowed: Bool { CGPreflightPostEventAccess() }
-    private func post(_ event: CGEvent?, to target: InputDestination? = nil, releasing: Bool = false, hover: Bool = false) {
+    private func post(_ event: CGEvent?, to target: InputDestination? = nil, releasing: Bool = false, hover: Bool = false, activating: Bool = false) {
         guard releasing || isCurrent() else { outcome = .cancelled; return }
         event?.setIntegerValueField(.eventSourceUserData, value: 0x574149)
         guard let event else { return }
         switch target ?? destination {
-        case .window(let window): outcome = window.post(event, permitted: { releasing || isCurrent() }, hover: hover)
+        case .window(let window): outcome = window.post(event, permitted: { releasing || self.isCurrent() }, hover: hover, activating: activating)
         case .system: event.post(tap: .cghidEventTap); outcome = .system
         case .unavailable: outcome = .noTarget
         }
@@ -178,6 +178,7 @@ private final class InjectedEvents {
                     return
                 }
             }
+            var activating = independentPointer && action == "down" && buttons.isEmpty && windowButton == nil
             if action == "down", buttons.isEmpty, windowButton == nil {
                 buttonDestination = destination
                 if lastClickDestination != destination { clickSequence.reset() }
@@ -191,14 +192,24 @@ private final class InjectedEvents {
             if action == "down", b == 0 {
                 let eligible = keys.isEmpty && buttons.isEmpty && (m.modifiers ?? []).isEmpty
                 let lookupStarted = ProcessInfo.processInfo.systemUptime
-                let pressed = eligible ? destination.window?.button(at: p) : nil
+                let control = eligible || independentPointer ?
+                    destination.window?.button(at: p, includingDisabledMenuItems: true, excluding: excludedWindows) : nil
+                let pressed = eligible ? control : nil
+                if independentPointer, let control, control.isMenuItem {
+                    desktop.preserveKeyboardTargetForMenu(document: control.menuDocument)
+                    activating = false
+                }
                 if PerformanceLog.enabled {
                     PerformanceLog.record("input-button-lookup", ["eligible": eligible, "found": pressed != nil,
                         "heldKeys": keys.count, "heldButtons": buttons.count, "modifiers": (m.modifiers ?? []).count,
                         "accessibilityTrusted": AXIsProcessTrusted(),
                         "lookupMs": (ProcessInfo.processInfo.systemUptime - lookupStarted) * 1000])
                 }
-                if let pressed { windowButton = pressed; outcome = .axPress; return }
+                if let pressed {
+                    if activating { _ = destination.window?.activateForDesktopClick(at: p, if: isCurrent) }
+                    guard isCurrent() else { outcome = .cancelled; return }
+                    windowButton = pressed; outcome = .axPress; return
+                }
             }
             if windowButton != nil {
                 if action == "move" { return }
@@ -237,7 +248,7 @@ private final class InjectedEvents {
                     event?.setIntegerValueField(.mouseEventDeltaY, value: Int64((p.y - previousPoint.y).rounded()))
                 }
                 // Taps from touch viewers arrive without a preceding move.
-                post(event, hover: action == "down" && hovered != p)
+                post(event, hover: action == "down" && hovered != p, activating: activating)
                 hovered = p
                 if action == "up" { buttons.remove(b); clickCounts[b] = nil }
                 if action == "move" && !buttons.isEmpty { clickSequence.reset() }
@@ -254,6 +265,9 @@ private final class InjectedEvents {
             guard destination != .unavailable else { return }
             let event = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: down)
             event?.flags = Self.flags(m.modifiers ?? [])
+            // A private-state event can omit Escape's character in a background
+            // app. Native key equivalents (including XPC SavePanel) need it.
+            if code == 53 { event?.keyboardSetUnicodeString(stringLength: 1, unicodeString: [0x1b]) }
             if down { keys[code] = destination } else { keys[code] = nil }
             post(event)
             // A pressed menu item consumed the shortcut; its key-up has no key-down.

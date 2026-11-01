@@ -15,7 +15,7 @@ settings:
     DEVELOPMENT_TEAM: R4A779QVVY
     CODE_SIGN_STYLE: Automatic
     MARKETING_VERSION: 0.3.7
-    CURRENT_PROJECT_VERSION: 72
+    CURRENT_PROJECT_VERSION: 73
 targets:
   WAIRemotePhone:
     type: application
@@ -53,6 +53,19 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: is.wai.remote.ios.tests
         TEST_HOST: "$(BUILT_PRODUCTS_DIR)/WAI Remote.app/WAI Remote"
         BUNDLE_LOADER: "$(TEST_HOST)"
+  WAIRemotePhoneInteractionTests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - UITests
+      - Tests/Fixtures/desktop.png
+    dependencies:
+      - target: WAIRemotePhone
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: is.wai.remote.ios.interaction-tests
+        TEST_TARGET_NAME: WAIRemotePhone
 schemes:
   WAIRemotePhone:
     build:
@@ -61,3 +74,11 @@ schemes:
     test:
       targets:
         - WAIRemotePhoneTests
+  WAIRemotePhoneInteraction:
+    build:
+      targets:
+        WAIRemotePhone: all
+        WAIRemotePhoneInteractionTests: [test]
+    test:
+      targets:
+        - WAIRemotePhoneInteractionTests
