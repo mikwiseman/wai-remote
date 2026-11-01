@@ -74,8 +74,12 @@ final class WindowActivationTests: XCTestCase {
             if process.isRunning { process.terminate() }; process.waitUntilExit()
             if active { _ = previous?.activate(options: []) }
         }
-        let ready = Date().addingTimeInterval(3)
-        while !FileManager.default.fileExists(atPath: metadata.path), Date() < ready { runApplication(for: 0.05) }
+        let ready = Date().addingTimeInterval(10)
+        while !FileManager.default.fileExists(atPath: metadata.path), process.isRunning, Date() < ready { runApplication(for: 0.05) }
+        guard FileManager.default.fileExists(atPath: metadata.path) else {
+            XCTFail("The owned application must finish launching before a click can be tested")
+            return
+        }
         func state() throws -> [String: NSNumber] { try JSONSerialization.jsonObject(with: Data(contentsOf: metadata)) as! [String: NSNumber] }
         let initial = try state(), rear = try XCTUnwrap(initial["rear"]).uint32Value, front = try XCTUnwrap(initial["front"]).uint32Value
         func order() -> [UInt32] {
@@ -123,11 +127,25 @@ final class WindowActivationTests: XCTestCase {
         XCTAssertEqual(DesktopInputTarget.target(at: point, excluding: [])?.windowID, rear)
         let target = WindowInputTarget(pid: process.processIdentifier, windowID: rear)
         let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier
-        var checks = 0
-        XCTAssertFalse(target.activateForDesktopClick(at: point, if: { checks += 1; return checks == 1 }))
-        XCTAssertGreaterThan(checks, 1, "Cancellation must be rechecked after the AX lookup")
-        XCTAssertEqual(NSWorkspace.shared.frontmostApplication?.processIdentifier, frontmost)
-        XCTAssertEqual(order(), [front, rear])
+        if scoped && !backgroundCaller {
+            // This cancellation-only probe needs a registered AX window. Keep
+            // it out of the desktop cases: their first real click must be cold.
+            let app = AXUIElementCreateApplication(process.processIdentifier)
+            let axReady = Date().addingTimeInterval(3)
+            var registered = false
+            repeat {
+                let deadline = ProcessInfo.processInfo.systemUptime + 0.05
+                let windows = WindowInputTarget.axValues(app, [kAXWindowsAttribute], deadline: deadline)?.first as? [AXUIElement]
+                registered = windows?.contains { WindowInputTarget.axWindowID($0, deadline: deadline) == rear } ?? false
+                if !registered { runApplication(for: 0.05) }
+            } while !registered && Date() < axReady
+            XCTAssertTrue(registered)
+            var checks = 0
+            XCTAssertFalse(target.activateForDesktopClick(at: point, if: { checks += 1; return checks == 1 }))
+            XCTAssertGreaterThan(checks, 1, "Cancellation must be rechecked after the AX lookup")
+            XCTAssertEqual(NSWorkspace.shared.frontmostApplication?.processIdentifier, frontmost)
+            XCTAssertEqual(order(), [front, rear])
+        }
         let pointer = try XCTUnwrap(CGEvent(source: nil)).location
         var samples: [(TimeInterval, CGPoint)] = [(ProcessInfo.processInfo.systemUptime, pointer)]
         let sampler = Timer.connectionTimer(withTimeInterval: 0.01, repeats: true) { _ in
