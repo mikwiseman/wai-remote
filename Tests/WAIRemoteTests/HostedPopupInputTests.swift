@@ -33,13 +33,16 @@ final class HostedPopupInputTests: XCTestCase {
         }
         return nil
     }
-    private func center(_ element: AXUIElement) -> CGPoint? {
+    private func axFrame(_ element: AXUIElement) -> CGRect? {
         guard let position = value(element, kAXPositionAttribute), let size = value(element, kAXSizeAttribute),
               CFGetTypeID(position) == AXValueGetTypeID(), CFGetTypeID(size) == AXValueGetTypeID() else { return nil }
         var origin = CGPoint.zero, extent = CGSize.zero
         guard AXValueGetValue(position as! AXValue, .cgPoint, &origin),
               AXValueGetValue(size as! AXValue, .cgSize, &extent), extent.width > 0, extent.height > 0 else { return nil }
-        return CGPoint(x: origin.x + extent.width / 2, y: origin.y + extent.height / 2)
+        return CGRect(origin: origin, size: extent)
+    }
+    private func center(_ element: AXUIElement) -> CGPoint? {
+        axFrame(element).map { CGPoint(x: $0.midX, y: $0.midY) }
     }
     private func windowID(_ element: AXUIElement) -> CGWindowID? {
         WindowInputTarget.axWindowID(element, deadline: ProcessInfo.processInfo.systemUptime + 0.03)
@@ -81,6 +84,39 @@ final class HostedPopupInputTests: XCTestCase {
         delivery.key = { _, _ in delivered += 1 }
         XCTAssertEqual(target.post(event, permitted: { true }, delivery: delivery), .frameGone)
         XCTAssertEqual(delivered, 0, "A stale menu key must never reach its former service or another window")
+    }
+    private func diagnoseOpeningFailure(popup: AXUIElement, filename: AXUIElement?, target: WindowInputTarget,
+                                        point: CGPoint, initialPopupFrame: CGRect, initialFilenameFrame: CGRect?,
+                                        state: [String: NSNumber]) {
+        let deadline = ProcessInfo.processInfo.systemUptime + 0.8
+        print("HOSTED_POPUP_OPEN_FAILED uptime=\(ProcessInfo.processInfo.systemUptime) foreground=\(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0) targetFrame=\(String(describing: target.frame)) clickPoint=\(point) initialPopupFrame=\(initialPopupFrame) initialFilenameFrame=\(String(describing: initialFilenameFrame)) state=\(state)")
+        for (label, element) in [("popup", Optional(popup)), ("filename", filename)] {
+            guard let element, let values = WindowInputTarget.axValues(element,
+                [kAXPositionAttribute, kAXSizeAttribute, kAXFocusedAttribute, kAXValueAttribute], deadline: deadline) else { continue }
+            var origin = CGPoint.zero, size = CGSize.zero
+            if CFGetTypeID(values[0]) == AXValueGetTypeID() { _ = AXValueGetValue(values[0] as! AXValue, .cgPoint, &origin) }
+            if CFGetTypeID(values[1]) == AXValueGetTypeID() { _ = AXValueGetValue(values[1] as! AXValue, .cgSize, &size) }
+            print("HOSTED_POPUP_OPEN_CONTROL kind=\(label) frame=\(CGRect(origin: origin, size: size)) focused=\(String(describing: values[2] as? Bool)) value=\(String(describing: values[3] as? String))")
+        }
+        if ProcessInfo.processInfo.systemUptime < deadline {
+            AXUIElementSetMessagingTimeout(popup, Float(min(0.05, deadline - ProcessInfo.processInfo.systemUptime)))
+            var actions: CFArray?
+            let result = AXUIElementCopyActionNames(popup, &actions)
+            print("HOSTED_POPUP_OPEN_ACTIONS result=\(result.rawValue) actions=\(String(describing: actions))")
+        }
+        if ProcessInfo.processInfo.systemUptime < deadline {
+            let application = AXUIElementCreateApplication(target.pid)
+            AXUIElementSetMessagingTimeout(application, Float(min(0.05, deadline - ProcessInfo.processInfo.systemUptime)))
+            var hit: AXUIElement?
+            let result = AXUIElementCopyElementAtPosition(application, Float(point.x), Float(point.y), &hit)
+            let role = hit.flatMap { WindowInputTarget.axValues($0, [kAXRoleAttribute], deadline: deadline)?.first as? String }
+            let id = hit.flatMap { WindowInputTarget.axWindowID($0, deadline: deadline) }
+            print("HOSTED_POPUP_OPEN_HIT result=\(result.rawValue) role=\(role ?? "nil") window=\(id ?? 0) windowServer=\(String(describing: DesktopInputTarget.target(at: point, excluding: [])))")
+        }
+        if ProcessInfo.processInfo.systemUptime + 0.05 < deadline {
+            let button = target.button(at: point)
+            print("HOSTED_POPUP_OPEN_LOOKUP found=\(button != nil) frame=\(String(describing: button?.frame))")
+        }
     }
     func testHostedFormatPopupSelectsItsSecondItem() throws { try interact(select: true) }
     func testEscapeDismissesHostedFormatMenuWithoutClosingThePanel() throws { try interact(select: false) }
@@ -178,7 +214,8 @@ final class HostedPopupInputTests: XCTestCase {
             XCTAssertEqual(value(outer, kAXRoleAttribute) as? String, kAXWindowRole,
                            "The standalone case must exercise a host window, not an attached AXSheet")
         }
-        let point = try XCTUnwrap(center(popup)), virtualID = try XCTUnwrap(windowID(popup))
+        let initialPopupFrame = try XCTUnwrap(axFrame(popup)), virtualID = try XCTUnwrap(windowID(popup))
+        var point = CGPoint(x: initialPopupFrame.midX, y: initialPopupFrame.midY)
         var proxyPID: pid_t = 0; AXUIElementGetPid(popup, &proxyPID)
         let remotePID = try XCTUnwrap(owner(virtualID))
         print("HOSTED_POPUP_TOPOLOGY standalone=\(standalone) outer=\(target.pid):\(target.windowID) proxy=\(proxyPID):\(virtualID) actualOwner=\(remotePID)")
@@ -192,20 +229,36 @@ final class HostedPopupInputTests: XCTestCase {
         let pointer = try XCTUnwrap(CGEvent(source: nil)).location
         let injector = InputInjector(); injector.setIndependentPointer(true)
         defer { injector.resetSession() }
-        var filename: AXUIElement?
+        var filename: AXUIElement?, initialFilenameFrame: CGRect?
         if select {
             let windows = (value(application, kAXWindowsAttribute) as? [AXUIElement]) ?? []
             let field = try XCTUnwrap(find(in: windows) {
                 value($0, kAXRoleAttribute) as? String == kAXTextFieldRole &&
                 (value($0, kAXValueAttribute) as? String)?.contains("Owned unsaved popup fixture") == true
             })
-            let fieldPoint = try XCTUnwrap(center(field))
+            let fieldFrame = try XCTUnwrap(axFrame(field))
+            let fieldPoint = CGPoint(x: fieldFrame.midX, y: fieldFrame.midY)
+            initialFilenameFrame = fieldFrame
             XCTAssertEqual(DesktopInputTarget.target(at: fieldPoint, excluding: []), target)
-            click(fieldPoint, injector: injector)
+            let alreadyFocused = value(field, kAXFocusedAttribute) as? Bool
+            // SavePanel initially focuses its filename. A redundant synthetic
+            // click can still be in flight when the next AXPress opens a menu.
             let focused = Date().addingTimeInterval(1)
             while value(field, kAXFocusedAttribute) as? Bool != true && Date() < focused { pump(0.05) }
-            XCTAssertEqual(value(field, kAXFocusedAttribute) as? Bool, true)
+            let focusedNow = value(field, kAXFocusedAttribute) as? Bool
+            XCTAssertEqual(focusedNow, true)
+            guard focusedNow == true else {
+                diagnoseOpeningFailure(popup: popup, filename: field, target: target, point: point,
+                                       initialPopupFrame: initialPopupFrame, initialFilenameFrame: initialFilenameFrame, state: state())
+                return
+            }
             filename = field
+            let originalPoint = point
+            point = try XCTUnwrap(center(popup))
+            let refreshedTarget = DesktopInputTarget.target(at: point, excluding: [])
+            XCTAssertEqual(refreshedTarget, target)
+            guard refreshedTarget == target else { return }
+            print("HOSTED_POPUP_SETUP alreadyFocused=\(String(describing: alreadyFocused)) originalPoint=\(originalPoint) clickPoint=\(point) moved=\(point != originalPoint)")
         }
         click(point, injector: injector)
         let opened = Date().addingTimeInterval(2)
@@ -220,6 +273,10 @@ final class HostedPopupInputTests: XCTestCase {
                 menuTarget = actual
             }
         } while menuTarget == nil && Date() < opened
+        if menuTarget == nil {
+            diagnoseOpeningFailure(popup: popup, filename: filename, target: target, point: point,
+                                   initialPopupFrame: initialPopupFrame, initialFilenameFrame: initialFilenameFrame, state: state())
+        }
         let menu = try XCTUnwrap(menuTarget, "One production click must open the real remote popup menu")
         let second = try XCTUnwrap(item), secondPoint = try XCTUnwrap(center(second))
         print("HOSTED_POPUP_MENU target=\(menu.pid):\(menu.windowID) itemWindow=\(windowID(second) ?? 0)")
@@ -327,7 +384,12 @@ let record = Timer(timeInterval: 0.05, repeats: true) { _ in
     guard let sheet = standalone ? preparedPanel : window.attachedSheet, sheet.isVisible else { return }
     let data: [String: NSNumber] = ["sheet": NSNumber(value: sheet.windowNumber),
         "document": NSNumber(value: window.windowNumber), "attached": NSNumber(value: window.attachedSheet?.windowNumber ?? 0),
-        "active": NSNumber(value: app.isActive), "writes": NSNumber(value: writes)]
+        "active": NSNumber(value: app.isActive), "writes": NSNumber(value: writes),
+        "key": NSNumber(value: app.keyWindow?.windowNumber ?? 0), "main": NSNumber(value: app.mainWindow?.windowNumber ?? 0),
+        "panelKey": NSNumber(value: sheet.isKeyWindow), "panelMain": NSNumber(value: sheet.isMainWindow),
+        "panelX": NSNumber(value: sheet.frame.minX), "panelY": NSNumber(value: sheet.frame.minY),
+        "panelWidth": NSNumber(value: sheet.frame.width), "panelHeight": NSNumber(value: sheet.frame.height),
+        "recordedAt": NSNumber(value: ProcessInfo.processInfo.systemUptime)]
     try! JSONSerialization.data(withJSONObject: data).write(to: metadata, options: .atomic)
 }
 RunLoop.main.add(record, forMode: .common)
