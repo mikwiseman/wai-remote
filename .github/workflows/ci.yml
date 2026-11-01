@@ -17,6 +17,7 @@ jobs:
       - run: swift test
   ios:
     runs-on: macos-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
         with:
@@ -37,11 +38,19 @@ jobs:
             -derivedDataPath "$RUNNER_TEMP/wai-ios" \
             -resultBundlePath "$RUNNER_TEMP/wai-ios-results.xcresult" \
             -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO test
+          for state in zoomed typing; do
+            xcrun simctl launch --terminate-running-process "$simulator" is.wai.remote.ios \
+              -WAIDemoSession "$GITHUB_WORKSPACE/ios/Tests/Fixtures/desktop.png" -WAIDemoState "$state"
+            sleep 5
+            xcrun simctl io "$simulator" screenshot "$RUNNER_TEMP/iphone-$state.png"
+          done
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: iphone-test-results
-          path: ${{ runner.temp }}/wai-ios-results.xcresult
+          path: |
+            ${{ runner.temp }}/wai-ios-results.xcresult
+            ${{ runner.temp }}/iphone-*.png
           retention-days: 7
   gateway:
     runs-on: ubuntu-latest
