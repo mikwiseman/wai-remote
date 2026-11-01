@@ -4,6 +4,24 @@ import XCTest
 @testable import WAIRemote
 
 final class WindowInputTests: XCTestCase {
+    func testOrdinaryInputDoesNotQueryWindowServerTwiceWithoutInterveningWork() throws {
+        let target = WindowInputTarget(pid: 123, windowID: 456)
+        let events = try [key(0, []), key(0, [], down: false),
+            XCTUnwrap(CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: 1, wheel2: 0, wheel3: 0)),
+            XCTUnwrap(CGEvent(mouseEventSource: nil, mouseType: .mouseMoved,
+                mouseCursorPosition: CGPoint(x: 250, y: 420), mouseButton: .left))]
+        for event in events {
+            var lookups = 0, delivered = 0
+            let delivery = WindowInputTarget.Delivery(frame: { _ in
+                lookups += 1; return CGRect(x: 100, y: 200, width: 800, height: 600)
+            }, frontmostPID: { 123 }, transient: { _, _ in false }, prepare: { _ in },
+                pointer: { _, _ in delivered += 1 }, pause: { _ in }, key: { _, _ in delivered += 1 })
+            XCTAssertEqual(target.post(event, permitted: { true }, delivery: delivery), .window)
+            XCTAssertEqual(delivered, 1)
+            XCTAssertEqual(lookups, 1, "Typing and scrolling must not pay for duplicate synchronous WindowServer requests.")
+        }
+    }
+
     func testClickInActiveAppDoesNotDismissItsMenuWithAnOffWindowPrimer() throws {
         let target = WindowInputTarget(pid: 123, windowID: 456)
         let event = try XCTUnwrap(CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown,

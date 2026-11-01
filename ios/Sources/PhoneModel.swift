@@ -52,6 +52,9 @@ final class PhoneModel: ObservableObject {
     private var offerStarted = false
     private(set) var lastCursor = InkPoint(0.5, 0.5)
     private var heldButtons = Set<Int>()
+    #if DEBUG
+    var onTransmitForTesting: ((WireMessage) -> Void)?
+    #endif
     var mode: RemoteMode { session.mode }
     var canControl: Bool { connected && receivedFrame && !connectionInterrupted && !session.invalidated && mode == .control && session.state?.permissions.control == true }
     var canDraw: Bool { connected && receivedFrame && !connectionInterrupted && !session.invalidated && mode == .draw && session.state?.permissions.annotate == true }
@@ -231,6 +234,7 @@ final class PhoneModel: ObservableObject {
     @discardableResult private func transmit(_ operation: WireMessage?) -> Bool {
         guard let operation, let data = try? JSONEncoder().encode(operation) else { return false }
         #if DEBUG
+        if let onTransmitForTesting { onTransmitForTesting(operation); return true }
         if Self.demoScreen != nil { return true }
         #endif
         guard transport?.send(data) == true else { recover(message: "Восстанавливаем соединение…"); return false }

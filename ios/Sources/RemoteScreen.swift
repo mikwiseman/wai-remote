@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import MetalKit
 import WebRTC
 import RemoteCore
 
@@ -15,6 +16,7 @@ final class ScreenView: UIView, RTCVideoViewDelegate {
     private let model: PhoneModel
     private let content = UIView()
     private let video = RTCMTLVideoView(frame: .zero)
+    private var videoCadence: PhoneVideoCadence?
     private let ink = PhoneInkView()
     private var currentTrack: RTCVideoTrack?
     private let frameObserver = FirstPhoneFrame()
@@ -22,6 +24,7 @@ final class ScreenView: UIView, RTCVideoViewDelegate {
     private var offset = CGPoint.zero
     private var touches = [ObjectIdentifier: CGPoint]()
     private var start = CGPoint.zero
+    private var startPoint = InkPoint(0.5, 0.5)
     private var previous = CGPoint.zero
     private var moved = false
     private var dragging = false
@@ -30,6 +33,8 @@ final class ScreenView: UIView, RTCVideoViewDelegate {
     private var pairCenter = CGPoint.zero
     private var pairDistance: CGFloat = 0
     private var pairZoom: CGFloat = 1
+    private var pairPoint = InkPoint(0.5, 0.5)
+    private var pairSize = CGSize.zero
     private var revision = -1
     private var zoomRevision = -1
     private var erasePrevious: CGPoint?
@@ -43,6 +48,7 @@ final class ScreenView: UIView, RTCVideoViewDelegate {
         isMultipleTouchEnabled = true; clipsToBounds = true; backgroundColor = .black
         content.isUserInteractionEnabled = false; content.clipsToBounds = true
         video.videoContentMode = .scaleAspectFit; video.delegate = self
+        videoCadence = PhoneVideoCadence(video: video); video.isEnabled = false
         frameObserver.onFrame = { [weak self] in
             guard let self, self.currentTrack != nil, !self.model.connectionInterrupted else { return }
             self.model.receivedFrame = true
@@ -61,6 +67,7 @@ final class ScreenView: UIView, RTCVideoViewDelegate {
         if currentTrack !== model.track {
             currentTrack?.remove(video); currentTrack?.remove(frameObserver)
             currentTrack = model.track; frameObserver.reset()
+            video.isEnabled = currentTrack != nil
             currentTrack?.add(video); currentTrack?.add(frameObserver)
         }
         if !model.receivedFrame && !model.connectionInterrupted { frameObserver.arm() }
@@ -69,15 +76,19 @@ final class ScreenView: UIView, RTCVideoViewDelegate {
         ink.strokes = model.visibleStrokes; ink.selectedID = model.selectedID; ink.surfaceWidth = CGFloat(model.session.state?.surface.width ?? 1280)
         ink.setNeedsDisplay(); setNeedsLayout()
     }
-    func detach() { frameObserver.reset(); resetGesture(); currentTrack?.remove(video); currentTrack?.remove(frameObserver); currentTrack = nil }
+    func detach() { frameObserver.reset(); resetGesture(); currentTrack?.remove(video); currentTrack?.remove(frameObserver); currentTrack = nil; video.isEnabled = false }
     override func layoutSubviews() {
         super.layoutSubviews()
         let surface = model.session.state?.surface
         let ratio = CGFloat(surface?.width ?? 1280) / CGFloat(surface?.height ?? 800)
         let baseWidth = min(bounds.width, bounds.height * ratio)
         let size = CGSize(width: baseWidth * zoom, height: baseWidth / ratio * zoom)
-        offset.x = max(-max(0, (size.width - bounds.width) / 2), min(max(0, (size.width - bounds.width) / 2), offset.x))
-        offset.y = max(-max(0, (size.height - bounds.height) / 2), min(max(0, (size.height - bounds.height) / 2), offset.y))
+        // A zoomed desktop may still fit on one axis. Its letterbox space lets
+        // that axis follow the pinch too, without moving the image offscreen.
+        let limitX = zoom > 1 ? abs(size.width - bounds.width) / 2 : 0
+        let limitY = zoom > 1 ? abs(size.height - bounds.height) / 2 : 0
+        offset.x = max(-limitX, min(limitX, offset.x))
+        offset.y = max(-limitY, min(limitY, offset.y))
         content.frame = CGRect(x: (bounds.width - size.width) / 2 + offset.x, y: (bounds.height - size.height) / 2 + offset.y, width: size.width, height: size.height)
         video.frame = content.bounds; ink.frame = content.bounds; ink.setNeedsDisplay()
         if (zoom > 1.01) != reportedZoom {
@@ -113,6 +124,7 @@ final class ScreenView: UIView, RTCVideoViewDelegate {
     }
     override func touchesBegan(_ incoming: Set<UITouch>, with event: UIEvent?) {
         guard model.canControl || model.canDraw else { return }
+        layoutIfNeeded()
         for touch in incoming { touches[ObjectIdentifier(touch)] = touch.location(in: self) }
         if touches.count >= 2 {
             longPress?.invalidate(); longPress = nil
@@ -122,10 +134,11 @@ final class ScreenView: UIView, RTCVideoViewDelegate {
             model.cancelGesture(notify: true); revision = model.gestureRevision; touches = positions
             navigation = "pending"; moved = true; erasePrevious = nil
             let pair = Array(touches.values.prefix(2)); pairCenter = midpoint(pair[0], pair[1]); pairDistance = distance(pair[0], pair[1]); pairZoom = zoom
+            pairPoint = normalized(pairCenter); pairSize = content.bounds.size
             return
         }
         guard let p = touches.values.first, content.frame.contains(p) else { touches = [:]; return }
-        start = p; previous = p; moved = false; navigation = nil; erasePrevious = nil
+        start = p; startPoint = normalized(p); previous = p; moved = false; navigation = nil; erasePrevious = nil
         if model.canDraw {
             if model.tool == .eraser { erase(at: p) }
             else if model.tool == .select { model.selectedID = hit(at: p)?.id }
@@ -134,7 +147,7 @@ final class ScreenView: UIView, RTCVideoViewDelegate {
             if !UIAccessibility.isReduceMotionEnabled { ripple(at: p) }
             longPress = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: false) { [weak self] _ in
                 guard let self, self.touches.count == 1, !self.moved, self.model.canControl else { return }
-                self.dragging = true; self.model.pointer("down", at: self.normalized(self.start))
+                self.dragging = true; self.model.pointer("down", at: self.startPoint)
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
             }
         }
@@ -145,12 +158,25 @@ final class ScreenView: UIView, RTCVideoViewDelegate {
         if touches.count >= 2 {
             let pair = Array(touches.values.prefix(2)), center = midpoint(pair[0], pair[1]), spread = distance(pair[0], pair[1])
             if navigation == "pending" {
-                if abs(spread - pairDistance) > 8 { navigation = "zoom" }
-                else if distance(center, pairCenter) > 8 { navigation = model.mode == .control ? "scroll" : "pan" }
+                let translation = distance(center, pairCenter), expansion = abs(spread - pairDistance)
+                if expansion > 8 && expansion > translation { navigation = "zoom" }
+                else if translation > 8 { navigation = model.mode == .control ? "scroll" : "pan" }
             }
-            if navigation == "zoom" { zoom = max(1, min(5, pairZoom * spread / max(1, pairDistance))); setNeedsLayout() }
+            if navigation == "zoom" {
+                zoom = max(1, min(5, pairZoom * spread / max(1, pairDistance)))
+                // Keep the same Mac point under the pinch instead of zooming around the phone's center.
+                let scale = zoom / pairZoom
+                offset = CGPoint(x: center.x - bounds.midX - (CGFloat(pairPoint.x) - 0.5) * pairSize.width * scale,
+                                 y: center.y - bounds.midY - (CGFloat(pairPoint.y) - 0.5) * pairSize.height * scale)
+                setNeedsLayout()
+            }
             else if navigation == "scroll" {
-                model.pointer("scroll", at: normalized(center), dx: Double(center.x - pairCenter.x) * 2, dy: Double(center.y - pairCenter.y) * 2); pairCenter = center
+                // Wire deltas follow wheel direction; touch content follows the fingers.
+                let surface = model.session.state?.surface
+                model.pointer("scroll", at: pairPoint,
+                              dx: Double(pairCenter.x - center.x) * Double(surface?.width ?? 1280) / Double(max(1, content.bounds.width)),
+                              dy: Double(pairCenter.y - center.y) * Double(surface?.height ?? 800) / Double(max(1, content.bounds.height)))
+                pairCenter = center
             } else if navigation == "pan" { offset.x += center.x - pairCenter.x; offset.y += center.y - pairCenter.y; pairCenter = center; setNeedsLayout() }
             return
         }
@@ -174,8 +200,9 @@ final class ScreenView: UIView, RTCVideoViewDelegate {
                 if model.tool == .eraser { model.finishErase() } else { model.endStroke() }
             } else if dragging { model.pointer("up", at: normalized(p)) }
             else if !moved {
-                let count = taps.down(x: p.x, y: p.y, button: 0, now: ProcessInfo.processInfo.systemUptime, interval: 0.5, radius: 22)
-                model.pointer("down", at: normalized(p), clickCount: count); model.pointer("up", at: normalized(p))
+                // Lift-off jitter becomes a large miss when a desktop is reduced to phone size.
+                let count = taps.down(x: start.x, y: start.y, button: 0, now: ProcessInfo.processInfo.systemUptime, interval: 0.5, radius: 22)
+                model.pointer("down", at: startPoint, clickCount: count); model.pointer("up", at: startPoint)
             }
         }
         dragging = false
@@ -251,6 +278,25 @@ private func segmentDistance(_ p: CGPoint, _ a: CGPoint, _ b: CGPoint) -> CGFloa
     let dx = b.x - a.x, dy = b.y - a.y, length = dx * dx + dy * dy
     let t = length == 0 ? 0 : max(0, min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / length))
     return hypot(p.x - a.x - t * dx, p.y - a.y - t * dy)
+}
+
+/// WebRTC resets its wrapped Metal view to 30 Hz when a renderer is first used.
+/// Forward its draw callbacks, then restore the screen stream's 60 Hz cadence.
+private final class PhoneVideoCadence: NSObject, MTKViewDelegate {
+    private weak var renderer: MTKViewDelegate?
+    init(video: RTCMTLVideoView) {
+        super.init()
+        guard let metal = video.subviews.first(where: { $0 is MTKView }) as? MTKView else { return }
+        renderer = metal.delegate; metal.delegate = self
+        metal.preferredFramesPerSecond = 60
+    }
+    func draw(in view: MTKView) {
+        renderer?.draw(in: view)
+        if view.preferredFramesPerSecond != 60 { view.preferredFramesPerSecond = 60 }
+    }
+    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
+        renderer?.mtkView(view, drawableSizeWillChange: size)
+    }
 }
 
 private final class FirstPhoneFrame: NSObject, RTCVideoRenderer {

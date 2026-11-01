@@ -1,6 +1,16 @@
 import AppKit
 import RemoteCore
 
+struct PixelScrollAccumulator {
+    private var remainder = (x: 0.0, y: 0.0)
+    mutating func consume(x: Double, y: Double) -> (x: Int32, y: Int32) {
+        remainder.x -= x; remainder.y -= y
+        let pixels = (x: Int32(remainder.x), y: Int32(remainder.y))
+        remainder.x -= Double(pixels.x); remainder.y -= Double(pixels.y)
+        return pixels
+    }
+}
+
 final class InputInjector {
     var bounds = CGDisplayBounds(CGMainDisplayID())
     private(set) var windowTarget: WindowInputTarget?
@@ -61,6 +71,8 @@ private final class InjectedEvents {
     private var clickCounts: [Int: Int] = [:]
     private var windowButton: WindowInputTarget.Button?
     private var windowGesture: Int64 = 1
+    private var scroll = PixelScrollAccumulator()
+    private var scrollDestination = InputDestination.unavailable
     private let source = CGEventSource(stateID: .privateState)
     var bounds = CGDisplayBounds(CGMainDisplayID())
     var windowTarget: WindowInputTarget?
@@ -80,6 +92,7 @@ private final class InjectedEvents {
     }
     func apply(_ m: WireMessage) {
         outcome = nil
+        if m.type != "pointer" || m.action != "scroll" { scroll = PixelScrollAccumulator() }
         guard allowed else { liftHeld(); outcome = .cancelled; return }
         if let windowTarget {
             guard let frame = windowTarget.frame else { liftHeld(); outcome = .frameGone; return }
@@ -135,8 +148,11 @@ private final class InjectedEvents {
             let up: CGEventType = b == 2 ? .rightMouseUp : b == 1 ? .otherMouseUp : .leftMouseUp
             let drag: CGEventType = b == 2 ? .rightMouseDragged : b == 1 ? .otherMouseDragged : .leftMouseDragged
             if action == "scroll" {
+                if scrollDestination != destination { scroll = PixelScrollAccumulator(); scrollDestination = destination }
+                let delta = scroll.consume(x: m.deltaX ?? 0, y: m.deltaY ?? 0)
+                guard delta.x != 0 || delta.y != 0 else { return }
                 let event = CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 2,
-                                    wheel1: Int32(-(m.deltaY ?? 0)), wheel2: Int32(-(m.deltaX ?? 0)), wheel3: 0)
+                                    wheel1: delta.y, wheel2: delta.x, wheel3: 0)
                 event?.location = p; event?.flags = Self.flags(m.modifiers ?? []); post(event)
             } else {
                 if action == "down" {
@@ -195,6 +211,7 @@ private final class InjectedEvents {
     }
     func liftHeld() {
         windowButton = nil
+        scroll = PixelScrollAccumulator(); scrollDestination = .unavailable
         for b in buttons {
             let type: CGEventType = b == 2 ? .rightMouseUp : b == 1 ? .otherMouseUp : .leftMouseUp
             let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: lastPoint,

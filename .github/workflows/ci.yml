@@ -15,6 +15,34 @@ jobs:
         with:
           persist-credentials: false
       - run: swift test
+  ios:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: brew install xcodegen
+      - name: Test the native iPhone viewer
+        env:
+          TEST_RUNNER_WAI_IOS_TRANSPORT_BENCH: '1'
+        run: |
+          xcodegen generate --spec ios/project.yml
+          simulator=$(xcrun simctl list devices available --json | python3 -c '
+          import json, sys
+          devices = json.load(sys.stdin)["devices"]
+          print(next(device["udid"] for group in devices.values() for device in group
+                     if device["name"].startswith("iPhone")))')
+          xcodebuild -project ios/WAIRemotePhone.xcodeproj -scheme WAIRemotePhone \
+            -destination "platform=iOS Simulator,id=$simulator" \
+            -derivedDataPath "$RUNNER_TEMP/wai-ios" \
+            -resultBundlePath "$RUNNER_TEMP/wai-ios-results.xcresult" \
+            -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO test
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: iphone-test-results
+          path: ${{ runner.temp }}/wai-ios-results.xcresult
+          retention-days: 7
   gateway:
     runs-on: ubuntu-latest
     steps:
