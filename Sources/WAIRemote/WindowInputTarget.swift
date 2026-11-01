@@ -309,7 +309,7 @@ struct WindowInputTarget: Equatable {
         let deadline = ProcessInfo.processInfo.systemUptime + 0.05
         guard let frame, frame.contains(point), let hit = element(at: point, deadline: deadline) else { return nil }
         return button(climbingFrom: hit, at: point, deadline: deadline, includingDisabledMenuItems: includingDisabledMenuItems, excluding: excluding) ??
-            button(inHitSheet: hit, at: point, deadline: deadline)
+            button(inHitContainer: hit, at: point, deadline: deadline)
     }
     /// Save panels bridge a separate process. Their app-scoped hit test can stop
     /// at the sheet, and their proxy buttons omit AXTopLevelUIElement entirely.
@@ -329,22 +329,58 @@ struct WindowInputTarget: Equatable {
         var id: CGWindowID = 0
         return windowNumber(element, &id) == .success && id > 0 ? id : nil
     }
-    private func button(inHitSheet sheet: AXUIElement, at point: CGPoint, deadline: TimeInterval) -> Button? {
-        guard Self.axValues(sheet, [kAXRoleAttribute], deadline: deadline)?.first as? String == kAXSheetRole,
-              Self.axWindowID(sheet, deadline: deadline) == windowID else { return nil }
+    static func singleContainingChild(_ children: [AXUIElement], at point: CGPoint, deadline: TimeInterval) -> AXUIElement? {
+        var result: AXUIElement?
+        for child in children {
+            guard let values = axValues(child, [kAXPositionAttribute, kAXSizeAttribute], deadline: deadline),
+                  let bounds = rect(values[0], values[1]) else { return nil }
+            if bounds.contains(point) {
+                guard result == nil else { return nil }
+                result = child
+            }
+        }
+        return result
+    }
+    private func button(inHitContainer hit: AXUIElement, at point: CGPoint, deadline: TimeInterval) -> Button? {
         let names = [kAXRoleAttribute, kAXPositionAttribute, kAXSizeAttribute, kAXChildrenAttribute]
-        var pending = [(sheet, 0)], visited = 0, result: Button?
+        guard let values = Self.axValues(hit, names, deadline: deadline), let role = values[0] as? String,
+              Self.axWindowID(hit, deadline: deadline) == windowID,
+              let hitBounds = Self.rect(values[1], values[2]), hitBounds.contains(point) else { return nil }
+        var root = hit, remoteWindow: CGWindowID?
+        if role != kAXSheetRole {
+            // A remote view's hit test can stop at its host group or window.
+            // Descend only through its one containing, directly linked XPC
+            // root. Ordinary host containers and ambiguous overlays stay closed.
+            guard [kAXWindowRole, kAXGroupRole].contains(role),
+                  let children = values[3] as? [AXUIElement],
+                  let child = Self.singleContainingChild(children, at: point, deadline: deadline),
+                  let childValues = Self.axValues(child, [kAXRoleAttribute, kAXParentAttribute], deadline: deadline),
+                  [kAXGroupRole, kAXSplitGroupRole].contains(childValues[0] as? String ?? ""),
+                  let id = Self.axWindowID(child, deadline: deadline), id != windowID,
+                  let owner = Self.windowOwner?(id), owner != pid,
+                  CFGetTypeID(childValues[1]) == AXUIElementGetTypeID(),
+                  CFEqual(childValues[1], hit) else { return nil }
+            var childPID: pid_t = 0
+            guard AXUIElementGetPid(child, &childPID) == .success, childPID == pid || childPID == owner else { return nil }
+            root = child; remoteWindow = id
+        }
+        var pending = [(root, 0)], visited = 0, result: Button?
         while let (element, depth) = pending.popLast(), visited < 64 {
             visited += 1
             guard let values = Self.axValues(element, names, deadline: deadline) else { return nil }
             guard let bounds = Self.rect(values[1], values[2]), bounds.contains(point) else { continue }
+            if let remoteWindow, Self.axWindowID(element, deadline: deadline) != remoteWindow { return nil }
             if values[0] as? String == kAXButtonRole {
                 guard result == nil, let button = button(climbingFrom: element, at: point, deadline: deadline) else { return nil }
                 result = button
             } else {
                 // An uninspectable containing branch may cover a sibling button.
                 guard depth < 8, depth == 0 || ![kAXSheetRole, kAXWindowRole].contains(values[0] as? String ?? "") else { return nil }
-                pending += ((values[3] as? [AXUIElement]) ?? []).map { ($0, depth + 1) }
+                let children = (values[3] as? [AXUIElement]) ?? []
+                if remoteWindow != nil {
+                    guard let child = Self.singleContainingChild(children, at: point, deadline: deadline) else { return nil }
+                    pending.append((child, depth + 1))
+                } else { pending += children.map { ($0, depth + 1) } }
             }
         }
         return pending.isEmpty ? result : nil
