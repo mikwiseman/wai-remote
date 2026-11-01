@@ -1,0 +1,102 @@
+name: Package Mac 81 (one-off)
+
+on:
+  push:
+    branches:
+      - codex/mac81-package
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: b799faefe011d254eac491769231bb38e1087bc0
+          persist-credentials: false
+      - name: Verify the exact source snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = b799faefe011d254eac491769231bb38e1087bc0
+          test -z "$(git status --porcelain)"
+          swift --version
+          xcodebuild -version
+      - name: Build the ad hoc universal app
+        shell: bash
+        env:
+          WAI_BUILD_NUMBER: '81'
+          WAI_VERSION: '0.3.7'
+          WAI_CONFIGURATION: release
+          WAI_UNIVERSAL: '1'
+          WAI_SIGN_IDENTITY: '-'
+          WAI_BUILD_JOBS: '2'
+          WAI_SWIFT_SCRATCH_PATH: ${{ runner.temp }}/mac81-swift
+          WAI_APP_PATH: ${{ runner.temp }}/mac81-staging/WAI Remote.app
+        run: |
+          set -euo pipefail
+          scripts/build-mac.sh 2>&1 | tee "$RUNNER_TEMP/mac81-build.log"
+      - name: Verify and archive the app with its source manifest
+        shell: bash
+        env:
+          PACKAGE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          app="$RUNNER_TEMP/mac81-staging/WAI Remote.app"
+          output="$RUNNER_TEMP/mac81-package"
+          mkdir -p "$output"
+          codesign --verify --deep --strict "$app"
+          codesign --display --verbose=4 "$app" 2>&1 | tee "$output/signature.txt"
+          rg -q '^Signature=adhoc$' "$output/signature.txt"
+          ditto -c -k --sequesterRsrc --keepParent "$app" "$output/WAI-Remote-0.3.7-81-adhoc-universal.zip"
+          cp "$RUNNER_TEMP/mac81-build.log" "$output/build.log"
+          python3 - "$app" "$output" <<'PY'
+          import datetime, hashlib, json, os, pathlib, plistlib, subprocess, sys
+          app, output = map(pathlib.Path, sys.argv[1:])
+          def command(*args):
+              return subprocess.check_output(args, text=True).strip()
+          def digest(path):
+              with path.open('rb') as stream:
+                  return hashlib.file_digest(stream, 'sha256').hexdigest()
+          info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
+          assert info['CFBundleVersion'] == '81', info['CFBundleVersion']
+          assert info['CFBundleShortVersionString'] == '0.3.7', info['CFBundleShortVersionString']
+          binaries = {}
+          for relative in ['Contents/MacOS/WAIRemote', 'Contents/MacOS/WAIRemoteWatchdog',
+                           'Contents/Frameworks/WebRTC.framework/WebRTC',
+                           'Contents/Frameworks/Sparkle.framework/Sparkle']:
+              path = app / relative
+              architectures = sorted(command('lipo', '-archs', str(path)).split())
+              assert architectures == ['arm64', 'x86_64'], (relative, architectures)
+              binaries[relative] = {'architectures': architectures, 'sha256': digest(path)}
+          source = command('git', 'rev-parse', 'HEAD')
+          assert source == 'b799faefe011d254eac491769231bb38e1087bc0', source
+          archive = output / 'WAI-Remote-0.3.7-81-adhoc-universal.zip'
+          manifest = {
+              'source_commit': source,
+              'source_tree': command('git', 'rev-parse', 'HEAD^{tree}'),
+              'packaging_workflow_commit': os.environ['PACKAGE_COMMIT'],
+              'run_url': f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+              'created_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              'version': '0.3.7', 'build': '81', 'configuration': 'release',
+              'signing': 'ad hoc; no Developer ID, notarization, or publishing',
+              'source_clean_before_build': True,
+              'source_input_sha256': {name: digest(pathlib.Path(name)) for name in ['scripts/build-mac.sh', 'Package.swift', 'Package.resolved']},
+              'swift': command('swift', '--version'),
+              'xcode': command('xcodebuild', '-version'),
+              'binaries': binaries,
+              'archive': {'name': archive.name, 'bytes': archive.stat().st_size, 'sha256': digest(archive)},
+          }
+          (output / 'source-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+          PY
+          (cd "$output" && shasum -a 256 WAI-Remote-0.3.7-81-adhoc-universal.zip source-manifest.json > SHA256SUMS)
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mac81-b799fae-adhoc-universal
+          path: ${{ runner.temp }}/mac81-package/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
