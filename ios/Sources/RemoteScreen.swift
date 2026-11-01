@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import Combine
 import MetalKit
 import WebRTC
 import RemoteCore
@@ -35,6 +36,20 @@ final class ScreenView: UIView, RTCVideoViewDelegate {
     private var pairZoom: CGFloat = 1
     private var pairPoint = InkPoint(0.5, 0.5)
     private var pairSize = CGSize.zero
+    private var pairIDs: [ObjectIdentifier] = []
+    private var pairOrigins: [CGPoint] = []
+    private var pairStarted: TimeInterval = 0
+    private var scrollState: HostState?
+    private var revisionObserver: AnyCancellable?
+    private var displayLink: CADisplayLink?
+    private lazy var displayTarget = PhoneScrollDisplayTarget { [weak self] time in self?.advanceScroll(at: time) }
+    private lazy var scroll = PhoneScrollStream(canSend: { [weak self] in
+        guard let self else { return false }; return self.canDeliverScroll && self.model.canSendScroll
+    }, emit: { [weak self] output in
+        guard let self, self.canDeliverScroll else { return }
+        self.model.pointer("scroll", at: self.pairPoint, dx: output.delta.x, dy: output.delta.y,
+                           scrollPhase: output.scrollPhase, momentumPhase: output.momentumPhase)
+    })
     private var revision = -1
     private var zoomRevision = -1
     private var erasePrevious: CGPoint?
@@ -61,8 +76,16 @@ final class ScreenView: UIView, RTCVideoViewDelegate {
         isAccessibilityElement = true; accessibilityLabel = "Экран Mac"
         accessibilityHint = "Касание — клик, удержание — перетаскивание. Два пальца — прокрутка или масштаб."
         accessibilityTraits = [.allowsDirectInteraction]
+        // Published sends before assignment: focus/mode changes end the old
+        // gesture synchronously, while its original epoch is still current.
+        revisionObserver = model.$gestureRevision.dropFirst().sink { [weak self] _ in self?.resetGesture() }
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    deinit { displayLink?.invalidate() }
+    #if DEBUG
+    // Deterministic display timestamps for the native gesture regressions.
+    func advanceScrollForTesting(at timestamp: TimeInterval) { advanceScroll(at: timestamp) }
+    #endif
     func update() {
         if currentTrack !== model.track {
             currentTrack?.remove(video); currentTrack?.remove(frameObserver)
@@ -72,7 +95,7 @@ final class ScreenView: UIView, RTCVideoViewDelegate {
         }
         if !model.receivedFrame && !model.connectionInterrupted { frameObserver.arm() }
         if revision != model.gestureRevision { revision = model.gestureRevision; resetGesture() }
-        if zoomRevision != model.resetZoomRevision { zoomRevision = model.resetZoomRevision; zoom = 1; offset = .zero }
+        if zoomRevision != model.resetZoomRevision { resetGesture(); zoomRevision = model.resetZoomRevision; zoom = 1; offset = .zero }
         ink.strokes = model.visibleStrokes; ink.selectedID = model.selectedID; ink.surfaceWidth = CGFloat(model.session.state?.surface.width ?? 1280)
         ink.setNeedsDisplay(); setNeedsLayout()
     }
@@ -120,12 +143,89 @@ final class ScreenView: UIView, RTCVideoViewDelegate {
     private func resetGesture() {
         longPress?.invalidate(); longPress = nil
         if dragging { model.pointer("up", at: model.lastCursor) }
+        scroll.cancel(); displayLink?.invalidate(); displayLink = nil; scrollState = nil
         dragging = false; touches = [:]; navigation = nil; erasePrevious = nil
+        pairIDs = []; pairOrigins = []
+    }
+    private var sameScrollContext: Bool {
+        guard revision == model.gestureRevision, let old = scrollState, let current = model.session.state else { return false }
+        return old.sessionID == current.sessionID && old.controllerEpoch == current.controllerEpoch
+            && old.inputEpoch == current.inputEpoch && old.modeGeneration == current.modeGeneration
+            && old.layerEpoch == current.layerEpoch && old.surface == current.surface
+    }
+    private var canDeliverScroll: Bool { sameScrollContext && model.canControl }
+    private func startDisplayLink() {
+        guard displayLink == nil else { return }
+        let link = CADisplayLink(target: displayTarget, selector: #selector(PhoneScrollDisplayTarget.tick(_:)))
+        link.add(to: .main, forMode: .common); displayLink = link
+    }
+    private func advanceScroll(at timestamp: TimeInterval) {
+        guard scroll.isActive || navigation == "pending" else {
+            displayLink?.invalidate(); displayLink = nil; return
+        }
+        guard sameScrollContext, model.canControl || model.canDraw else { resetGesture(); return }
+        if navigation == "pending" { movePair(at: timestamp) }
+        scroll.tick(at: timestamp)
+        if !scroll.isActive && navigation != "pending" { displayLink?.invalidate(); displayLink = nil }
+    }
+    private func updateTouches(_ incoming: Set<UITouch>, event: UIEvent?) {
+        // UIKit's changed set may contain only one finger; use its coherent snapshot.
+        for touch in event?.allTouches ?? [] where touches[ObjectIdentifier(touch)] != nil {
+            touches[ObjectIdentifier(touch)] = touch.location(in: self)
+        }
+        for touch in incoming where touches[ObjectIdentifier(touch)] != nil { touches[ObjectIdentifier(touch)] = touch.location(in: self) }
+    }
+    private func movePair(at timestamp: TimeInterval) {
+        guard pairIDs.count == 2, let a = touches[pairIDs[0]], let b = touches[pairIDs[1]] else { return }
+        let center = midpoint(a, b), spread = distance(a, b)
+        if navigation == "pending" {
+            let bothMoved = distance(a, pairOrigins[0]) >= 3 && distance(b, pairOrigins[1]) >= 3
+            guard bothMoved || timestamp - pairStarted >= 0.06 else { return }
+            let translation = distance(center, pairCenter), expansion = abs(spread - pairDistance)
+            if expansion > 8 && expansion > translation {
+                // At either zoom limit, keep recognizing instead of locking an
+                // invisible pinch when one scrolling finger moves first.
+                guard abs(max(1, min(5, pairZoom * spread / max(1, pairDistance))) - pairZoom) > 0.001 else { return }
+                navigation = "zoom"
+            } else if translation > 8 {
+                navigation = model.mode == .control ? "scroll" : "pan"
+                // Consume the recognition dead zone once; retain every point after it.
+                let fraction = 8 / translation
+                pairCenter.x += (center.x - pairCenter.x) * fraction
+                pairCenter.y += (center.y - pairCenter.y) * fraction
+                if navigation == "scroll" {
+                    let surface = model.session.state?.surface
+                    scroll.begin(at: pairStarted, scale: CGPoint(x: CGFloat(surface?.width ?? 1280) / max(1, content.bounds.width),
+                                                                y: CGFloat(surface?.height ?? 800) / max(1, content.bounds.height)))
+                }
+            }
+        }
+        if navigation == "zoom" {
+            zoom = max(1, min(5, pairZoom * spread / max(1, pairDistance)))
+            let scale = zoom / pairZoom
+            offset = CGPoint(x: center.x - bounds.midX - (CGFloat(pairPoint.x) - 0.5) * pairSize.width * scale,
+                             y: center.y - bounds.midY - (CGFloat(pairPoint.y) - 0.5) * pairSize.height * scale)
+            setNeedsLayout()
+        } else if navigation == "scroll" {
+            scroll.move(by: CGPoint(x: pairCenter.x - center.x, y: pairCenter.y - center.y), at: timestamp)
+            pairCenter = center
+        } else if navigation == "pan" {
+            offset.x += center.x - pairCenter.x; offset.y += center.y - pairCenter.y; pairCenter = center; setNeedsLayout()
+        }
     }
     override func touchesBegan(_ incoming: Set<UITouch>, with event: UIEvent?) {
         guard model.canControl || model.canDraw else { return }
+        if touches.isEmpty { resetGesture(); revision = model.gestureRevision }
+        else if !pairIDs.isEmpty && touches.count < 2 {
+            // One original finger may still be down after a fling starts.
+            scroll.cancel(); displayLink?.invalidate(); displayLink = nil
+        }
+        // Extra fingers must not replace an established pair or restart its target.
+        guard pairIDs.isEmpty else { return }
+        guard touches.count + incoming.count <= 2 else { resetGesture(); return }
         layoutIfNeeded()
         for touch in incoming { touches[ObjectIdentifier(touch)] = touch.location(in: self) }
+        updateTouches(incoming, event: event)
         if touches.count >= 2 {
             longPress?.invalidate(); longPress = nil
             if dragging { model.pointer("up", at: model.lastCursor); dragging = false }
@@ -133,11 +233,14 @@ final class ScreenView: UIView, RTCVideoViewDelegate {
             let positions = touches
             model.cancelGesture(notify: true); revision = model.gestureRevision; touches = positions
             navigation = "pending"; moved = true; erasePrevious = nil
-            let pair = Array(touches.values.prefix(2)); pairCenter = midpoint(pair[0], pair[1]); pairDistance = distance(pair[0], pair[1]); pairZoom = zoom
+            pairIDs = Array(touches.keys); pairOrigins = pairIDs.compactMap { touches[$0] }
+            let pair = pairOrigins; pairCenter = midpoint(pair[0], pair[1]); pairDistance = distance(pair[0], pair[1]); pairZoom = zoom
             pairPoint = normalized(pairCenter); pairSize = content.bounds.size
+            pairStarted = event?.timestamp ?? ProcessInfo.processInfo.systemUptime; scrollState = model.session.state
+            if content.frame.contains(pairCenter) { startDisplayLink() } else { navigation = "outside" }
             return
         }
-        guard let p = touches.values.first, content.frame.contains(p) else { touches = [:]; return }
+        guard let p = touches.values.first, content.frame.contains(p) else { navigation = "outside"; return }
         start = p; startPoint = normalized(p); previous = p; moved = false; navigation = nil; erasePrevious = nil
         if model.canDraw {
             if model.tool == .eraser { erase(at: p) }
@@ -154,30 +257,11 @@ final class ScreenView: UIView, RTCVideoViewDelegate {
     }
     override func touchesMoved(_ incoming: Set<UITouch>, with event: UIEvent?) {
         guard !touches.isEmpty else { return }
-        for touch in incoming where touches[ObjectIdentifier(touch)] != nil { touches[ObjectIdentifier(touch)] = touch.location(in: self) }
+        guard revision == model.gestureRevision, model.canControl || model.canDraw else { resetGesture(); return }
+        updateTouches(incoming, event: event)
         if touches.count >= 2 {
-            let pair = Array(touches.values.prefix(2)), center = midpoint(pair[0], pair[1]), spread = distance(pair[0], pair[1])
-            if navigation == "pending" {
-                let translation = distance(center, pairCenter), expansion = abs(spread - pairDistance)
-                if expansion > 8 && expansion > translation { navigation = "zoom" }
-                else if translation > 8 { navigation = model.mode == .control ? "scroll" : "pan" }
-            }
-            if navigation == "zoom" {
-                zoom = max(1, min(5, pairZoom * spread / max(1, pairDistance)))
-                // Keep the same Mac point under the pinch instead of zooming around the phone's center.
-                let scale = zoom / pairZoom
-                offset = CGPoint(x: center.x - bounds.midX - (CGFloat(pairPoint.x) - 0.5) * pairSize.width * scale,
-                                 y: center.y - bounds.midY - (CGFloat(pairPoint.y) - 0.5) * pairSize.height * scale)
-                setNeedsLayout()
-            }
-            else if navigation == "scroll" {
-                // Wire deltas follow wheel direction; touch content follows the fingers.
-                let surface = model.session.state?.surface
-                model.pointer("scroll", at: pairPoint,
-                              dx: Double(pairCenter.x - center.x) * Double(surface?.width ?? 1280) / Double(max(1, content.bounds.width)),
-                              dy: Double(pairCenter.y - center.y) * Double(surface?.height ?? 800) / Double(max(1, content.bounds.height)))
-                pairCenter = center
-            } else if navigation == "pan" { offset.x += center.x - pairCenter.x; offset.y += center.y - pairCenter.y; pairCenter = center; setNeedsLayout() }
+            guard sameScrollContext else { resetGesture(); return }
+            movePair(at: event?.timestamp ?? ProcessInfo.processInfo.systemUptime)
             return
         }
         // A two-finger gesture stays navigation until both fingers are lifted.
@@ -191,7 +275,15 @@ final class ScreenView: UIView, RTCVideoViewDelegate {
         previous = p
     }
     override func touchesEnded(_ incoming: Set<UITouch>, with event: UIEvent?) {
-        guard !touches.isEmpty else { return }
+        guard incoming.contains(where: { touches[ObjectIdentifier($0)] != nil }) else { return }
+        guard revision == model.gestureRevision, model.canControl || model.canDraw else { resetGesture(); return }
+        updateTouches(incoming, event: event)
+        let timestamp = event?.timestamp ?? ProcessInfo.processInfo.systemUptime
+        if touches.count >= 2 {
+            guard sameScrollContext else { resetGesture(); return }
+            movePair(at: timestamp)
+            if navigation == "scroll" { scroll.end(at: timestamp) }
+        }
         let p = incoming.first?.location(in: self) ?? previous
         for touch in incoming { touches.removeValue(forKey: ObjectIdentifier(touch)) }
         longPress?.invalidate(); longPress = nil
@@ -206,7 +298,7 @@ final class ScreenView: UIView, RTCVideoViewDelegate {
             }
         }
         dragging = false
-        if touches.isEmpty { navigation = nil; erasePrevious = nil }
+        if touches.isEmpty { navigation = nil; erasePrevious = nil; pairIDs = []; pairOrigins = [] }
     }
     override func touchesCancelled(_ incoming: Set<UITouch>, with event: UIEvent?) { model.cancelGesture(notify: true); resetGesture() }
     private func erase(at p: CGPoint) {
@@ -278,6 +370,13 @@ private func segmentDistance(_ p: CGPoint, _ a: CGPoint, _ b: CGPoint) -> CGFloa
     let dx = b.x - a.x, dy = b.y - a.y, length = dx * dx + dy * dy
     let t = length == 0 ? 0 : max(0, min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / length))
     return hypot(p.x - a.x - t * dx, p.y - a.y - t * dy)
+}
+
+/// CADisplayLink retains its target; the callback holds the screen weakly.
+private final class PhoneScrollDisplayTarget: NSObject {
+    private let action: (TimeInterval) -> Void
+    init(_ action: @escaping (TimeInterval) -> Void) { self.action = action }
+    @objc func tick(_ link: CADisplayLink) { action(link.timestamp) }
 }
 
 /// WebRTC resets its wrapped Metal view to 30 Hz when a renderer is first used.

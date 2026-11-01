@@ -48,12 +48,14 @@ final class RemoteScreenTests: XCTestCase {
         screen.touchesBegan([left, right], with: nil)
         left.point.y += 20; right.point.y += 20
         screen.touchesMoved([left, right], with: nil)
+        screen.advanceScrollForTesting(at: ProcessInfo.processInfo.systemUptime)
         left.point.y += 20; right.point.y += 20
         screen.touchesMoved([left, right], with: nil)
+        screen.advanceScrollForTesting(at: ProcessInfo.processInfo.systemUptime)
         let scrolls = sent.filter { $0.action == "scroll" }
         XCTAssertEqual(scrolls.count, 2)
-        for scroll in scrolls {
-            XCTAssertEqual(try XCTUnwrap(scroll.deltaY), -80, accuracy: 0.001,
+        for (index, scroll) in scrolls.enumerated() {
+            XCTAssertEqual(try XCTUnwrap(scroll.deltaY), index == 0 ? -48 : -80, accuracy: 0.001,
                            "The host negates wheel deltas; scrolling must follow the fingers at the displayed image scale.")
             XCTAssertEqual(scroll.x, 0.5)
             XCTAssertEqual(scroll.y, 0.375, "Crossing another Mac pane must not redirect an ongoing scroll.")
@@ -91,6 +93,7 @@ final class RemoteScreenTests: XCTestCase {
         screen.touchesBegan([left, right], with: nil)
         left.point = CGPoint(x: 145, y: 170); right.point = CGPoint(x: 255, y: 170)
         screen.touchesMoved([left, right], with: nil)
+        screen.advanceScrollForTesting(at: ProcessInfo.processInfo.systemUptime)
         screen.layoutIfNeeded()
         XCTAssertEqual(sent.filter { $0.action == "scroll" }.count, 1)
         XCTAssertEqual(screen.subviews.first?.bounds.width, 400,
