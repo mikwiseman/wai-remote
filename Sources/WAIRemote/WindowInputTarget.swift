@@ -4,6 +4,14 @@ import Darwin
 /// Window addressing follows KWWKComputerUseCore and cua-driver (MIT).
 /// See licenses/KWWK.txt and licenses/cua-driver.txt. No global-input fallback.
 struct WindowInputTarget: Equatable {
+    #if DEBUG
+    static var inputTrace: ((WindowInputTarget, String) -> Void)?
+    #endif
+    func traceInput(_ message: @autoclosure () -> String) {
+        #if DEBUG
+        Self.inputTrace?(self, message())
+        #endif
+    }
     let pid: pid_t
     let windowID: CGWindowID
     struct KeyboardReceiver: Equatable { let pid: pid_t; let windowID: CGWindowID }
@@ -305,8 +313,10 @@ struct WindowInputTarget: Equatable {
             return Self.onMainRunLoop { self.button(at: point) }
         }
         let deadline = ProcessInfo.processInfo.systemUptime + 0.05
-        guard let frame, frame.contains(point), let hit = element(at: point, deadline: deadline) else { return nil }
-        return button(climbingFrom: hit, at: point, deadline: deadline) ?? button(inHitSheet: hit, at: point, deadline: deadline)
+        guard let frame, frame.contains(point), let hit = element(at: point, deadline: deadline) else { traceInput("lookup no-hit point=\(point)"); return nil }
+        let result = button(climbingFrom: hit, at: point, deadline: deadline) ?? button(inHitSheet: hit, at: point, deadline: deadline)
+        traceInput("lookup done found=\(result != nil) elapsedMs=\((ProcessInfo.processInfo.systemUptime - deadline + 0.05) * 1000)")
+        return result
     }
     /// Save panels bridge a separate process. Their app-scoped hit test can stop
     /// at the sheet, and their proxy buttons omit AXTopLevelUIElement entirely.
@@ -379,7 +389,8 @@ struct WindowInputTarget: Equatable {
         let names = [kAXRoleAttribute, kAXPositionAttribute, kAXSizeAttribute, kAXEnabledAttribute, kAXTopLevelUIElementAttribute, kAXParentAttribute]
         var element = hit
         for _ in 0...3 {
-            guard let values = Self.axValues(element, names, deadline: deadline) else { return nil }
+            guard let values = Self.axValues(element, names, deadline: deadline) else { traceInput("lookup attrs-failed remaining=\(deadline - ProcessInfo.processInfo.systemUptime)"); return nil }
+            traceInput("lookup role=\(values[0]) enabled=\(values[3]) bounds=\(String(describing: Self.rect(values[1], values[2]))) point=\(point)")
             // AXWindow deliberately returns a sheet's parent document. The top
             // level element preserves the sheet's own WindowServer address.
             if [kAXButtonRole, kAXMenuItemRole].contains(values[0] as? String ?? ""), values[3] as? Bool == true, let bounds = Self.rect(values[1], values[2]),
@@ -394,7 +405,9 @@ struct WindowInputTarget: Equatable {
                 let pressed = element
                 return Button(frame: bounds, requiresMainThread: pid == ProcessInfo.processInfo.processIdentifier, action: {
                     AXUIElementSetMessagingTimeout(pressed, 0.25)
+                    traceInput("Press begin")
                     let result = AXUIElementPerformAction(pressed, kAXPressAction as CFString)
+                    traceInput("Press end result=\(result.rawValue)")
                     // Closing an XPC save panel can tear down its reply channel.
                     // The action was submitted; never replay a pointer click.
                     return result == .success || result == .cannotComplete

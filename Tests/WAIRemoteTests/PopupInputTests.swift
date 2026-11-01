@@ -6,13 +6,17 @@ import XCTest
 
 @MainActor
 final class PopupInputTests: XCTestCase {
+    private static func trace(_ message: String) {
+        print("popup-fixture \(ProcessInfo.processInfo.systemUptime): \(message)")
+    }
     @MainActor private final class MenuState: NSObject, NSMenuDelegate {
         var opened = 0
         var tracking = false
         var selections = 0
-        func menuWillOpen(_ menu: NSMenu) { opened += 1; tracking = true }
-        func menuDidClose(_ menu: NSMenu) { tracking = false }
-        @objc func selected(_ sender: NSPopUpButton) { selections += 1 }
+        func menuWillOpen(_ menu: NSMenu) { opened += 1; tracking = true; PopupInputTests.trace("willOpen") }
+        func menuDidClose(_ menu: NSMenu) { tracking = false; PopupInputTests.trace("didClose") }
+        func menu(_ menu: NSMenu, willHighlight item: NSMenuItem?) { PopupInputTests.trace("highlight index=\(item.map { menu.index(of: $0) } ?? -1)") }
+        @objc func selected(_ sender: NSPopUpButton) { selections += 1; PopupInputTests.trace("action index=\(sender.indexOfSelectedItem) count=\(selections)") }
     }
     private func value(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
         AXUIElementSetMessagingTimeout(element, 0.02)
@@ -37,12 +41,20 @@ final class PopupInputTests: XCTestCase {
         return CGPoint(x: point.x + size.width / 2, y: point.y + size.height / 2)
     }
     private func click(_ point: CGPoint, injector: InputInjector) {
+        let delivery = Mirror(reflecting: injector).children.first { $0.label == "delivery" }!.value as! InputDeliveryQueue
+        let events = Mirror(reflecting: injector).children.first { $0.label == "events" }!.value
         for action in ["down", "up"] {
             var event = WireMessage(type: "pointer", state: SessionMachine(surface: .init(id: "popup-test", width: 800, height: 600)).state)
             event.action = action; event.button = 0
             event.x = (point.x - injector.bounds.minX) / max(1, injector.bounds.width - 1)
             event.y = (point.y - injector.bounds.minY) / max(1, injector.bounds.height - 1)
             injector.apply(event)
+            delivery.submit { _ in
+                let fields = Mirror(reflecting: events).children
+                let outcome = fields.first { $0.label == "outcome" }.map { String(describing: $0.value) } ?? "missing"
+                let button = fields.first { $0.label == "windowButton" }.map { String(describing: $0.value) } ?? "missing"
+                print("popup-fixture \(ProcessInfo.processInfo.systemUptime): delivered \(action) outcome=\(outcome) pendingPress=\(button != "nil")")
+            }
         }
     }
     func testDesktopClickOpensNativePopupAndSelectsItsItemWithoutMovingThePhysicalPointer() throws {
@@ -53,6 +65,14 @@ final class PopupInputTests: XCTestCase {
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "WAI Remote popup test"; window.isReleasedWhenClosed = false; window.animationBehavior = .none
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        #if DEBUG
+        let fixtureWindow = CGWindowID(window.windowNumber)
+        WindowInputTarget.inputTrace = { target, message in
+            guard target.pid == getpid(), target.windowID == fixtureWindow else { return }
+            print("popup-fixture \(ProcessInfo.processInfo.systemUptime): \(message)")
+        }
+        defer { WindowInputTarget.inputTrace = nil }
+        #endif
         let state = MenuState()
         let popup = NSPopUpButton(frame: CGRect(x: 30, y: 70, width: 250, height: 30), pullsDown: false)
         popup.identifier = .init("wai-popup-fixture"); popup.addItems(withTitles: ["First fixture choice", "Second fixture choice"])
@@ -89,6 +109,9 @@ final class PopupInputTests: XCTestCase {
                 XCTAssertNotNil(action, "The exact hit menu item must use its native Press action")
                 XCTAssertFalse(action?.press(if: { false }) ?? true)
                 XCTAssertTrue(state.tracking, "Canceled input must leave the menu untouched")
+                var owner: pid_t = 0; AXUIElementGetPid(item, &owner)
+                var actions: CFArray?; let actionRead = AXUIElementCopyActionNames(item, &actions)
+                Self.trace("choose owner=\(owner) window=\(target.windowID) role=\(value(item, kAXRoleAttribute) ?? "nil" as CFString) point=\(point) frame=\(String(describing: target.frame)) actions=\(String(describing: actions)) actionsResult=\(actionRead.rawValue) active=\(NSApp.isActive) frontmost=\(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0) mode=\(RunLoop.main.currentMode?.rawValue ?? "nil")")
                 selected = true; click(point, injector: injector)
             }
         }
