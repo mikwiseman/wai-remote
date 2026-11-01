@@ -20,6 +20,7 @@ jobs:
         with:
           name: agent-transport-proof
           path: .runtime/agent-integration-*/*.png
+          include-hidden-files: true
           retention-days: 7
   ios:
     runs-on: macos-latest
