@@ -217,8 +217,9 @@ final class ScreenView: UIView, RTCVideoViewDelegate {
         guard model.canControl || model.canDraw else { return }
         if touches.isEmpty { resetGesture(); revision = model.gestureRevision }
         else if !pairIDs.isEmpty && touches.count < 2 {
-            // One original finger may still be down after a fling starts.
+            // Keep the remaining finger and form a fresh pair with its replacement.
             scroll.cancel(); displayLink?.invalidate(); displayLink = nil
+            pairIDs = []; pairOrigins = []
         }
         // Extra fingers must not replace an established pair or restart its target.
         guard pairIDs.isEmpty else { return }

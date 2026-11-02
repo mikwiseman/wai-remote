@@ -56,12 +56,22 @@ jobs:
             sleep 5
             xcrun simctl io "$simulator" screenshot "$RUNNER_TEMP/iphone-$state.png"
           done
+          TEST_RUNNER_WAI_IOS_INTERACTION_OUTPUT="$RUNNER_TEMP/wai-interaction" \
+            xcodebuild -project ios/WAIRemotePhone.xcodeproj -scheme WAIRemotePhoneInteraction \
+            -destination "platform=iOS Simulator,id=$simulator" \
+            -derivedDataPath "$RUNNER_TEMP/wai-ios" \
+            -resultBundlePath "$RUNNER_TEMP/wai-ios-interaction-results.xcresult" \
+            -parallel-testing-enabled NO \
+            -only-testing:WAIRemotePhoneInteractionTests/SessionInteractionTests/testTapsMatchRenderedTargetsAfterPinchAndPan \
+            CODE_SIGNING_ALLOWED=NO test
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: iphone-test-results
           path: |
             ${{ runner.temp }}/wai-ios-results.xcresult
+            ${{ runner.temp }}/wai-ios-interaction-results.xcresult
+            ${{ runner.temp }}/wai-interaction/
             ${{ runner.temp }}/iphone-*.png
           retention-days: 7
   gateway:
