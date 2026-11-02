@@ -12,6 +12,13 @@ final class RemoteScreenTests: XCTestCase {
         init(_ x: CGFloat, _ y: CGFloat) { point = CGPoint(x: x, y: y); super.init() }
         override func location(in view: UIView?) -> CGPoint { point }
     }
+    private final class TouchEvent: UIEvent {
+        let fingers: Set<UITouch>
+        let time: TimeInterval
+        init(_ fingers: Set<UITouch>, at time: TimeInterval) { self.fingers = fingers; self.time = time; super.init() }
+        override var allTouches: Set<UITouch>? { fingers }
+        override var timestamp: TimeInterval { time }
+    }
 
     private func screen(surface: CGSize = CGSize(width: 1600, height: 1600),
                         viewport: CGSize = CGSize(width: 400, height: 400)) -> (PhoneModel, ScreenView) {
@@ -83,6 +90,73 @@ final class RemoteScreenTests: XCTestCase {
         XCTAssertEqual(zoomed.x / content.bounds.width, target.x, accuracy: 0.001)
         XCTAssertEqual(zoomed.y / content.bounds.height, target.y, accuracy: 0.001)
         screen.touchesEnded([left, right], with: nil)
+    }
+
+    func testReplacementFingerResumesScrollAndStillIgnoresAThirdFinger() throws {
+        let (model, screen) = screen()
+        defer { screen.detach() }
+        var sent: [WireMessage] = []
+        model.onTransmitForTesting = { sent.append($0) }
+        let left = Finger(150, 150), right = Finger(250, 150)
+        screen.touchesBegan([left, right], with: TouchEvent([left, right], at: 100))
+        left.point.y += 20; right.point.y += 20
+        screen.touchesMoved([left, right], with: TouchEvent([left, right], at: 100.02))
+        screen.advanceScrollForTesting(at: 100.03)
+        screen.touchesEnded([left], with: TouchEvent([left, right], at: 100.04))
+        screen.advanceScrollForTesting(at: 100.05)
+        XCTAssertEqual(sent.last?.momentumPhase, "began")
+
+        let replacement = Finger(100, 210)
+        screen.touchesBegan([replacement], with: TouchEvent([right, replacement], at: 100.06))
+        XCTAssertEqual(sent.last { $0.action == "scroll" }?.momentumPhase, "ended")
+        let restart = sent.count
+        replacement.point.y += 20; right.point.y += 20
+        screen.touchesMoved([replacement, right], with: TouchEvent([replacement, right], at: 100.08))
+        screen.advanceScrollForTesting(at: 100.09)
+
+        let extra = Finger(380, 380)
+        screen.touchesBegan([extra], with: TouchEvent([replacement, right, extra], at: 100.10))
+        replacement.point.y += 20; right.point.y += 20
+        screen.touchesMoved([replacement, right], with: TouchEvent([replacement, right, extra], at: 100.12))
+        screen.advanceScrollForTesting(at: 100.13)
+        screen.touchesEnded([extra], with: TouchEvent([replacement, right, extra], at: 100.14))
+        replacement.point.y += 4; right.point.y += 4
+        screen.touchesMoved([replacement, right], with: TouchEvent([replacement, right], at: 100.16))
+        screen.advanceScrollForTesting(at: 100.17)
+        screen.touchesEnded([replacement, right], with: TouchEvent([replacement, right], at: 100.3))
+
+        let resumed = sent.dropFirst(restart).filter { $0.action == "scroll" }
+        XCTAssertEqual(resumed.compactMap(\.scrollPhase), ["began", "changed", "changed", "ended"])
+        XCTAssertEqual(resumed.compactMap(\.deltaY), [-48, -80, -16, 0], "Only the new gesture's 8-point recognition slop is consumed.")
+        for packet in resumed {
+            XCTAssertEqual(packet.x, 0.4375)
+            XCTAssertEqual(packet.y, 0.475, "The replacement pair gets a fresh target; a third finger cannot replace it.")
+            XCTAssertNil(packet.momentumPhase)
+        }
+        XCTAssertFalse(sent.contains { $0.action == "down" || $0.action == "up" })
+    }
+
+    func testReplacementFingerStartsANewPinch() throws {
+        let (model, screen) = screen()
+        defer { screen.detach() }
+        var sent: [WireMessage] = []
+        model.onTransmitForTesting = { sent.append($0) }
+        let left = Finger(110, 150), right = Finger(190, 150)
+        screen.touchesBegan([left, right], with: TouchEvent([left, right], at: 100))
+        left.point.x = 70; right.point.x = 230
+        screen.touchesMoved([left, right], with: TouchEvent([left, right], at: 100.02))
+        screen.layoutIfNeeded()
+        XCTAssertEqual(screen.subviews.first?.bounds.width, 800)
+        screen.touchesEnded([left], with: TouchEvent([left, right], at: 100.04))
+
+        let replacement = Finger(70, 150)
+        screen.touchesBegan([replacement], with: TouchEvent([right, replacement], at: 100.06))
+        replacement.point.x = 30; right.point.x = 270
+        screen.touchesMoved([replacement, right], with: TouchEvent([replacement, right], at: 100.08))
+        screen.layoutIfNeeded()
+        XCTAssertEqual(screen.subviews.first?.bounds.width, 1200, "The retained and replacement fingers form a new pinch pair.")
+        XCTAssertFalse(sent.contains { $0.action == "scroll" || $0.action == "down" || $0.action == "up" })
+        screen.touchesEnded([replacement, right], with: TouchEvent([replacement, right], at: 100.1))
     }
 
     func testSmallFingerSpacingDriftDoesNotTurnAScrollIntoZoom() {
