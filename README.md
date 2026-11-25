@@ -35,6 +35,7 @@ cd web && npm ci && npm run build && cd ..
 WAI_SIGN_IDENTITY=- scripts/build-mac.sh
 open 'build/WAI Remote.app'
 ```
+This command type-checks the web client and writes the bundle to `web/dist/`.
 
 Ad-hoc builds are for local development and may need fresh macOS permission approval after code changes. For a stable installation, use your own Developer ID identity. The script refuses to overwrite a running bundle. Set `WAI_APP_PATH` to stage elsewhere, `WAI_CONFIGURATION=release` for optimization, and `WAI_UNIVERSAL=1` to build both architectures.
 
